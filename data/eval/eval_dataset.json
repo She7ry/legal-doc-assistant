@@ -1,0 +1,54 @@
+{
+  "version": "0.1",
+  "description": "Starter RAG evaluation dataset with one synthetic legal PDF.",
+  "documents": [
+    {
+      "file_name": "sample_supply_contract.pdf",
+      "path": "data/eval/fixtures/sample_supply_contract.pdf",
+      "file_id": "2781583738962b6320c7786b85b20632cf5658fe9cef430e1845f12eb1f11e14"
+    }
+  ],
+  "cases": [
+    {
+      "id": "eval_001_liquidated_damages_cap",
+      "question": "What is the cap on liquidated damages for late delivery?",
+      "answer_type": "answerable",
+      "gold_answer": "Liquidated damages are capped at 10% of the delayed shipment value.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 1,
+          "chunk_id": 1,
+          "marker": "EVAL-C-12.2"
+        }
+      ],
+      "required_answer_terms": [
+        "10%",
+        "delayed shipment value"
+      ],
+      "forbidden_answer_terms": [
+        "20%",
+        "contract total value"
+      ]
+    },
+    {
+      "id": "eval_002_cyber_insurance_refusal",
+      "question": "Does the agreement require Supplier to buy cybersecurity insurance?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed document does not state a cybersecurity insurance requirement.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "relevant text was not found",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    }
+  ]
+}

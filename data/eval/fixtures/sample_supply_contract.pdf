@@ -1,0 +1,107 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 847 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+(ACME SUPPLY AGREEMENT) Tj
+0 -15 Td
+(Document ID: EVAL-CONTRACT-001) Tj
+0 -15 Td
+() Tj
+0 -15 Td
+(Section 1. Parties) Tj
+0 -15 Td
+(Buyer: Northwind Retail LLC. Supplier: Blue Harbor Components Ltd.) Tj
+0 -15 Td
+() Tj
+0 -15 Td
+(Section 2. Delivery) Tj
+0 -15 Td
+(Supplier must deliver conforming goods to Buyer's Shanghai warehouse on or before the) Tj
+0 -15 Td
+(delivery date stated in each purchase order.) Tj
+0 -15 Td
+(A delivery is late if the goods arrive more than five business days after the applicable) Tj
+0 -15 Td
+(delivery date.) Tj
+0 -15 Td
+() Tj
+0 -15 Td
+(Section 5. Payment) Tj
+0 -15 Td
+(Buyer must pay undisputed invoices within 30 calendar days after receiving a valid invoice.) Tj
+0 -15 Td
+(Disputed invoice amounts may be withheld until the dispute is resolved in writing by both) Tj
+0 -15 Td
+(parties.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 883 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+(ACME SUPPLY AGREEMENT) Tj
+0 -15 Td
+(Document ID: EVAL-CONTRACT-001) Tj
+0 -15 Td
+() Tj
+0 -15 Td
+(Section 12.2 Liquidated Damages) Tj
+0 -15 Td
+(Marker: EVAL-C-12.2.) Tj
+0 -15 Td
+(If Supplier delivers goods more than five business days late, Supplier must pay liquidated) Tj
+0 -15 Td
+(damages equal to 0.5% of the delayed shipment value for each day of delay.) Tj
+0 -15 Td
+(Liquidated damages are capped at 10% of the delayed shipment value.) Tj
+0 -15 Td
+(Payment of liquidated damages does not limit Buyer's right to reject nonconforming goods.) Tj
+0 -15 Td
+() Tj
+0 -15 Td
+(Section 14. Confidentiality) Tj
+0 -15 Td
+(Each party must protect the other party's confidential information using reasonable care and) Tj
+0 -15 Td
+(may use it only to perform this agreement.) Tj
+0 -15 Td
+(The confidentiality obligation survives for three years after termination.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001145 00000 n 
+0000001271 00000 n 
+0000002205 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2275
+%%EOF
