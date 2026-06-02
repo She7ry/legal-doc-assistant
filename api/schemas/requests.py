@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    chat_history: list[ChatMessage] = Field(default_factory=list)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    task_id: str | None = Field(default=None, max_length=128)
+
+
+class MemoryCreateRequest(BaseModel):
+    scope: str = Field(default="user", pattern="^(user|org|session|task)$")
+    type: str = Field(default="preference", pattern="^(preference|fact|task_state|feedback|correction)$")
+    key: str = Field(..., min_length=1, max_length=120)
+    content: str = Field(..., min_length=1, max_length=2000)
+    value: dict[str, Any] | None = None
+    source: str = Field(default="explicit", pattern="^(explicit|inferred|imported|system_generated)$")
+    confidence: float = Field(default=0.95, ge=0, le=1)
+    expires_at: datetime | None = None
+    visibility: str = Field(default="private", pattern="^(private|team|org)$")
+
+
+class MemoryUpdateRequest(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    value: dict[str, Any] | None = None
+    source: str | None = Field(default=None, pattern="^(explicit|inferred|imported|system_generated)$")
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    expires_at: datetime | None = None
+    visibility: str | None = Field(default=None, pattern="^(private|team|org)$")
+    status: str | None = Field(default=None, pattern="^(active|stale|deleted)$")
+
+
+class ClauseReviewRequest(BaseModel):
+    clause_type: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        examples=["termination clause", "non-compete", "late payment penalty"],
+    )
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class ConflictCheckRequest(BaseModel):
+    contract_query: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Search query to retrieve contract excerpts",
+        examples=["payment terms and obligations"],
+    )
+    policy_query: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Search query to retrieve policy excerpts",
+        examples=["payment policy and compliance requirements"],
+    )
+    top_k: int = Field(default=5, ge=1, le=20)
