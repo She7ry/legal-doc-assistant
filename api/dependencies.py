@@ -15,6 +15,7 @@ from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.vector_store import MemoryVectorStore
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.services.qa_service import DocumentQAService
+from doc_assistant.services.tool_calling_service import ToolCallingChatService
 
 _TENANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,126}$")
@@ -105,6 +106,11 @@ def _qa_service(tenant_id: str | None = None) -> DocumentQAService:
     )
 
 
+@lru_cache(maxsize=128)
+def _tool_calling_service(tenant_id: str | None = None) -> ToolCallingChatService:
+    return ToolCallingChatService(_qa_service(tenant_id))
+
+
 TenantIdDep = Annotated[str, Depends(get_tenant_id)]
 UserIdDep = Annotated[str, Depends(get_user_id)]
 
@@ -117,6 +123,10 @@ def get_qa_service(tenant_id: TenantIdDep) -> DocumentQAService:
     return _qa_service(tenant_id)
 
 
+def get_tool_calling_service(tenant_id: TenantIdDep) -> ToolCallingChatService:
+    return _tool_calling_service(tenant_id)
+
+
 def get_memory_service(tenant_id: TenantIdDep) -> MemoryService:
     return _memory_service(tenant_id)
 
@@ -127,5 +137,6 @@ def get_ingest_job_store() -> IngestJobStore:
 
 VectorStoreDep = Annotated[DocumentVectorStore, Depends(get_vector_store)]
 QAServiceDep = Annotated[DocumentQAService, Depends(get_qa_service)]
+ToolCallingServiceDep = Annotated[ToolCallingChatService, Depends(get_tool_calling_service)]
 MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 JobStoreDep = Annotated[IngestJobStore, Depends(get_ingest_job_store)]

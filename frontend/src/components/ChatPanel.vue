@@ -73,7 +73,7 @@ import { nextTick, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { Delete, Promotion } from "@element-plus/icons-vue";
 
-import { askQuestion } from "../api/chat";
+import { askQuestionStream } from "../api/chat";
 import { formatApiError } from "../api/http";
 import type { ChatHistoryMessage, Citation, MemoryUsage } from "../api/types";
 import CitationList from "./CitationList.vue";
@@ -112,29 +112,64 @@ async function send() {
     citations: [],
     memoriesUsed: [],
   });
+  const assistantId = crypto.randomUUID();
+  messages.value.push({
+    id: assistantId,
+    role: "assistant",
+    content: "",
+    citations: [],
+    memoriesUsed: [],
+  });
   question.value = "";
   loading.value = true;
   await scrollToBottom();
 
   try {
-    const answer = await askQuestion({
-      question: text,
-      chat_history: history,
-      conversation_id: conversationId.value,
-    });
-    messages.value.push({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: answer.content,
-      citations: answer.citations,
-      memoriesUsed: answer.memories_used ?? [],
-    });
+    await askQuestionStream(
+      {
+        question: text,
+        chat_history: history,
+        conversation_id: conversationId.value,
+      },
+      {
+        onMetadata(metadata) {
+          const message = findMessage(assistantId);
+          if (message) {
+            message.citations = metadata.citations;
+            message.memoriesUsed = metadata.memories_used ?? [];
+          }
+        },
+        onDelta(delta) {
+          const message = findMessage(assistantId);
+          if (message) {
+            message.content += delta;
+          }
+          void scrollToBottom();
+        },
+        onDone(answer) {
+          const message = findMessage(assistantId);
+          if (message) {
+            message.content = answer.content;
+            message.citations = answer.citations;
+            message.memoriesUsed = answer.memories_used ?? [];
+          }
+        },
+      },
+    );
     await scrollToBottom();
   } catch (error) {
+    const assistantMessage = findMessage(assistantId);
+    if (!assistantMessage?.content) {
+      messages.value = messages.value.filter((message) => message.id !== assistantId);
+    }
     ElMessage.error(formatApiError(error));
   } finally {
     loading.value = false;
   }
+}
+
+function findMessage(id: string): UiMessage | undefined {
+  return messages.value.find((message) => message.id === id);
 }
 
 function clearMessages() {

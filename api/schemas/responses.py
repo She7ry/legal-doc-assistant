@@ -56,6 +56,49 @@ class AskResponse(BaseModel):
     memories_used: list[MemoryUsageOut] = Field(default_factory=list)
 
 
+class WebSourceOut(BaseModel):
+    source_id: str
+    title: str
+    url: str
+    snippet: str = ""
+    published_at: str | None = None
+    source: str | None = None
+
+    @classmethod
+    def from_source(cls, source) -> "WebSourceOut":
+        return cls(
+            source_id=source.source_id,
+            title=source.title,
+            url=source.url,
+            snippet=source.snippet,
+            published_at=source.published_at,
+            source=source.source,
+        )
+
+
+class ToolCallOut(BaseModel):
+    tool_call_id: str
+    name: str
+    arguments: dict[str, Any]
+    result: dict[str, Any]
+
+    @classmethod
+    def from_trace(cls, trace) -> "ToolCallOut":
+        return cls(
+            tool_call_id=trace.tool_call_id,
+            name=trace.name,
+            arguments=trace.arguments,
+            result=trace.result,
+        )
+
+
+class ToolChatResponse(BaseModel):
+    content: str
+    citations: list[CitationOut]
+    web_sources: list[WebSourceOut] = Field(default_factory=list)
+    tool_calls: list[ToolCallOut] = Field(default_factory=list)
+
+
 class ClauseReviewResponse(BaseModel):
     content: str
     citations: list[CitationOut]
