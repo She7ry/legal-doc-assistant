@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
+
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
 
 from doc_assistant.config.settings import settings
-from doc_assistant.memory.schemas import MemoryCandidate
+from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.models.language_model import build_chat_model
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.utils.prompt_loader import load_prompt
+
+
+@dataclass(frozen=True)
+class PreparedQAAnswer:
+    prompt: str
+    citations: list[Citation]
+    memories_used: list[MemoryUsage]
+    user_id: str | None
+    conversation_id: str | None
+    user_message_recorded: bool
 
 
 class DocumentQAService:
@@ -37,6 +50,29 @@ class DocumentQAService:
         conversation_id: str | None = None,
         task_id: str | None = None,
     ) -> QAAnswer:
+        prepared = self.prepare_answer(
+            question,
+            chat_history=chat_history,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+        )
+        content = self._invoke_chat(prepared.prompt)
+        self.record_prepared_answer(prepared, content)
+        return QAAnswer(
+            content=content,
+            citations=prepared.citations,
+            memories_used=prepared.memories_used,
+        )
+
+    def prepare_answer(
+        self,
+        question: str,
+        chat_history: list[dict[str, object]] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+    ) -> PreparedQAAnswer:
         resolved_conversation_id = conversation_id
         memory_candidates: list[MemoryCandidate] = []
         memory_context = "No relevant user memory."
@@ -89,19 +125,19 @@ class DocumentQAService:
                 chat_history=chat_history_text,
                 user_memory=memory_context,
             )
-            content = self._invoke_chat(prompt)
-            self._record_assistant_message(
-                user_id=user_id,
-                conversation_id=resolved_conversation_id,
-                content=content,
-                user_message_recorded=user_message_recorded,
-            )
             memories_used = (
                 self.memory_service.usages_from_candidates(memory_candidates)
                 if self.memory_service
                 else []
             )
-            return QAAnswer(content=content, citations=[], memories_used=memories_used)
+            return PreparedQAAnswer(
+                prompt=prompt,
+                citations=[],
+                memories_used=memories_used,
+                user_id=user_id,
+                conversation_id=resolved_conversation_id,
+                user_message_recorded=user_message_recorded,
+            )
 
         context, citations = self._format_context(documents)
         prompt = self.prompt.format(
@@ -110,19 +146,30 @@ class DocumentQAService:
             chat_history=chat_history_text,
             user_memory=memory_context,
         )
-        content = self._invoke_chat(prompt)
-        self._record_assistant_message(
-            user_id=user_id,
-            conversation_id=resolved_conversation_id,
-            content=content,
-            user_message_recorded=user_message_recorded,
-        )
         memories_used = (
             self.memory_service.usages_from_candidates(memory_candidates)
             if self.memory_service
             else []
         )
-        return QAAnswer(content=content, citations=citations, memories_used=memories_used)
+        return PreparedQAAnswer(
+            prompt=prompt,
+            citations=citations,
+            memories_used=memories_used,
+            user_id=user_id,
+            conversation_id=resolved_conversation_id,
+            user_message_recorded=user_message_recorded,
+        )
+
+    def stream_prepared_answer(self, prepared: PreparedQAAnswer) -> Iterator[str]:
+        yield from self._stream_chat(prepared.prompt)
+
+    def record_prepared_answer(self, prepared: PreparedQAAnswer, content: str) -> None:
+        self._record_assistant_message(
+            user_id=prepared.user_id,
+            conversation_id=prepared.conversation_id,
+            content=content,
+            user_message_recorded=prepared.user_message_recorded,
+        )
 
     def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
         """Search indexed documents for a specific clause type and assess risk level."""
@@ -199,6 +246,17 @@ class DocumentQAService:
         response = self.chat_model.invoke(prompt)
         content = getattr(response, "content", response)
         return str(content)
+
+    def _stream_chat(self, prompt: str) -> Iterator[str]:
+        stream = getattr(self.chat_model, "stream", None)
+        if callable(stream):
+            for chunk in stream(prompt):
+                content = getattr(chunk, "content", chunk)
+                if content:
+                    yield str(content)
+            return
+
+        yield self._invoke_chat(prompt)
 
     def _record_assistant_message(
         self,

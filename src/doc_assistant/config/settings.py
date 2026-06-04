@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,9 +34,32 @@ def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _json_object_env(name: str) -> dict[str, Any]:
+    value = os.getenv(name)
+    if not value:
+        return {}
+
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a valid JSON object.") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"{name} must be a valid JSON object.")
+    return data
+
+
 def _path_env(name: str, default: Path) -> Path:
     value = os.getenv(name)
     return Path(value) if value else default
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return default
 
 
 @dataclass(frozen=True)
@@ -47,14 +72,19 @@ class Settings:
         PROJECT_ROOT / "data" / "memory.sqlite3",
     )
     dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "")
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     collection_name: str = os.getenv("DOC_ASSISTANT_COLLECTION", "legal_documents")
     memory_collection_name: str = os.getenv("DOC_ASSISTANT_MEMORY_COLLECTION", "user_memories")
+    chat_provider: str = os.getenv("DOC_ASSISTANT_CHAT_PROVIDER", "dashscope")
     chat_model_name: str = os.getenv("DOC_ASSISTANT_CHAT_MODEL", "qwen3.5-flash")
     chat_api: str = os.getenv("DOC_ASSISTANT_CHAT_API", "compatible")
-    chat_base_url: str = os.getenv(
-        "DOC_ASSISTANT_CHAT_BASE_URL",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    chat_api_key: str = _first_env("DOC_ASSISTANT_CHAT_API_KEY")
+    chat_base_url: str = os.getenv("DOC_ASSISTANT_CHAT_BASE_URL", "")
+    chat_extra_body: dict[str, Any] = field(
+        default_factory=lambda: _json_object_env("DOC_ASSISTANT_CHAT_EXTRA_BODY")
     )
+    embedding_provider: str = os.getenv("DOC_ASSISTANT_EMBEDDING_PROVIDER", "dashscope")
+    embedding_api_key: str = _first_env("DOC_ASSISTANT_EMBEDDING_API_KEY", "DASHSCOPE_API_KEY")
     embedding_model_name: str = os.getenv("DOC_ASSISTANT_EMBEDDING_MODEL", "text-embedding-v3")
     enable_thinking: bool = _bool_env("DOC_ASSISTANT_ENABLE_THINKING", False)
     temperature: float = _float_env("DOC_ASSISTANT_TEMPERATURE", 0.0)
@@ -63,6 +93,17 @@ class Settings:
     memory_min_confidence: float = _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55)
     chunk_size: int = _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900)
     chunk_overlap: int = _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120)
+    tool_call_max_iterations: int = _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6)
+    web_search_enabled: bool = _bool_env("DOC_ASSISTANT_WEB_SEARCH_ENABLED", False)
+    web_search_provider: str = os.getenv("DOC_ASSISTANT_WEB_SEARCH_PROVIDER", "duckduckgo")
+    web_search_api_key: str = _first_env(
+        "DOC_ASSISTANT_WEB_SEARCH_API_KEY",
+        "BRAVE_SEARCH_API_KEY",
+        "BING_SEARCH_API_KEY",
+    )
+    web_search_base_url: str = os.getenv("DOC_ASSISTANT_WEB_SEARCH_BASE_URL", "")
+    web_search_max_results: int = _int_env("DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS", 5)
+    web_search_timeout_seconds: int = _int_env("DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS", 10)
     api_keys: tuple[str, ...] = _csv_env("DOC_ASSISTANT_API_KEYS")
     cors_origins: tuple[str, ...] = _csv_env(
         "DOC_ASSISTANT_CORS_ORIGINS",

@@ -60,21 +60,102 @@ python -m pip install -e .
 Copy-Item .env.example .env
 ```
 
-Then edit `.env` and set `DASHSCOPE_API_KEY`.
+Then edit `.env` and set the chat and embedding provider keys.
 
-By default, chat uses DashScope's OpenAI-compatible endpoint:
+By default, chat uses DashScope's OpenAI-compatible endpoint. The generic
+`DOC_ASSISTANT_CHAT_API_KEY` is preferred, while `DASHSCOPE_API_KEY` is still
+accepted for backward compatibility:
 
 ```env
+DOC_ASSISTANT_CHAT_PROVIDER=dashscope
+DOC_ASSISTANT_CHAT_API_KEY=<your-dashscope-key>
 DOC_ASSISTANT_CHAT_MODEL=qwen3.5-flash
 DOC_ASSISTANT_CHAT_API=compatible
-DOC_ASSISTANT_CHAT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DOC_ASSISTANT_CHAT_BASE_URL=
 DOC_ASSISTANT_ENABLE_THINKING=false
+
+DOC_ASSISTANT_EMBEDDING_PROVIDER=dashscope
+DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
+DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
 ```
 
 This keeps Qwen3.5 models on the supported `chat/completions` path instead of
 DashScope's older text-generation endpoint, which returns `url error` for
 Qwen3.5 models. Set `DOC_ASSISTANT_ENABLE_THINKING=true` if you want to use
 thinking mode and are comfortable with the extra token usage.
+
+To switch chat generation to DeepSeek, change only the chat provider, key, and
+model. DeepSeek's official OpenAI-compatible base URL is
+`https://api.deepseek.com`; leaving `DOC_ASSISTANT_CHAT_BASE_URL` empty uses
+that provider default. Check the
+[DeepSeek API docs](https://api-docs.deepseek.com/) for current model names.
+
+```env
+DOC_ASSISTANT_CHAT_PROVIDER=deepseek
+DOC_ASSISTANT_CHAT_API_KEY=<your-deepseek-key>
+DOC_ASSISTANT_CHAT_MODEL=deepseek-v4-flash
+DOC_ASSISTANT_CHAT_API=compatible
+DOC_ASSISTANT_CHAT_BASE_URL=
+
+# Keep retrieval embeddings separate. DeepSeek chat can run while embeddings
+# remain on DashScope.
+DOC_ASSISTANT_EMBEDDING_PROVIDER=dashscope
+DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
+DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
+```
+
+For another OpenAI-compatible provider, use:
+
+```env
+DOC_ASSISTANT_CHAT_PROVIDER=openai-compatible
+DOC_ASSISTANT_CHAT_API_KEY=<provider-key>
+DOC_ASSISTANT_CHAT_MODEL=<provider-model>
+DOC_ASSISTANT_CHAT_BASE_URL=https://provider.example/v1
+```
+
+Provider-specific request fields can be passed as JSON with
+`DOC_ASSISTANT_CHAT_EXTRA_BODY`, for example:
+
+```env
+DOC_ASSISTANT_CHAT_EXTRA_BODY={"reasoning_effort":"high"}
+```
+
+Tool calling settings:
+
+```env
+DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS=6
+
+# Disabled by default so sensitive document text is not sent to public search.
+DOC_ASSISTANT_WEB_SEARCH_ENABLED=false
+DOC_ASSISTANT_WEB_SEARCH_PROVIDER=duckduckgo
+DOC_ASSISTANT_WEB_SEARCH_API_KEY=
+DOC_ASSISTANT_WEB_SEARCH_BASE_URL=
+DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
+DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
+```
+
+`POST /api/v1/chat/tools` lets the model call controlled tools while answering:
+
+- `search_documents`: searches uploaded/indexed documents and returns `[D#]` sources.
+- `web_search`: searches public web pages and returns `[W#]` sources.
+
+Web search requires both `DOC_ASSISTANT_WEB_SEARCH_ENABLED=true` and
+`enable_web_search=true` in the request body. Supported web providers are
+`duckduckgo`, `brave`, and `bing`; Brave and Bing require
+`DOC_ASSISTANT_WEB_SEARCH_API_KEY`.
+
+Example tool-calling request:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/api/v1/chat/tools" `
+  -ContentType "application/json" `
+  -Body '{
+    "question": "结合最近公开新闻和已上传合同，分析供应商履约风险。",
+    "enable_web_search": true,
+    "max_tool_iterations": 6
+  }'
+```
 
 Memory settings:
 
@@ -165,6 +246,7 @@ VITE_API_BASE_URL=http://localhost:8000
 | GET | `/api/v1/documents/jobs/{job_id}` | Get document ingest job status |
 | GET | `/api/v1/documents` | List indexed documents |
 | POST | `/api/v1/chat/ask` | Ask a question with optional chat history |
+| POST | `/api/v1/chat/tools` | Ask with model-driven `search_documents` and optional `web_search` tools |
 | GET | `/api/v1/memories` | List active user memories |
 | POST | `/api/v1/memories` | Create a user memory |
 | PATCH | `/api/v1/memories/{memory_id}` | Update a user memory |
@@ -194,7 +276,8 @@ Generate the starter legal PDF fixture and eval dataset:
 .\.venv\Scripts\python.exe scripts\generate_eval_fixtures.py
 ```
 
-Run the RAG evaluation after `DASHSCOPE_API_KEY` is configured:
+Run the RAG evaluation after the configured chat and embedding provider keys
+are set:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_rag_eval.py

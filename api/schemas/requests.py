@@ -18,6 +18,11 @@ class AskRequest(BaseModel):
     task_id: str | None = Field(default=None, max_length=128)
 
 
+class ToolChatRequest(AskRequest):
+    enable_web_search: bool = False
+    max_tool_iterations: int | None = Field(default=None, ge=1, le=10)
+
+
 class MemoryCreateRequest(BaseModel):
     scope: str = Field(default="user", pattern="^(user|org|session|task)$")
     type: str = Field(default="preference", pattern="^(preference|fact|task_state|feedback|correction)$")

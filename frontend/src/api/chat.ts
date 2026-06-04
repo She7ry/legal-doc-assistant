@@ -1,5 +1,7 @@
 import { apiRequest } from "./http";
-import type { AnswerResponse, AskRequest } from "./types";
+import { ApiError } from "./http";
+import { readRuntimeSettings } from "../config/runtime";
+import type { AnswerResponse, AskRequest, Citation, MemoryUsage } from "./types";
 
 export function askQuestion(body: AskRequest): Promise<AnswerResponse> {
   return apiRequest<AnswerResponse>({
@@ -7,4 +9,197 @@ export function askQuestion(body: AskRequest): Promise<AnswerResponse> {
     url: "/api/v1/chat/ask",
     data: body,
   });
+}
+
+export interface StreamMetadata {
+  citations: Citation[];
+  memories_used?: MemoryUsage[];
+}
+
+export interface StreamDelta {
+  content: string;
+}
+
+export interface StreamHandlers {
+  onMetadata?: (metadata: StreamMetadata) => void;
+  onDelta?: (delta: string) => void;
+  onDone?: (answer: AnswerResponse) => void;
+}
+
+export async function askQuestionStream(
+  body: AskRequest,
+  handlers: StreamHandlers = {},
+): Promise<AnswerResponse> {
+  const settings = readRuntimeSettings();
+  const apiBaseUrl = settings.apiBaseUrl.replace(/\/+$/, "");
+  const response = await fetch(`${apiBaseUrl}/api/v1/chat/ask/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
+      ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
+      ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw await toFetchApiError(response);
+  }
+  if (!response.body) {
+    throw new ApiError("当前浏览器不支持流式响应。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer: AnswerResponse = { content: "", citations: [], memories_used: [] };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const parsed = parseSseBuffer(buffer);
+    buffer = parsed.rest;
+    for (const event of parsed.events) {
+      answer = handleStreamEvent(event, answer, handlers);
+    }
+  }
+
+  buffer += decoder.decode();
+  const parsed = parseSseBuffer(`${buffer}\n\n`);
+  for (const event of parsed.events) {
+    answer = handleStreamEvent(event, answer, handlers);
+  }
+
+  return answer;
+}
+
+interface SseEvent {
+  event: string;
+  data: unknown;
+}
+
+function parseSseBuffer(buffer: string): { events: SseEvent[]; rest: string } {
+  const events: SseEvent[] = [];
+  let rest = buffer;
+  let boundary = rest.indexOf("\n\n");
+
+  while (boundary >= 0) {
+    const block = rest.slice(0, boundary);
+    rest = rest.slice(boundary + 2);
+    boundary = rest.indexOf("\n\n");
+
+    const parsed = parseSseBlock(block);
+    if (parsed) {
+      events.push(parsed);
+    }
+  }
+
+  return { events, rest };
+}
+
+function parseSseBlock(block: string): SseEvent | null {
+  let event = "message";
+  const dataLines: string[] = [];
+
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+
+  if (!dataLines.length) {
+    return null;
+  }
+
+  const dataText = dataLines.join("\n");
+  return {
+    event,
+    data: JSON.parse(dataText),
+  };
+}
+
+function handleStreamEvent(
+  event: SseEvent,
+  answer: AnswerResponse,
+  handlers: StreamHandlers,
+): AnswerResponse {
+  if (event.event === "metadata") {
+    const metadata = event.data as StreamMetadata;
+    answer = {
+      ...answer,
+      citations: metadata.citations,
+      memories_used: metadata.memories_used ?? [],
+    };
+    handlers.onMetadata?.(metadata);
+    return answer;
+  }
+
+  if (event.event === "delta") {
+    const delta = event.data as StreamDelta;
+    answer = { ...answer, content: answer.content + delta.content };
+    handlers.onDelta?.(delta.content);
+    return answer;
+  }
+
+  if (event.event === "done") {
+    answer = event.data as AnswerResponse;
+    handlers.onDone?.(answer);
+    return answer;
+  }
+
+  if (event.event === "error") {
+    const payload = event.data as { code?: string; detail?: unknown };
+    throw new ApiError(String(payload.detail || "流式请求失败。"), {
+      code: payload.code,
+      detail: payload.detail,
+    });
+  }
+
+  return answer;
+}
+
+async function toFetchApiError(response: Response): Promise<ApiError> {
+  let payload: { code?: string; detail?: unknown; request_id?: string } | undefined;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+
+  return new ApiError(formatDetail(payload?.detail) || response.statusText || "请求失败。", {
+    status: response.status,
+    code: payload?.code,
+    requestId: payload?.request_id,
+    detail: payload?.detail,
+  });
+}
+
+function formatDetail(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "msg" in item) {
+          return String(item.msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+  return "";
 }
