@@ -23,6 +23,8 @@ export interface AnswerResponse {
   content: string;
   citations: Citation[];
   memories_used?: MemoryUsage[];
+  confidence?: string | null;
+  guard_warnings?: string[];
 }
 
 export interface MemoryUsage {
@@ -52,6 +54,12 @@ export interface IngestResult {
   file_name: string;
   document_count: number;
   chunk_count: number;
+  document_key: string;
+  document_version: number;
+  file_extension: string;
+  page_count: number | null;
+  skipped: boolean;
+  warnings: string[];
 }
 
 export type IngestJobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -60,16 +68,27 @@ export interface IngestJobResponse {
   job_id: string;
   status: IngestJobStatus;
   file_name: string;
+  stage: string;
+  progress: number;
   submitted_at: string;
   started_at: string | null;
   completed_at: string | null;
   result: IngestResult | null;
   error: string | null;
+  warnings: string[];
 }
 
 export interface DocumentInfo {
   file_name: string;
   file_id: string;
+  document_key: string;
+  document_version: number;
+  file_extension: string;
+  document_count: number;
+  chunk_count: number;
+  page_count: number | null;
+  indexed_at: string | null;
+  warning_count: number;
 }
 
 export interface DocumentListResponse {

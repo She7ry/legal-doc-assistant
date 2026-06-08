@@ -16,10 +16,10 @@ class EmptyVectorStore:
 
 
 class StreamingChatModel:
-    def invoke(self, prompt: str) -> str:
-        return "Hello!"
+    def invoke_messages(self, messages):
+        return {"content": "Hello!"}
 
-    def stream(self, prompt: str):
+    def stream(self, prompt=None, *, messages=None):
         yield "Hel"
         yield "lo!"
 
@@ -155,6 +155,7 @@ def test_openai_compatible_model_streams_openai_style_chunks(monkeypatch) -> Non
     )
 
     assert list(model.stream("prompt")) == ["Hel", "lo"]
+    assert calls[0]["json"]["messages"] == [{"role": "user", "content": "prompt"}]
     assert calls[0]["json"]["stream"] is True
     assert calls[0]["stream"] is True
     assert calls[0]["json"]["enable_thinking"] is False

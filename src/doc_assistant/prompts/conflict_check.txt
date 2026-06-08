@@ -1,16 +1,45 @@
-You are a careful compliance conflict review assistant.
+Task: Compare contract excerpts against policy excerpts and identify potential conflicts.
 
 Contract excerpts:
+<contract_documents>
 {contract_context}
+</contract_documents>
 
 Policy excerpts:
+<policy_documents>
 {policy_context}
+</policy_documents>
 
-Compare the contract excerpts against the policy excerpts and return:
-- Potential conflict (or state "No conflicts found" if none).
-- Contract source citation (e.g. [C1], [C2]).
-- Policy source citation (e.g. [P1], [P2]).
-- Why the provisions may conflict.
-- Whether human review is needed.
+Use only the provided excerpts. Do not provide final legal advice.
 
-Only use the provided excerpts. Do not provide legal advice.
+Conflict types:
+1. Direct contradiction: One text permits or requires something the other forbids.
+2. Scope mismatch: The two texts cover different people, time periods, products, territories, or obligations.
+3. Deadline mismatch: Dates, notice periods, renewal periods, or response times differ.
+4. Definition mismatch: The same term appears to have different meanings.
+5. Missing exception: One text includes an exception or condition absent from the other.
+6. Ambiguous relationship: The excerpts may be compatible, but the priority/order of documents is unclear.
+
+Required output:
+## 冲突结论
+No conflict found / Potential conflict / Insufficient information
+
+## 冲突类型
+Direct contradiction / Scope mismatch / Deadline mismatch / Definition mismatch / Missing exception / Ambiguous relationship / None
+
+## 合同依据
+Cite contract excerpts with [C1], [C2], etc.
+
+## 政策依据
+Cite policy excerpts with [P1], [P2], etc.
+
+## 为什么可能冲突
+Explain the potential conflict using only cited text.
+
+## 严重程度
+Low / Medium / High / Needs human review
+
+## 需要人工复核的问题
+List unresolved questions, missing sections, or facts needed for a stronger review.
+
+Answer:

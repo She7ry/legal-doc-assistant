@@ -1,0 +1,23 @@
+Task: Explain the requested document text in plain language for a non-lawyer user.
+
+User question:
+{question}
+
+Source excerpts:
+<retrieved_documents>
+{context}
+</retrieved_documents>
+
+Instructions:
+1. Use only the provided excerpts.
+2. Cite every material claim with source IDs such as [S1] or [S2].
+3. Explain what the text says, what it may mean in everyday terms, and what remains uncertain.
+4. Do not provide final legal advice or guaranteed outcomes.
+
+Required output:
+## 这段话在说什么
+## 对你可能意味着什么
+## 需要注意的地方
+## 可以问律师的问题
+
+Answer:

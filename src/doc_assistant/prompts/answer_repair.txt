@@ -1,0 +1,20 @@
+Task: Repair the assistant answer so it follows citation and safety rules.
+
+Validation issues found:
+{issues}
+
+Available source IDs:
+{source_ids}
+
+Original answer:
+{answer}
+
+Instructions:
+1. Fix only the issues listed above.
+2. Keep factual claims grounded in the original answer unless they were flagged as unsupported.
+3. Cite every material document-based claim with valid source IDs from the available list.
+4. Remove or soften unsupported strong legal conclusions such as guaranteed outcomes, invalidity determinations, or invented statutes or cases.
+5. If a claim cannot be supported, replace it with a clear limitation or verification step.
+6. Preserve the user's language and the required structured sections when possible.
+
+Revised answer:

@@ -3,7 +3,7 @@
     <div class="panel-heading">
       <div>
         <h2>上传文档</h2>
-        <p>PDF、TXT、Markdown</p>
+        <p>PDF、DOCX、TXT、Markdown</p>
       </div>
     </div>
 
@@ -13,14 +13,14 @@
       drag
       :auto-upload="false"
       :limit="1"
-      accept=".pdf,.txt,.md,.markdown"
+      accept=".pdf,.docx,.txt,.md,.markdown"
       :on-change="handleFileChange"
       :on-remove="handleFileRemove"
     >
       <el-icon class="upload-drop__icon"><UploadFilled /></el-icon>
       <div class="el-upload__text">拖拽文件到此处，或点击选择</div>
       <template #tip>
-        <div class="el-upload__tip">单文件上传，大小限制由后端配置控制。</div>
+        <div class="el-upload__tip">支持 PDF、DOCX、TXT、MD、Markdown；单文件上传。</div>
       </template>
     </el-upload>
 
@@ -55,9 +55,16 @@ const emit = defineEmits<{
 const uploadRef = ref<UploadInstance>();
 const selectedFile = ref<File | null>(null);
 const uploading = ref(false);
+const supportedExtensions = new Set(["pdf", "docx", "txt", "md", "markdown"]);
 
 function handleFileChange(uploadFile: UploadFile) {
-  selectedFile.value = uploadFile.raw ?? null;
+  const file = uploadFile.raw ?? null;
+  if (file && !isSupportedFile(file)) {
+    ElMessage.error("暂不支持该文件类型，请选择 PDF、DOCX、TXT 或 Markdown 文件。");
+    clearFile();
+    return;
+  }
+  selectedFile.value = file;
 }
 
 function handleFileRemove() {
@@ -67,6 +74,11 @@ function handleFileRemove() {
 function clearFile() {
   uploadRef.value?.clearFiles();
   selectedFile.value = null;
+}
+
+function isSupportedFile(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  return extension ? supportedExtensions.has(extension) : false;
 }
 
 async function submit() {

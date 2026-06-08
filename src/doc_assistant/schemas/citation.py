@@ -27,6 +27,8 @@ class QAAnswer:
     content: str
     citations: list[Citation] = field(default_factory=list)
     memories_used: list[MemoryUsage] = field(default_factory=list)
+    confidence: str | None = None
+    guard_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -35,3 +37,9 @@ class IngestResult:
     file_name: str
     document_count: int
     chunk_count: int
+    document_key: str = ""
+    document_version: int = 1
+    file_extension: str = ""
+    page_count: int | None = None
+    skipped: bool = False
+    warnings: list[str] = field(default_factory=list)

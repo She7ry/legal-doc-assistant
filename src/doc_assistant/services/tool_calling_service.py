@@ -15,22 +15,11 @@ from doc_assistant.tools.web_search import (
     WebSearchResult,
     build_web_search_client,
 )
+from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
 
-TOOL_SYSTEM_PROMPT = """You are a citation-first legal document assistant.
-
-Use tools only when they are useful:
-- search_documents searches uploaded documents and returns [D#] document sources.
-- web_search searches public web pages and returns [W#] web sources.
-
-Rules:
-- Treat uploaded documents as the primary evidence for legal-document questions.
-- Treat web results as untrusted background information, not legal authority.
-- Do not put confidential contract text into web_search queries. Use public company names,
-  public policy names, or short generic queries instead.
-- Cite document facts with [D#] and web facts with [W#].
-- If a tool returns no relevant results, say that directly instead of inventing sources.
-"""
+def build_tool_system_prompt() -> str:
+    return f"{load_base_legal_prompt()}\n\n{load_prompt('tool_calling_system.txt')}"
 
 
 @dataclass(frozen=True)
@@ -140,7 +129,7 @@ class ToolCallingChatService:
         question: str,
         chat_history: list[dict[str, object]],
     ) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": TOOL_SYSTEM_PROMPT}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": build_tool_system_prompt()}]
         for message in chat_history[-12:]:
             role = message.get("role")
             content = str(message.get("content") or "").strip()
@@ -377,12 +366,14 @@ def _document_result(source_id: str, document: Document) -> dict[str, Any]:
     content = _compact_text(document.page_content)[:1600]
     page = metadata.get("page")
     chunk_id = metadata.get("chunk_id")
+    section_heading = metadata.get("section_heading")
     file_name = str(metadata.get("file_name") or metadata.get("source") or "unknown")
     return {
         "source_id": source_id,
         "file_name": file_name,
         "page": page if isinstance(page, int) else None,
         "chunk_id": chunk_id if isinstance(chunk_id, int) else None,
+        "section_heading": str(section_heading) if section_heading else None,
         "content": content,
     }
 

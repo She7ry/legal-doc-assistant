@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
@@ -12,17 +13,19 @@ from doc_assistant.memory.service import MemoryService
 from doc_assistant.models.language_model import build_chat_model
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
-from doc_assistant.utils.prompt_loader import load_prompt
+from doc_assistant.services.answer_guard import AnswerGuardResult, validate_answer
+from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
 
 @dataclass(frozen=True)
 class PreparedQAAnswer:
-    prompt: str
+    messages: list[dict[str, str]]
     citations: list[Citation]
     memories_used: list[MemoryUsage]
     user_id: str | None
     conversation_id: str | None
     user_message_recorded: bool
+    has_retrieved_documents: bool = True
 
 
 class DocumentQAService:
@@ -35,10 +38,12 @@ class DocumentQAService:
     ) -> None:
         self.vector_store = vector_store or DocumentVectorStore()
         self.tenant_id = tenant_id or getattr(self.vector_store, "tenant_id", settings.default_tenant_id)
+        self.base_prompt = load_base_legal_prompt()
         self.prompt = PromptTemplate.from_template(load_prompt("document_qa.txt"))
         self.general_prompt = PromptTemplate.from_template(load_prompt("general_chat.txt"))
         self.clause_review_prompt = PromptTemplate.from_template(load_prompt("clause_review.txt"))
         self.conflict_check_prompt = PromptTemplate.from_template(load_prompt("conflict_check.txt"))
+        self.answer_repair_prompt = PromptTemplate.from_template(load_prompt("answer_repair.txt"))
         self.chat_model = chat_model or build_chat_model()
         self.memory_service = memory_service
 
@@ -57,12 +62,26 @@ class DocumentQAService:
             conversation_id=conversation_id,
             task_id=task_id,
         )
-        content = self._invoke_chat(prepared.prompt)
+        content = self._invoke_chat_messages(prepared.messages)
+        guard_result = validate_answer(
+            content,
+            prepared.citations,
+            has_retrieved_documents=prepared.has_retrieved_documents,
+        )
+        if guard_result.needs_repair:
+            content = self._repair_answer(content, guard_result, prepared)
+            guard_result = validate_answer(
+                content,
+                prepared.citations,
+                has_retrieved_documents=prepared.has_retrieved_documents,
+            )
         self.record_prepared_answer(prepared, content)
         return QAAnswer(
             content=content,
             citations=prepared.citations,
             memories_used=prepared.memories_used,
+            confidence=guard_result.confidence,
+            guard_warnings=guard_result.issues,
         )
 
     def prepare_answer(
@@ -119,49 +138,46 @@ class DocumentQAService:
             memory_candidates=memory_candidates,
         )
         chat_history_text = self._format_chat_history(chat_history or [])
-        if not documents:
-            prompt = self.general_prompt.format(
-                question=question,
-                chat_history=chat_history_text,
-                user_memory=memory_context,
-            )
-            memories_used = (
-                self.memory_service.usages_from_candidates(memory_candidates)
-                if self.memory_service
-                else []
-            )
-            return PreparedQAAnswer(
-                prompt=prompt,
-                citations=[],
-                memories_used=memories_used,
-                user_id=user_id,
-                conversation_id=resolved_conversation_id,
-                user_message_recorded=user_message_recorded,
-            )
-
-        context, citations = self._format_context(documents)
-        prompt = self.prompt.format(
-            question=question,
-            context=context,
-            chat_history=chat_history_text,
-            user_memory=memory_context,
-        )
         memories_used = (
             self.memory_service.usages_from_candidates(memory_candidates)
             if self.memory_service
             else []
         )
+        if not documents:
+            task_prompt = self.general_prompt.format(
+                question=question,
+                chat_history=chat_history_text,
+                user_memory=memory_context,
+            )
+            return PreparedQAAnswer(
+                messages=self._build_messages(task_prompt),
+                citations=[],
+                memories_used=memories_used,
+                user_id=user_id,
+                conversation_id=resolved_conversation_id,
+                user_message_recorded=user_message_recorded,
+                has_retrieved_documents=False,
+            )
+
+        context, citations = self._format_context(documents)
+        task_prompt = self.prompt.format(
+            question=question,
+            context=context,
+            chat_history=chat_history_text,
+            user_memory=memory_context,
+        )
         return PreparedQAAnswer(
-            prompt=prompt,
+            messages=self._build_messages(task_prompt),
             citations=citations,
             memories_used=memories_used,
             user_id=user_id,
             conversation_id=resolved_conversation_id,
             user_message_recorded=user_message_recorded,
+            has_retrieved_documents=True,
         )
 
     def stream_prepared_answer(self, prepared: PreparedQAAnswer) -> Iterator[str]:
-        yield from self._stream_chat(prepared.prompt)
+        yield from self._stream_chat_messages(prepared.messages)
 
     def record_prepared_answer(self, prepared: PreparedQAAnswer, content: str) -> None:
         self._record_assistant_message(
@@ -178,12 +194,19 @@ class DocumentQAService:
             return QAAnswer(
                 content="No relevant content found in indexed documents for the requested clause type.",
                 citations=[],
+                confidence="Low",
             )
 
         context, citations = self._format_context(documents)
-        prompt = self.clause_review_prompt.format(clause_type=clause_type, context=context)
-        content = self._invoke_chat(prompt)
-        return QAAnswer(content=content, citations=citations)
+        task_prompt = self.clause_review_prompt.format(clause_type=clause_type, context=context)
+        content = self._invoke_chat_messages(self._build_messages(task_prompt))
+        guard_result = validate_answer(content, citations, has_retrieved_documents=True)
+        return QAAnswer(
+            content=content,
+            citations=citations,
+            confidence=guard_result.confidence,
+            guard_warnings=guard_result.issues,
+        )
 
     def check_conflict(self, contract_query: str, policy_query: str, top_k: int | None = None) -> QAAnswer:
         """Retrieve contract and policy excerpts separately, then check for conflicts."""
@@ -194,17 +217,48 @@ class DocumentQAService:
             return QAAnswer(
                 content="No relevant content found in indexed documents for conflict analysis.",
                 citations=[],
+                confidence="Low",
             )
 
         contract_context, contract_citations = self._format_context_prefixed(contract_docs, prefix="C")
         policy_context, policy_citations = self._format_context_prefixed(policy_docs, prefix="P")
+        citations = contract_citations + policy_citations
 
-        prompt = self.conflict_check_prompt.format(
+        task_prompt = self.conflict_check_prompt.format(
             contract_context=contract_context or "No contract excerpts found.",
             policy_context=policy_context or "No policy excerpts found.",
         )
-        content = self._invoke_chat(prompt)
-        return QAAnswer(content=content, citations=contract_citations + policy_citations)
+        content = self._invoke_chat_messages(self._build_messages(task_prompt))
+        guard_result = validate_answer(content, citations, has_retrieved_documents=True)
+        return QAAnswer(
+            content=content,
+            citations=citations,
+            confidence=guard_result.confidence,
+            guard_warnings=guard_result.issues,
+        )
+
+    def _build_messages(self, task_prompt: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": self.base_prompt},
+            {"role": "user", "content": task_prompt},
+        ]
+
+    def _repair_answer(
+        self,
+        answer: str,
+        guard_result: AnswerGuardResult,
+        prepared: PreparedQAAnswer,
+    ) -> str:
+        if not guard_result.issues:
+            return answer
+
+        source_ids = ", ".join(citation.source_id for citation in prepared.citations) or "None"
+        repair_prompt = self.answer_repair_prompt.format(
+            issues="\n".join(f"- {issue}" for issue in guard_result.issues),
+            source_ids=source_ids,
+            answer=answer,
+        )
+        return self._invoke_chat_messages(self._build_messages(repair_prompt))
 
     def _format_context(self, documents: list[Document]) -> tuple[str, list[Citation]]:
         return self._format_context_prefixed(documents, prefix="S")
@@ -221,10 +275,12 @@ class DocumentQAService:
             text = self._compact_text(document.page_content)
             page = metadata.get("page")
             chunk_id = metadata.get("chunk_id")
+            section_heading = metadata.get("section_heading")
             file_name = metadata.get("file_name") or metadata.get("source") or "unknown"
+            section_part = f"; section={section_heading}" if section_heading else ""
 
             context_parts.append(
-                f"[{source_id}] file={file_name}; page={page}; chunk={chunk_id}\n{text}"
+                f"[{source_id}] file={file_name}; page={page}; chunk={chunk_id}{section_part}\n{text}"
             )
             citations.append(
                 Citation(
@@ -242,21 +298,47 @@ class DocumentQAService:
     def _compact_text(text: str) -> str:
         return " ".join(text.split())
 
-    def _invoke_chat(self, prompt: str) -> str:
-        response = self.chat_model.invoke(prompt)
-        content = getattr(response, "content", response)
-        return str(content)
+    def _invoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
+        invoke_messages = getattr(self.chat_model, "invoke_messages", None)
+        if callable(invoke_messages):
+            response = invoke_messages(messages)
+            return str(response.get("content") or "")
 
-    def _stream_chat(self, prompt: str) -> Iterator[str]:
+        invoke = getattr(self.chat_model, "invoke", None)
+        if callable(invoke):
+            try:
+                response = invoke(messages=messages)
+            except TypeError:
+                response = invoke(self._messages_to_prompt(messages))
+            content = getattr(response, "content", response)
+            return str(content)
+
+        raise ValueError("The configured chat model does not support message-based chat.")
+
+    def _stream_chat_messages(self, messages: list[dict[str, str]]) -> Iterator[str]:
         stream = getattr(self.chat_model, "stream", None)
         if callable(stream):
-            for chunk in stream(prompt):
+            try:
+                chunks = stream(messages=messages)
+            except TypeError:
+                chunks = stream(self._messages_to_prompt(messages))
+            for chunk in chunks:
                 content = getattr(chunk, "content", chunk)
                 if content:
                     yield str(content)
             return
 
-        yield self._invoke_chat(prompt)
+        yield self._invoke_chat_messages(messages)
+
+    @staticmethod
+    def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
+        parts = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = str(message.get("content") or "").strip()
+            if content:
+                parts.append(f"{role.upper()}:\n{content}")
+        return "\n\n".join(parts)
 
     def _record_assistant_message(
         self,

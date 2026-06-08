@@ -42,12 +42,48 @@
         "not provided",
         "cannot determine",
         "relevant text was not found",
+        "did not find enough relevant text",
         "do not contain",
         "does not contain",
         "do not specify",
         "does not specify",
         "do not mention",
         "does not mention"
+      ]
+    },
+    {
+      "id": "eval_003_notice_period",
+      "question": "How much notice is required before termination for convenience?",
+      "answer_type": "answerable",
+      "gold_answer": "Either party may terminate for convenience with 30 days' written notice.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-C-8.1"
+        }
+      ],
+      "required_answer_terms": [
+        "30 days",
+        "written notice"
+      ],
+      "forbidden_answer_terms": [
+        "60 days",
+        "90 days"
+      ]
+    },
+    {
+      "id": "eval_004_governing_law_refusal",
+      "question": "Which state's employment law governs wrongful termination claims for employees?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed supply contract does not address employment wrongful termination law.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "did not find enough relevant text",
+        "cannot determine",
+        "not enough information"
       ]
     }
   ]

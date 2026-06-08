@@ -33,7 +33,7 @@ def ingest_document(
     job_store: JobStoreDep,
     file: UploadFile = File(...),
 ) -> IngestJobResponse:
-    """Upload a PDF, TXT, or Markdown file and queue it for indexing."""
+    """Upload a PDF, DOCX, TXT, or Markdown file and queue it for indexing."""
     suffix = f".{file.filename.rsplit('.', 1)[-1].lower()}" if file.filename and "." in file.filename else ""
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
@@ -81,20 +81,14 @@ def get_ingest_job(
 def list_documents(vector_store: VectorStoreDep) -> DocumentListResponse:
     """Return the distinct files currently indexed in the vector store."""
     try:
-        collection = vector_store.vector_store.get()
+        indexed_documents = vector_store.list_documents()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to query vector store: {exc}",
         ) from exc
 
-    metadatas = collection.get("metadatas") or []
-    seen: dict[str, str] = {}
-    for meta in metadatas:
-        if meta and "file_id" in meta and "file_name" in meta:
-            seen[meta["file_id"]] = meta["file_name"]
-
-    docs = [DocumentInfo(file_id=fid, file_name=fname) for fid, fname in seen.items()]
+    docs = [DocumentInfo(**document) for document in indexed_documents]
     return DocumentListResponse(documents=docs, total=len(docs))
 
 
@@ -122,8 +116,16 @@ def _run_ingest_job(
     job_store: IngestJobStore,
 ) -> None:
     job_store.mark_running(job_id)
+
+    def update_progress(stage: str, progress: int, warning: str | None = None) -> None:
+        job_store.update_progress(job_id, stage, progress, warning)
+
     try:
-        result = vector_store.ingest_file(saved_path, file_name=file_name)
+        result = vector_store.ingest_file(
+            saved_path,
+            file_name=file_name,
+            progress_callback=update_progress,
+        )
     except Exception as exc:
         logger.exception("Document ingest job failed", extra={"job_id": job_id})
         job_store.mark_failed(job_id, f"Failed to ingest document: {exc}")
@@ -140,15 +142,24 @@ def _job_response(record: IngestJobRecord) -> IngestJobResponse:
             file_name=record.result.file_name,
             document_count=record.result.document_count,
             chunk_count=record.result.chunk_count,
+            document_key=record.result.document_key,
+            document_version=record.result.document_version,
+            file_extension=record.result.file_extension,
+            page_count=record.result.page_count,
+            skipped=record.result.skipped,
+            warnings=record.result.warnings,
         )
 
     return IngestJobResponse(
         job_id=record.job_id,
         status=record.status.value,
         file_name=record.file_name,
+        stage=record.stage,
+        progress=record.progress,
         submitted_at=record.submitted_at,
         started_at=record.started_at,
         completed_at=record.completed_at,
         result=result,
         error=record.error,
+        warnings=record.warnings or [],
     )

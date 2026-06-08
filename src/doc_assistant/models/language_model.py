@@ -63,8 +63,12 @@ class OpenAICompatibleChatModel:
     extra_body: dict[str, Any] | None = None
     timeout: int = 120
 
-    def invoke(self, prompt: str) -> str:
-        return "".join(self.stream(prompt))
+    def invoke(self, prompt: str | list[dict[str, Any]] | None = None, *, messages: list[dict[str, Any]] | None = None) -> str:
+        if messages is not None:
+            return str(self.invoke_messages(messages).get("content") or "")
+        if isinstance(prompt, list):
+            return str(self.invoke_messages(prompt).get("content") or "")
+        return "".join(self.stream(prompt or ""))
 
     def invoke_messages(
         self,
@@ -109,13 +113,16 @@ class OpenAICompatibleChatModel:
             raise RuntimeError(f"Unexpected {self.provider} chat response: {data}")
         return message
 
-    def stream(self, prompt: str) -> Iterator[str]:
+    def stream(self, prompt: str | list[dict[str, Any]] | None = None, *, messages: list[dict[str, Any]] | None = None) -> Iterator[str]:
         if not self.api_key:
             raise ValueError(f"{self.api_key_env_var} is not set for {self.provider}.")
 
+        resolved_messages = messages or (
+            prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt or ""}]
+        )
         payload: dict[str, object] = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": resolved_messages,
             "temperature": self.temperature,
             "stream": True,
         }
