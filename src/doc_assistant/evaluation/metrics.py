@@ -192,6 +192,7 @@ def _contains_refusal(text: str, case: dict[str, Any]) -> bool:
         "cannot determine",
         "not enough information",
         "relevant text was not found",
+        "did not find enough relevant text",
         "do not contain",
         "does not contain",
         "do not specify",

@@ -246,6 +246,12 @@ textarea {
   gap: 16px;
 }
 
+.job-stage {
+  margin: -8px 0 0;
+  color: #526174;
+  font-size: 13px;
+}
+
 .job-meta {
   display: grid;
   gap: 10px;

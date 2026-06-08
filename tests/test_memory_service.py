@@ -9,11 +9,11 @@ from doc_assistant.services.qa_service import DocumentQAService
 
 class CaptureChatModel:
     def __init__(self) -> None:
-        self.prompt = ""
+        self.messages: list[dict[str, str]] = []
 
-    def invoke(self, prompt: str) -> str:
-        self.prompt = prompt
-        return "The answer is grounded in the document [S1]."
+    def invoke_messages(self, messages: list[dict[str, str]]) -> dict[str, str]:
+        self.messages = messages
+        return {"content": "The answer is grounded in the document [S1]."}
 
 
 class SingleDocumentVectorStore:
@@ -149,7 +149,10 @@ def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None
 
     assert answer.citations
     assert answer.memories_used[0].key == "answer_style"
-    assert "<user_memory>" in chat_model.prompt
-    assert "Prefer concise Chinese answers." in chat_model.prompt
-    assert "<retrieved_documents>" in chat_model.prompt
-    assert "Section 4 says notices must be sent" in chat_model.prompt
+    assert chat_model.messages[0]["role"] == "system"
+    assert "legal document analysis assistant" in chat_model.messages[0]["content"].casefold()
+    assert chat_model.messages[1]["role"] == "user"
+    assert "<user_memory>" in chat_model.messages[1]["content"]
+    assert "Prefer concise Chinese answers." in chat_model.messages[1]["content"]
+    assert "<retrieved_documents>" in chat_model.messages[1]["content"]
+    assert "Section 4 says notices must be sent" in chat_model.messages[1]["content"]

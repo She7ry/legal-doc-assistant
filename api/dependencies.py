@@ -20,7 +20,7 @@ from doc_assistant.services.tool_calling_service import ToolCallingChatService
 _TENANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,126}$")
 _bearer_scheme = HTTPBearer(auto_error=False)
-_job_store = IngestJobStore()
+_job_store = IngestJobStore(settings.ingest_jobs_db_path)
 _memory_store = MemoryStore()
 
 

@@ -1,15 +1,41 @@
-You are a careful clause review assistant.
+Task: Review the provided source excerpts for the requested clause type.
 
-Review the provided source excerpts for the requested clause type: {clause_type}
+Requested clause type:
+{clause_type}
 
 Source excerpts:
+<retrieved_documents>
 {context}
+</retrieved_documents>
 
-Return:
-- Clause found or not found.
-- Short summary.
-- Risk level: Low, Medium, High, or Needs human review.
-- Source citations (e.g. [S1], [S2]) for every claim.
-- A brief reason for manual review when applicable.
+Use only the provided excerpts. Do not provide final legal advice.
 
-Do not provide legal advice.
+Risk level rubric:
+- Low: Clause is present, clear, balanced, and does not appear to create unusual burden based on the provided excerpts.
+- Medium: Clause may create obligations, costs, deadlines, limitations, unilateral discretion, ambiguity, or negotiation points.
+- High: Clause may create severe consequences, broad waiver of rights, automatic penalties, one-sided termination, unclear payment liability, non-compete/non-solicit restrictions, broad indemnity, confidentiality traps, data/privacy exposure, dispute resolution disadvantage, or major compliance risk.
+- Needs human review: The excerpts are incomplete, internally inconsistent, jurisdiction-dependent, unusually technical, or could materially affect rights or obligations.
+
+Required output:
+## Clause found?
+Yes / No / Unclear
+
+## Summary
+Plain-language explanation of the clause.
+
+## Key text relied on
+Quote or summarize the relevant document language with citations such as [S1] or [S2].
+
+## Risk level
+Low / Medium / High / Needs human review
+
+## Why this risk level
+Explain the reason using only cited text.
+
+## Negotiation or review points
+List practical issues the user may want to ask a lawyer or counterparty about.
+
+## Missing information
+List missing facts, full-document sections, jurisdiction, definitions, or schedules needed for a stronger review.
+
+Answer:

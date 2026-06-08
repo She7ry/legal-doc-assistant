@@ -12,6 +12,7 @@
 
     <div v-else class="job-state">
       <el-progress :percentage="progress" :status="progressStatus" :stroke-width="10" />
+      <p class="job-stage">{{ stageLabel }}</p>
 
       <dl class="job-meta">
         <div>
@@ -26,6 +27,10 @@
           <dt>完成时间</dt>
           <dd>{{ formatDate(current.completed_at) }}</dd>
         </div>
+        <div>
+          <dt>进度</dt>
+          <dd>{{ current.progress }}%</dd>
+        </div>
       </dl>
 
       <el-alert
@@ -36,9 +41,19 @@
         show-icon
       />
 
+      <el-alert
+        v-if="warningText"
+        type="warning"
+        :title="warningText"
+        :closable="false"
+        show-icon
+      />
+
       <div v-if="current.result" class="job-result">
+        <el-statistic title="版本" :value="current.result.document_version" />
         <el-statistic title="文档数" :value="current.result.document_count" />
         <el-statistic title="分块数" :value="current.result.chunk_count" />
+        <el-statistic v-if="current.result.page_count !== null" title="页数" :value="current.result.page_count" />
       </div>
     </div>
   </section>
@@ -70,13 +85,30 @@ const progress = computed(() => {
   if (!current.value) {
     return 0;
   }
-  if (current.value.status === "queued") {
-    return 25;
+  return Math.max(0, Math.min(current.value.progress ?? 0, 100));
+});
+
+const stageLabel = computed(() => {
+  if (!current.value) {
+    return "";
   }
-  if (current.value.status === "running") {
-    return 68;
+  const labels: Record<string, string> = {
+    uploaded: "文件已接收",
+    parsing: "正在解析文档",
+    chunking: "正在按条款分块",
+    embedding: "正在生成向量",
+    indexing: "正在写入索引",
+    completed: "索引完成",
+    failed: "索引失败",
+  };
+  return labels[current.value.stage] ?? current.value.stage;
+});
+
+const warningText = computed(() => {
+  if (!current.value?.warnings?.length) {
+    return "";
   }
-  return current.value.status === "succeeded" ? 100 : 100;
+  return current.value.warnings.join("；");
 });
 
 const progressStatus = computed(() => {

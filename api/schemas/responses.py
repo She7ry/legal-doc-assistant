@@ -54,6 +54,8 @@ class AskResponse(BaseModel):
     content: str
     citations: list[CitationOut]
     memories_used: list[MemoryUsageOut] = Field(default_factory=list)
+    confidence: str | None = None
+    guard_warnings: list[str] = Field(default_factory=list)
 
 
 class WebSourceOut(BaseModel):
@@ -114,22 +116,39 @@ class IngestResponse(BaseModel):
     file_name: str
     document_count: int
     chunk_count: int
+    document_key: str = ""
+    document_version: int = 1
+    file_extension: str = ""
+    page_count: int | None = None
+    skipped: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 class IngestJobResponse(BaseModel):
     job_id: str
     status: str
     file_name: str
+    stage: str = "uploaded"
+    progress: int = 0
     submitted_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
     result: IngestResponse | None = None
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DocumentInfo(BaseModel):
     file_name: str
     file_id: str
+    document_key: str = ""
+    document_version: int = 1
+    file_extension: str = ""
+    document_count: int = 0
+    chunk_count: int = 0
+    page_count: int | None = None
+    indexed_at: str | None = None
+    warning_count: int = 0
 
 
 class DocumentListResponse(BaseModel):

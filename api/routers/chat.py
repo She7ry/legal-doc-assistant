@@ -18,6 +18,7 @@ from api.schemas.responses import (
     WebSourceOut,
 )
 from doc_assistant.config.settings import settings
+from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.qa_service import DocumentQAService, PreparedQAAnswer
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_api_key)])
@@ -51,6 +52,8 @@ def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> AskRe
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
         memories_used=[MemoryUsageOut.from_usage(memory) for memory in answer.memories_used],
+        confidence=answer.confidence,
+        guard_warnings=answer.guard_warnings,
     )
 
 
@@ -158,6 +161,11 @@ def _stream_answer_events(
         return
 
     content = "".join(chunks)
+    guard_result = validate_answer(
+        content,
+        prepared.citations,
+        has_retrieved_documents=prepared.has_retrieved_documents,
+    )
     qa_service.record_prepared_answer(prepared, content)
     yield _sse(
         "done",
@@ -165,6 +173,8 @@ def _stream_answer_events(
             "content": content,
             "citations": [CitationOut.from_citation(citation) for citation in prepared.citations],
             "memories_used": [MemoryUsageOut.from_usage(memory) for memory in prepared.memories_used],
+            "confidence": guard_result.confidence,
+            "guard_warnings": guard_result.issues,
         },
     )
 

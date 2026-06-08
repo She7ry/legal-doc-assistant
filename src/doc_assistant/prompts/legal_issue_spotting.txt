@@ -1,0 +1,24 @@
+Task: Identify potential legal or compliance issues in the provided document excerpts.
+
+Source excerpts:
+<retrieved_documents>
+{context}
+</retrieved_documents>
+
+Instructions:
+1. Use only the provided excerpts.
+2. Cite every issue with source IDs such as [S1] or [S2].
+3. Do not invent obligations, penalties, statutes, or case law.
+4. Flag jurisdiction-dependent or incomplete areas for human review.
+
+Required output:
+## 主要风险点
+List the most important issues with citations and severity: Low / Medium / High / Needs human review.
+
+## 可能缺失的信息
+List missing definitions, schedules, jurisdiction, or related sections.
+
+## 建议核验事项
+List what the user should verify in the full document or with a qualified lawyer.
+
+Answer:

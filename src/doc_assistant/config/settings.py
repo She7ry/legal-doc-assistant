@@ -67,6 +67,10 @@ class Settings:
     project_root: Path = PROJECT_ROOT
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
+    ingest_jobs_db_path: Path = _path_env(
+        "DOC_ASSISTANT_INGEST_JOBS_DB_PATH",
+        PROJECT_ROOT / "data" / "ingest_jobs.sqlite3",
+    )
     memory_db_path: Path = _path_env(
         "DOC_ASSISTANT_MEMORY_DB_PATH",
         PROJECT_ROOT / "data" / "memory.sqlite3",
@@ -113,9 +117,12 @@ class Settings:
     cors_allow_credentials: bool = _bool_env("DOC_ASSISTANT_CORS_ALLOW_CREDENTIALS", False)
     default_tenant_id: str = os.getenv("DOC_ASSISTANT_DEFAULT_TENANT_ID", "default")
     max_upload_bytes: int = _int_env("DOC_ASSISTANT_MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
+    pdf_ocr_enabled: bool = _bool_env("DOC_ASSISTANT_PDF_OCR_ENABLED", False)
+    pdf_ocr_lang: str = os.getenv("DOC_ASSISTANT_PDF_OCR_LANG", "eng")
 
 
 settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 settings.vector_store_dir.mkdir(parents=True, exist_ok=True)
+settings.ingest_jobs_db_path.parent.mkdir(parents=True, exist_ok=True)
 settings.memory_db_path.parent.mkdir(parents=True, exist_ok=True)

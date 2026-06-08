@@ -18,6 +18,22 @@
           class="document-table"
         >
           <el-table-column prop="file_name" label="文件名" min-width="260" />
+          <el-table-column label="版本" width="90">
+            <template #default="{ row }">v{{ row.document_version }}</template>
+          </el-table-column>
+          <el-table-column label="类型" width="90">
+            <template #default="{ row }">{{ formatExtension(row.file_extension) }}</template>
+          </el-table-column>
+          <el-table-column prop="chunk_count" label="分块" width="90" />
+          <el-table-column label="页数" width="90">
+            <template #default="{ row }">{{ row.page_count ?? "-" }}</template>
+          </el-table-column>
+          <el-table-column label="警告" width="90">
+            <template #default="{ row }">{{ row.warning_count || "-" }}</template>
+          </el-table-column>
+          <el-table-column label="索引时间" min-width="170">
+            <template #default="{ row }">{{ formatIndexedAt(row.indexed_at) }}</template>
+          </el-table-column>
           <el-table-column prop="file_id" label="File ID" min-width="320" />
         </el-table>
       </section>
@@ -74,5 +90,22 @@ function handleJobCompleted(job: IngestJobResponse) {
   if (job.status === "succeeded") {
     void loadDocuments();
   }
+}
+
+function formatExtension(value: string) {
+  return value ? value.replace(".", "").toUpperCase() : "-";
+}
+
+function formatIndexedAt(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 </script>

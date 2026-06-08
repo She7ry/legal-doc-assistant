@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import zipfile
 
 from doc_assistant.ingestion import document_loader
 
@@ -17,3 +18,38 @@ def test_save_uploaded_file_uses_tenant_directory_and_unique_names(tmp_path, mon
     assert first_path.name.endswith("Contract_Copy.txt")
     assert first_path.read_bytes() == b"one"
     assert second_path.read_bytes() == b"two"
+
+
+def test_markdown_extension_is_supported(tmp_path) -> None:
+    path = tmp_path / "policy.markdown"
+    path.write_text("# Policy\n\nUse written approval.", encoding="utf-8")
+
+    documents = document_loader.load_documents(path)
+
+    assert documents[0].page_content.startswith("# Policy")
+    assert documents[0].metadata["file_extension"] == ".markdown"
+
+
+def test_load_docx_extracts_paragraphs_and_tables(tmp_path) -> None:
+    path = tmp_path / "contract.docx"
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Section 1 Term</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Party</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Acme</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>
+"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+
+    documents = document_loader.load_documents(path)
+
+    assert "Section 1 Term" in documents[0].page_content
+    assert "Party | Acme" in documents[0].page_content
+    assert documents[0].metadata["file_extension"] == ".docx"

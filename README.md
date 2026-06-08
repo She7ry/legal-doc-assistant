@@ -1,20 +1,21 @@
 # Legal Document Assistant
 
-A citation-first RAG assistant for contracts, policies, leases, privacy policies, school rules, and compliance documents.
+A citation-first legal document analysis and legal information assistant for contracts, policies, leases, privacy policies, school rules, and compliance documents.
 
-This tool is for document review assistance only. It does not provide legal advice.
+It helps users understand document content, spot risks, organize questions, and prepare checklists for discussion with a qualified lawyer. It does not replace a lawyer, provide final legal advice, litigation strategy, or case-specific determinations.
 
 ## Features
 
-- Upload PDF, TXT, or Markdown documents via REST API.
-- Index documents into a local Chroma vector store.
+- Upload PDF, DOCX, TXT, or Markdown documents via REST API.
+- Index documents into a local Chroma vector store with legal-section-aware chunking.
 - Ask questions grounded in retrieved excerpts with source citations.
 - Maintain a separate user memory system for preferences, conversation state,
   task context, and feedback without mixing it into the document RAG index.
 - Clause review: assess risk level for specific clause types.
 - Conflict detection: compare contract and policy excerpts for conflicts.
 - API key authentication, configurable CORS, upload size limits, and tenant-isolated indexes.
-- Background document ingestion with job status polling.
+- Persistent background document ingestion with stage progress, warnings, and job status polling.
+- Same-name re-uploads create a new active document version; older versions are retained but excluded from retrieval.
 
 ## Project Layout
 
@@ -177,6 +178,20 @@ DOC_ASSISTANT_DEFAULT_TENANT_ID=default
 DOC_ASSISTANT_MAX_UPLOAD_BYTES=20971520
 ```
 
+Document ingestion settings:
+
+```env
+DOC_ASSISTANT_INGEST_JOBS_DB_PATH=
+DOC_ASSISTANT_PDF_OCR_ENABLED=false
+DOC_ASSISTANT_PDF_OCR_LANG=eng
+```
+
+If `DOC_ASSISTANT_INGEST_JOBS_DB_PATH` is empty, ingest jobs are persisted at
+`data/ingest_jobs.sqlite3`. PDF OCR is optional and disabled by default. When it
+is enabled, install and configure `pdf2image`, `pytesseract`, and the local OCR
+runtime; otherwise scanned PDF pages are reported as ingest warnings instead of
+being silently indexed as empty text.
+
 When `DOC_ASSISTANT_API_KEYS` is set, call protected endpoints with either
 `X-API-Key: <key>` or `Authorization: Bearer <key>`. Use `X-Tenant-Id` to route
 requests to a tenant-specific upload directory and Chroma collection. If the
@@ -242,7 +257,7 @@ VITE_API_BASE_URL=http://localhost:8000
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| POST | `/api/v1/documents/ingest` | Upload a document and queue an ingest job (PDF/TXT/MD) |
+| POST | `/api/v1/documents/ingest` | Upload a document and queue an ingest job (PDF/DOCX/TXT/MD/Markdown) |
 | GET | `/api/v1/documents/jobs/{job_id}` | Get document ingest job status |
 | GET | `/api/v1/documents` | List indexed documents |
 | POST | `/api/v1/chat/ask` | Ask a question with optional chat history |
@@ -285,9 +300,22 @@ are set:
 
 The starter dataset lives at `data/eval/eval_dataset.json`. It currently includes:
 
-- one answerable question for `Recall@5`, `Recall@10`, `Hit Rate`, `Precision`, and `MRR`
-- one unanswerable question for refusal behavior
+- answerable questions for `Recall@5`, `Recall@10`, `Hit Rate`, `Precision`, and `MRR`
+- unanswerable questions for refusal behavior
 - lightweight generation checks for answer correctness, faithfulness, citation accuracy, and refusal accuracy
+
+## Layered Prompts
+
+Prompts live in `src/doc_assistant/prompts/` and are composed as layered system + task messages:
+
+- `base_legal_assistant.txt`: global identity, safety boundaries, evidence rules, jurisdiction awareness, and user-mode guidance
+- `document_qa.txt`: structured document Q&A output
+- `clause_review.txt`: clause review with explicit risk rubric
+- `conflict_check.txt`: contract/policy conflict detection with conflict types
+- `tool_calling_system.txt`: tool-use policy for document search vs web search
+- `answer_repair.txt`: second-pass repair when citation guard checks fail
+
+Generated answers also pass through `answer_guard.py`, which checks citation validity, unsupported strong legal conclusions, and missing-evidence refusal behavior before returning low-confidence warnings to the API.
 
 ## Roadmap
 

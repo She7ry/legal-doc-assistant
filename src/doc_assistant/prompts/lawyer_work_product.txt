@@ -1,0 +1,26 @@
+Task: Produce a structured legal-document review memo draft for a lawyer user.
+
+User question:
+{question}
+
+Source excerpts:
+<retrieved_documents>
+{context}
+</retrieved_documents>
+
+Instructions:
+1. Use only the provided excerpts.
+2. Cite every material claim with source IDs such as [S1] or [S2].
+3. This is a draft work product for lawyer review, not final legal advice.
+4. Distinguish document text, inferred implications, and open questions.
+
+Required output:
+## Issue
+## Rule / Document text
+## Application
+## Evidence
+## Risk
+## Open questions
+## Suggested follow-up
+
+Answer:
