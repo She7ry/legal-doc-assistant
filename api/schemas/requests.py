@@ -51,7 +51,23 @@ class ClauseReviewRequest(BaseModel):
         ...,
         min_length=1,
         max_length=200,
-        examples=["termination clause", "non-compete", "late payment penalty"],
+        examples=[
+            "termination",
+            "payment",
+            "late fee",
+            "auto renewal",
+            "liability limitation",
+            "indemnification",
+            "confidentiality",
+            "non-compete",
+            "IP ownership",
+            "data privacy",
+            "governing law",
+            "dispute resolution",
+            "assignment",
+            "audit rights",
+            "notice",
+        ],
     )
     top_k: int = Field(default=5, ge=1, le=20)
 

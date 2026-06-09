@@ -7,7 +7,8 @@ It helps users understand document content, spot risks, organize questions, and 
 ## Features
 
 - Upload PDF, DOCX, TXT, or Markdown documents via REST API.
-- Index documents into a local Chroma vector store with legal-section-aware chunking.
+- Index documents into a local Chroma vector store with legal-section-aware chunking
+  and hybrid vector + BM25 retrieval.
 - Ask questions grounded in retrieved excerpts with source citations.
 - Maintain a separate user memory system for preferences, conversation state,
   task context, and feedback without mixing it into the document RAG index.
@@ -134,6 +135,30 @@ DOC_ASSISTANT_WEB_SEARCH_BASE_URL=
 DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
 DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
 ```
+
+Retrieval settings:
+
+```env
+DOC_ASSISTANT_TOP_K=5
+DOC_ASSISTANT_RETRIEVAL_MODE=hybrid
+DOC_ASSISTANT_RETRIEVAL_FETCH_K=40
+DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE=0
+DOC_ASSISTANT_RETRIEVAL_RRF_K=60
+DOC_ASSISTANT_RETRIEVAL_DENSE_WEIGHT=1
+DOC_ASSISTANT_RETRIEVAL_BM25_WEIGHT=1
+DOC_ASSISTANT_RETRIEVAL_RERANK_MODE=lexical
+DOC_ASSISTANT_RETRIEVAL_RERANK_WEIGHT=0.25
+DOC_ASSISTANT_RETRIEVAL_MMR_LAMBDA=0.85
+DOC_ASSISTANT_CHUNK_SIZE=900
+DOC_ASSISTANT_CHUNK_OVERLAP=120
+```
+
+`DOC_ASSISTANT_RETRIEVAL_MODE` supports `hybrid`, `dense`, and `bm25`.
+Hybrid mode combines Chroma vector results with in-process BM25 using reciprocal
+rank fusion, applies a lightweight local lexical rerank, then uses MMR selection
+to reduce near-duplicate chunks. `DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE`
+defaults to `0` to preserve recall until you have enough evaluation coverage to
+tune a stricter cutoff.
 
 `POST /api/v1/chat/tools` lets the model call controlled tools while answering:
 
@@ -319,8 +344,7 @@ Generated answers also pass through `answer_guard.py`, which checks citation val
 
 ## Roadmap
 
-1. Hybrid search (vector + BM25) with RRF fusion.
-2. Reranker (cross-encoder) for two-stage retrieval.
-3. Authentication (JWT) and multi-tenant collection isolation.
-4. Async document ingestion via task queue.
-5. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
+1. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
+2. Authentication (JWT) and multi-tenant collection isolation.
+3. Async document ingestion via task queue.
+4. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.

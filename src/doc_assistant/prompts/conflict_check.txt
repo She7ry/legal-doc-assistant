@@ -1,4 +1,4 @@
-Task: Compare contract excerpts against policy excerpts and identify potential conflicts.
+Task: Compare contract excerpts against policy excerpts and return a structured conflict matrix.
 
 Contract excerpts:
 <contract_documents>
@@ -10,36 +10,33 @@ Policy excerpts:
 {policy_context}
 </policy_documents>
 
-Use only the provided excerpts. Do not provide final legal advice.
+Allowed conflict types:
+{conflict_types}
 
-Conflict types:
-1. Direct contradiction: One text permits or requires something the other forbids.
-2. Scope mismatch: The two texts cover different people, time periods, products, territories, or obligations.
-3. Deadline mismatch: Dates, notice periods, renewal periods, or response times differ.
-4. Definition mismatch: The same term appears to have different meanings.
-5. Missing exception: One text includes an exception or condition absent from the other.
-6. Ambiguous relationship: The excerpts may be compatible, but the priority/order of documents is unclear.
+Use only the provided excerpts. Do not provide final legal advice. Do not cite statutes, cases, market standards, or external facts unless they appear in the excerpts.
 
-Required output:
-## 冲突结论
-No conflict found / Potential conflict / Insufficient information
+Return exactly one JSON object. Do not wrap it in markdown. Use these keys:
+- overall_status: one of No conflict found, Potential conflict, Insufficient information.
+- conflicts: array of conflict objects. If no conflict is supported, return an empty array.
+- needs_human_review: boolean.
+- supporting_citations: array of source ids used to support a no-conflict or insufficient-information conclusion.
 
-## 冲突类型
-Direct contradiction / Scope mismatch / Deadline mismatch / Definition mismatch / Missing exception / Ambiguous relationship / None
+Each conflict object must include:
+- topic: short label, such as Payment timeline, Data retention, Notice method, Confidentiality scope.
+- conflict_type: one allowed snake_case key, such as deadline_mismatch or direct_contradiction.
+- severity: one of Low, Medium, High, Needs human review.
+- contract_position: concise statement of what the contract excerpt says.
+- policy_position: concise statement of what the policy excerpt says.
+- why_conflict: explain why the two positions may conflict, using only cited text.
+- recommended_action: practical next step such as negotiate contract wording, request a policy exception, confirm with business owner, or ask attorney to review.
+- contract_citations: array of contract source ids such as C1.
+- policy_citations: array of policy source ids such as P1.
+- needs_human_review: boolean.
+- confidence: Low, Medium, or High.
 
-## 合同依据
-Cite contract excerpts with [C1], [C2], etc.
-
-## 政策依据
-Cite policy excerpts with [P1], [P2], etc.
-
-## 为什么可能冲突
-Explain the potential conflict using only cited text.
-
-## 严重程度
-Low / Medium / High / Needs human review
-
-## 需要人工复核的问题
-List unresolved questions, missing sections, or facts needed for a stronger review.
+Rules:
+- Every conflict must include at least one contract citation and one policy citation.
+- If one side has no excerpts, set overall_status to Insufficient information and explain that in the structured fields where possible.
+- Soften legal conclusions. Use "may", "could", "appears", or "needs review" instead of definitive legal advice.
 
 Answer:

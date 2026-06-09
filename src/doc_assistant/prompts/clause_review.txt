@@ -1,41 +1,41 @@
-Task: Review the provided source excerpts for the requested clause type.
+Task: Review the provided source excerpts for the requested clause type and return a structured risk assessment.
 
 Requested clause type:
 {clause_type}
+
+Normalized clause type:
+{normalized_clause_type}
+
+Available clause taxonomy:
+{clause_taxonomy}
+
+Risk rules to apply:
+{risk_rules}
 
 Source excerpts:
 <retrieved_documents>
 {context}
 </retrieved_documents>
 
-Use only the provided excerpts. Do not provide final legal advice.
+Use only the provided excerpts. Do not provide final legal advice. Do not cite statutes, cases, market standards, or external facts unless they appear in the excerpts.
 
-Risk level rubric:
-- Low: Clause is present, clear, balanced, and does not appear to create unusual burden based on the provided excerpts.
-- Medium: Clause may create obligations, costs, deadlines, limitations, unilateral discretion, ambiguity, or negotiation points.
-- High: Clause may create severe consequences, broad waiver of rights, automatic penalties, one-sided termination, unclear payment liability, non-compete/non-solicit restrictions, broad indemnity, confidentiality traps, data/privacy exposure, dispute resolution disadvantage, or major compliance risk.
-- Needs human review: The excerpts are incomplete, internally inconsistent, jurisdiction-dependent, unusually technical, or could materially affect rights or obligations.
+Return exactly one JSON object. Do not wrap it in markdown. Use these keys:
+- clause_type: string.
+- normalized_clause_type: taxonomy key or short normalized name.
+- found: boolean if clear, otherwise null.
+- summary: short plain-language summary grounded in cited excerpts.
+- risk_level: one of Low, Medium, High, Needs human review.
+- risk_reasons: array of objects. Each object must include reason and citation. Citation must be a source id such as S1, not a markdown link.
+- affected_party: string or null.
+- plain_language_explanation: explain what the clause means and why the user should pay attention.
+- questions_for_lawyer: array of practical, non-conclusive questions the user could ask a lawyer or counterparty.
+- missing_information: array of missing facts, sections, definitions, schedules, or jurisdiction details needed for stronger review.
+- needs_human_review: boolean.
 
-Required output:
-## Clause found?
-Yes / No / Unclear
-
-## Summary
-Plain-language explanation of the clause.
-
-## Key text relied on
-Quote or summarize the relevant document language with citations such as [S1] or [S2].
-
-## Risk level
-Low / Medium / High / Needs human review
-
-## Why this risk level
-Explain the reason using only cited text.
-
-## Negotiation or review points
-List practical issues the user may want to ask a lawyer or counterparty about.
-
-## Missing information
-List missing facts, full-document sections, jurisdiction, definitions, or schedules needed for a stronger review.
+Rules:
+- Every material claim must be tied to one or more source ids from the excerpts.
+- If the clause was not found, set found to false, risk_level to Needs human review, and explain what source text is missing.
+- Soften legal conclusions. Use "may", "could", "appears", or "needs review" instead of definitive legal advice.
+- Prefer user-facing plain language while keeping the output valid JSON.
 
 Answer:

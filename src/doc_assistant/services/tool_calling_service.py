@@ -8,6 +8,8 @@ from langchain_core.documents import Document
 
 from doc_assistant.config.settings import settings
 from doc_assistant.schemas.citation import Citation
+from doc_assistant.services.answer_guard import validate_answer
+from doc_assistant.services.evidence import build_evidence_profile
 from doc_assistant.services.qa_service import DocumentQAService
 from doc_assistant.tools.web_search import (
     DisabledWebSearchClient,
@@ -46,6 +48,9 @@ class ToolCallingAnswer:
     citations: list[Citation] = field(default_factory=list)
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
+    confidence: str | None = None
+    guard_warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,12 +96,7 @@ class ToolCallingChatService:
             message = invoke_messages(messages, tools=tools, tool_choice="auto")
             tool_calls = _normalise_tool_calls(message)
             if not tool_calls:
-                return ToolCallingAnswer(
-                    content=str(message.get("content") or ""),
-                    citations=state.citations,
-                    web_sources=state.web_sources,
-                    tool_calls=state.tool_calls,
-                )
+                return self._finalize_answer(str(message.get("content") or ""), state)
 
             messages.append(
                 {
@@ -117,11 +117,33 @@ class ToolCallingChatService:
                 )
 
         final_message = invoke_messages(messages, tools=None, tool_choice=None)
+        return self._finalize_answer(str(final_message.get("content") or ""), state)
+
+    def _finalize_answer(self, content: str, state: _ToolExecutionState) -> ToolCallingAnswer:
+        guard_citations = state.citations + _web_source_citations(state.web_sources)
+        guard_result = validate_answer(
+            content,
+            guard_citations,
+            has_retrieved_documents=bool(guard_citations),
+        )
+        if guard_result.needs_repair:
+            content = self.qa_service._repair_content(content, guard_result, guard_citations)
+            guard_result = validate_answer(
+                content,
+                guard_citations,
+                has_retrieved_documents=bool(guard_citations),
+            )
+
         return ToolCallingAnswer(
-            content=str(final_message.get("content") or ""),
+            content=content,
             citations=state.citations,
             web_sources=state.web_sources,
             tool_calls=state.tool_calls,
+            confidence=guard_result.confidence,
+            guard_warnings=guard_result.issues,
+            metadata={
+                "evidence": build_evidence_profile(content, guard_citations, guard_result.issues)
+            },
         )
 
     def _initial_messages(
@@ -195,6 +217,15 @@ class ToolCallingChatService:
                     page=item["page"],
                     chunk_id=item["chunk_id"],
                     preview=item["content"][:500],
+                    source_type="document",
+                    file_id=item["file_id"],
+                    document_key=item["document_key"],
+                    document_version=item["document_version"],
+                    page_label=item["page_label"],
+                    section_heading=item["section_heading"],
+                    exact_quote=item["content"][:1200],
+                    retrieval_score=item["retrieval_score"],
+                    retrieval_relevance=item["retrieval_relevance"],
                 )
             )
             results.append(item)
@@ -367,13 +398,28 @@ def _document_result(source_id: str, document: Document) -> dict[str, Any]:
     page = metadata.get("page")
     chunk_id = metadata.get("chunk_id")
     section_heading = metadata.get("section_heading")
+    retrieval_score = metadata.get("retrieval_score")
+    retrieval_relevance = metadata.get("retrieval_relevance")
     file_name = str(metadata.get("file_name") or metadata.get("source") or "unknown")
+    page_number = page if isinstance(page, int) else None
     return {
         "source_id": source_id,
         "file_name": file_name,
-        "page": page if isinstance(page, int) else None,
+        "file_id": _optional_string(metadata.get("file_id")),
+        "document_key": _optional_string(metadata.get("document_key")),
+        "document_version": (
+            metadata.get("document_version")
+            if isinstance(metadata.get("document_version"), int)
+            else None
+        ),
+        "page": page_number,
+        "page_label": f"page {page_number + 1}" if page_number is not None else None,
         "chunk_id": chunk_id if isinstance(chunk_id, int) else None,
         "section_heading": str(section_heading) if section_heading else None,
+        "retrieval_score": retrieval_score if isinstance(retrieval_score, int | float) else None,
+        "retrieval_relevance": (
+            retrieval_relevance if isinstance(retrieval_relevance, int | float) else None
+        ),
         "content": content,
     }
 
@@ -387,6 +433,29 @@ def _web_source(source_id: str, result: WebSearchResult) -> WebSource:
         published_at=result.published_at,
         source=result.source,
     )
+
+
+def _web_source_citations(sources: list[WebSource]) -> list[Citation]:
+    citations = []
+    for source in sources:
+        preview = source.snippet or source.title or source.url
+        citations.append(
+            Citation(
+                source_id=source.source_id,
+                file_name=source.title or source.url,
+                preview=preview,
+                source_type="web",
+                exact_quote=preview,
+            )
+        )
+    return citations
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:

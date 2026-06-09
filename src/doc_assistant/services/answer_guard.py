@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from doc_assistant.schemas.citation import Citation
 
-CITATION_PATTERN = re.compile(r"\[(?:S|D|C|P)\d+\]")
+CITATION_PATTERN = re.compile(r"\[(?:S|D|C|P|W)\d+\]")
 _STRONG_LEGAL_CONCLUSION_PATTERNS = (
     r"\bguarantee(?:d|s)?\b",
     r"\bwill definitely\b",

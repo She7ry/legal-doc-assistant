@@ -29,6 +29,8 @@ def review_clause(body: ClauseReviewRequest, qa_service: QAServiceDep) -> Clause
     return ClauseReviewResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
+        guard_warnings=answer.guard_warnings,
+        **answer.metadata,
     )
 
 
@@ -56,4 +58,6 @@ def check_conflict(body: ConflictCheckRequest, qa_service: QAServiceDep) -> Conf
     return ConflictCheckResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
+        guard_warnings=answer.guard_warnings,
+        **answer.metadata,
     )
