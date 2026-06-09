@@ -22,6 +22,31 @@
         <div class="message-avatar">{{ message.role === "user" ? "问" : "答" }}</div>
         <div class="message-body">
           <div class="message-content">{{ message.content }}</div>
+          <div
+            v-if="message.role === 'assistant' && (message.confidence || message.guardWarnings.length)"
+            class="answer-trust"
+          >
+            <el-tag v-if="message.confidence" :type="confidenceTagType(message.confidence)" effect="dark">
+              可信度 {{ message.confidence }}
+            </el-tag>
+            <el-alert
+              v-if="message.guardWarnings.length"
+              type="warning"
+              title="回答需要谨慎使用"
+              :closable="false"
+              show-icon
+            >
+              <ul class="structured-list structured-list--compact">
+                <li v-for="warning in message.guardWarnings" :key="warning">
+                  {{ warning }}
+                </li>
+              </ul>
+            </el-alert>
+          </div>
+          <EvidencePanel
+            v-if="message.role === 'assistant' && message.evidence"
+            :evidence="message.evidence"
+          />
           <CitationList
             v-if="message.role === 'assistant' && message.citations.length"
             :citations="message.citations"
@@ -75,8 +100,9 @@ import { Delete, Promotion } from "@element-plus/icons-vue";
 
 import { askQuestionStream } from "../api/chat";
 import { formatApiError } from "../api/http";
-import type { ChatHistoryMessage, Citation, MemoryUsage } from "../api/types";
+import type { ChatHistoryMessage, Citation, EvidenceProfile, MemoryUsage } from "../api/types";
 import CitationList from "./CitationList.vue";
+import EvidencePanel from "./EvidencePanel.vue";
 
 interface UiMessage {
   id: string;
@@ -84,6 +110,9 @@ interface UiMessage {
   content: string;
   citations: Citation[];
   memoriesUsed: MemoryUsage[];
+  confidence: string | null;
+  guardWarnings: string[];
+  evidence: EvidenceProfile | null;
 }
 
 const CONVERSATION_STORAGE_KEY = "legal-doc-assistant.conversationId";
@@ -111,6 +140,9 @@ async function send() {
     content: text,
     citations: [],
     memoriesUsed: [],
+    confidence: null,
+    guardWarnings: [],
+    evidence: null,
   });
   const assistantId = crypto.randomUUID();
   messages.value.push({
@@ -119,6 +151,9 @@ async function send() {
     content: "",
     citations: [],
     memoriesUsed: [],
+    confidence: null,
+    guardWarnings: [],
+    evidence: null,
   });
   question.value = "";
   loading.value = true;
@@ -152,6 +187,9 @@ async function send() {
             message.content = answer.content;
             message.citations = answer.citations;
             message.memoriesUsed = answer.memories_used ?? [];
+            message.confidence = answer.confidence ?? null;
+            message.guardWarnings = answer.guard_warnings ?? [];
+            message.evidence = answer.evidence ?? null;
           }
         },
       },
@@ -175,6 +213,19 @@ function findMessage(id: string): UiMessage | undefined {
 function clearMessages() {
   messages.value = [];
   conversationId.value = createConversationId();
+}
+
+function confidenceTagType(confidence: string) {
+  if (confidence === "High") {
+    return "success";
+  }
+  if (confidence === "Medium") {
+    return "warning";
+  }
+  if (confidence === "Low") {
+    return "danger";
+  }
+  return "info";
 }
 
 async function scrollToBottom() {

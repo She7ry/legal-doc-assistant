@@ -1,0 +1,137 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 1237 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(ORION ANALYTICS MASTER SERVICES AGREEMENT) Tj
+0 -14 Td
+(Document ID: EVAL-MSA-002) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 1. Services) Tj
+0 -14 Td
+(Provider will make the hosted analytics platform available to Customer and its authorized users) Tj
+0 -14 Td
+(during the subscription term.) Tj
+0 -14 Td
+(Customer is responsible for user account administration and for the accuracy of data submitted to) Tj
+0 -14 Td
+(the service.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 3.2 Fees and Late Payment) Tj
+0 -14 Td
+(Marker: EVAL-MSA-3.2.) Tj
+0 -14 Td
+(Subscription fees are invoiced annually in advance unless an order form states a different billing) Tj
+0 -14 Td
+(schedule.) Tj
+0 -14 Td
+(Overdue undisputed amounts accrue interest at 1.5% per month or the maximum rate permitted by law,) Tj
+0 -14 Td
+(whichever is lower.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 4.1 Service Level) Tj
+0 -14 Td
+(Marker: EVAL-MSA-4.1.) Tj
+0 -14 Td
+(Provider will use commercially reasonable efforts to make the production service available 99.9% of) Tj
+0 -14 Td
+(each calendar month.) Tj
+0 -14 Td
+(If availability falls below 99.9%, Customer's sole remedy is a service credit equal to 5% of the) Tj
+0 -14 Td
+(affected monthly subscription fee.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1359 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(ORION ANALYTICS MASTER SERVICES AGREEMENT) Tj
+0 -14 Td
+(Document ID: EVAL-MSA-002) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 7.3 Limitation of Liability) Tj
+0 -14 Td
+(Marker: EVAL-MSA-7.3.) Tj
+0 -14 Td
+(Except for excluded claims, each party's aggregate liability is capped at the fees paid or payable) Tj
+0 -14 Td
+(in the 12 months before the event giving rise to the claim.) Tj
+0 -14 Td
+(For claims arising from unauthorized disclosure of Customer Data, Provider's aggregate liability cap) Tj
+0 -14 Td
+(is two times the fees paid or payable in that same 12 month period.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 9.2 Termination for Cause) Tj
+0 -14 Td
+(Marker: EVAL-MSA-9.2.) Tj
+0 -14 Td
+(Either party may terminate this agreement for material breach if the breach remains uncured 60 days) Tj
+0 -14 Td
+(after written notice.) Tj
+0 -14 Td
+(Provider may suspend access sooner if Customer's use creates a security risk or violates applicable) Tj
+0 -14 Td
+(law.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 11.4 Data Export) Tj
+0 -14 Td
+(Marker: EVAL-MSA-11.4.) Tj
+0 -14 Td
+(For 30 days after termination, Provider will make Customer Data available for export in CSV or JSON) Tj
+0 -14 Td
+(format.) Tj
+0 -14 Td
+(After the export period, Provider may delete Customer Data from active systems according to its) Tj
+0 -14 Td
+(standard retention schedule.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001536 00000 n 
+0000001662 00000 n 
+0000003073 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+3143
+%%EOF

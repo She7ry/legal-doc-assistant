@@ -1,0 +1,113 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 836 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(INFORMATION SECURITY POLICY) Tj
+0 -14 Td
+(Document ID: EVAL-SEC-005) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 3.1 Multi-Factor Authentication) Tj
+0 -14 Td
+(Marker: EVAL-SEC-3.1.) Tj
+0 -14 Td
+(Multi-factor authentication is required for privileged accounts, remote access, production systems,) Tj
+0 -14 Td
+(and any application storing Confidential Information.) Tj
+0 -14 Td
+(Shared accounts are prohibited unless Security grants a time-limited exception.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 4.2 Encryption) Tj
+0 -14 Td
+(Marker: EVAL-SEC-4.2.) Tj
+0 -14 Td
+(Confidential Information must be encrypted at rest with AES-256 or an approved equivalent and) Tj
+0 -14 Td
+(encrypted in transit with TLS 1.2 or higher.) Tj
+0 -14 Td
+(Encryption keys must be rotated at least annually and whenever compromise is suspected.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1075 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(INFORMATION SECURITY POLICY) Tj
+0 -14 Td
+(Document ID: EVAL-SEC-005) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 5.2 Vulnerability Remediation) Tj
+0 -14 Td
+(Marker: EVAL-SEC-5.2.) Tj
+0 -14 Td
+(Critical vulnerabilities on internet-facing systems must be remediated or mitigated within seven) Tj
+0 -14 Td
+(calendar days after validation.) Tj
+0 -14 Td
+(High vulnerabilities must be remediated or mitigated within 30 calendar days after validation.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 6.4 Logging) Tj
+0 -14 Td
+(Marker: EVAL-SEC-6.4.) Tj
+0 -14 Td
+(Production authentication logs, administrative activity logs, and security event logs must be) Tj
+0 -14 Td
+(retained for at least one year.) Tj
+0 -14 Td
+(Security may require longer retention for regulated systems or active investigations.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 8.3 Vendor Incident Notice) Tj
+0 -14 Td
+(Marker: EVAL-SEC-8.3.) Tj
+0 -14 Td
+(Vendors handling Confidential Information must notify Security within 24 hours after discovering a) Tj
+0 -14 Td
+(confirmed or suspected security incident.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001134 00000 n 
+0000001260 00000 n 
+0000002387 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2457
+%%EOF

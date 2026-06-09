@@ -13,6 +13,17 @@ class CitationOut(BaseModel):
     chunk_id: int | None
     preview: str
     location_label: str
+    source_type: str = "document"
+    file_id: str | None = None
+    document_key: str | None = None
+    document_version: int | None = None
+    page_label: str | None = None
+    section_heading: str | None = None
+    exact_quote: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    retrieval_score: float | None = None
+    retrieval_relevance: float | None = None
 
     @classmethod
     def from_citation(cls, citation) -> "CitationOut":
@@ -23,6 +34,17 @@ class CitationOut(BaseModel):
             chunk_id=citation.chunk_id,
             preview=citation.preview,
             location_label=citation.location_label(),
+            source_type=getattr(citation, "source_type", "document"),
+            file_id=getattr(citation, "file_id", None),
+            document_key=getattr(citation, "document_key", None),
+            document_version=getattr(citation, "document_version", None),
+            page_label=getattr(citation, "page_label", None),
+            section_heading=getattr(citation, "section_heading", None),
+            exact_quote=getattr(citation, "exact_quote", None),
+            char_start=getattr(citation, "char_start", None),
+            char_end=getattr(citation, "char_end", None),
+            retrieval_score=getattr(citation, "retrieval_score", None),
+            retrieval_relevance=getattr(citation, "retrieval_relevance", None),
         )
 
 
@@ -56,6 +78,7 @@ class AskResponse(BaseModel):
     memories_used: list[MemoryUsageOut] = Field(default_factory=list)
     confidence: str | None = None
     guard_warnings: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] | None = None
 
 
 class WebSourceOut(BaseModel):
@@ -99,16 +122,54 @@ class ToolChatResponse(BaseModel):
     citations: list[CitationOut]
     web_sources: list[WebSourceOut] = Field(default_factory=list)
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
+    confidence: str | None = None
+    guard_warnings: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] | None = None
+
+
+class ClauseRiskReasonOut(BaseModel):
+    reason: str = ""
+    citation: str | None = None
 
 
 class ClauseReviewResponse(BaseModel):
     content: str
     citations: list[CitationOut]
+    clause_type: str = ""
+    normalized_clause_type: str = ""
+    found: bool | None = None
+    summary: str = ""
+    risk_level: str = "Needs human review"
+    risk_reasons: list[ClauseRiskReasonOut] = Field(default_factory=list)
+    affected_party: str | None = None
+    plain_language_explanation: str = ""
+    questions_for_lawyer: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    needs_human_review: bool = True
+    guard_warnings: list[str] = Field(default_factory=list)
+
+
+class ConflictItemOut(BaseModel):
+    topic: str = ""
+    conflict_type: str = "ambiguous_relationship"
+    severity: str = "Needs human review"
+    contract_position: str = ""
+    policy_position: str = ""
+    why_conflict: str = ""
+    recommended_action: str = ""
+    contract_citations: list[str] = Field(default_factory=list)
+    policy_citations: list[str] = Field(default_factory=list)
+    needs_human_review: bool = True
+    confidence: str | None = None
 
 
 class ConflictCheckResponse(BaseModel):
     content: str
     citations: list[CitationOut]
+    overall_status: str = "Insufficient information"
+    conflicts: list[ConflictItemOut] = Field(default_factory=list)
+    needs_human_review: bool = True
+    guard_warnings: list[str] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):

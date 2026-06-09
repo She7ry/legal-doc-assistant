@@ -1,11 +1,41 @@
 {
-  "version": "0.1",
-  "description": "Starter RAG evaluation dataset with one synthetic legal PDF.",
+  "version": "0.2",
+  "description": "Expanded synthetic legal RAG evaluation dataset. Documents are fictitious but structured to resemble realistic contracts, policies, and legal work product.",
   "documents": [
     {
       "file_name": "sample_supply_contract.pdf",
       "path": "data/eval/fixtures/sample_supply_contract.pdf",
-      "file_id": "2781583738962b6320c7786b85b20632cf5658fe9cef430e1845f12eb1f11e14"
+      "file_id": "e764583bd6f13ee37f048da9b6396249f47d72db8d4275f9ae023d88a3eb7bd1"
+    },
+    {
+      "file_name": "sample_saas_msa.pdf",
+      "path": "data/eval/fixtures/sample_saas_msa.pdf",
+      "file_id": "61fb91f67b1eaffea67d18511b6e65351863ebc407b4ef0eac16aa322da54098"
+    },
+    {
+      "file_name": "sample_data_processing_addendum.pdf",
+      "path": "data/eval/fixtures/sample_data_processing_addendum.pdf",
+      "file_id": "350c68452f5f231ed0ac626eda581f48af194b695b648e6251b51329e821f5d1"
+    },
+    {
+      "file_name": "sample_procurement_policy.pdf",
+      "path": "data/eval/fixtures/sample_procurement_policy.pdf",
+      "file_id": "b79a98699991361e65adca33c2b8038f74da6e6c0a9fc9f8481a4b8537143d97"
+    },
+    {
+      "file_name": "sample_information_security_policy.pdf",
+      "path": "data/eval/fixtures/sample_information_security_policy.pdf",
+      "file_id": "76af5b11e6c42f1e815ac69f0d3c790d562741d6868c8865068eb5114fa1a0fb"
+    },
+    {
+      "file_name": "sample_employee_handbook.pdf",
+      "path": "data/eval/fixtures/sample_employee_handbook.pdf",
+      "file_id": "752b9a899bc22f25c1f16b1c7db1ae0510820ad3c69b53bac512acf3ee950a7c"
+    },
+    {
+      "file_name": "sample_mutual_nda.pdf",
+      "path": "data/eval/fixtures/sample_mutual_nda.pdf",
+      "file_id": "ddba6878055e44614f8b5c1dfcb2114e651f67c719da49d1a38bfbb1a258ebf7"
     }
   ],
   "cases": [
@@ -18,7 +48,7 @@
         {
           "file_name": "sample_supply_contract.pdf",
           "page": 1,
-          "chunk_id": 1,
+          "chunk_id": 7,
           "marker": "EVAL-C-12.2"
         }
       ],
@@ -35,12 +65,13 @@
       "id": "eval_002_cyber_insurance_refusal",
       "question": "Does the agreement require Supplier to buy cybersecurity insurance?",
       "answer_type": "unanswerable",
-      "gold_answer": "The indexed document does not state a cybersecurity insurance requirement.",
+      "gold_answer": "The indexed documents do not state a cybersecurity insurance requirement.",
       "gold_sources": [],
       "required_refusal_terms": [
         "not found",
         "not provided",
         "cannot determine",
+        "not enough information",
         "relevant text was not found",
         "did not find enough relevant text",
         "do not contain",
@@ -55,12 +86,12 @@
       "id": "eval_003_notice_period",
       "question": "How much notice is required before termination for convenience?",
       "answer_type": "answerable",
-      "gold_answer": "Either party may terminate for convenience with 30 days' written notice.",
+      "gold_answer": "Either party may terminate for convenience with 30 days' prior written notice.",
       "gold_sources": [
         {
           "file_name": "sample_supply_contract.pdf",
           "page": 0,
-          "chunk_id": 3,
+          "chunk_id": 4,
           "marker": "EVAL-C-8.1"
         }
       ],
@@ -81,9 +112,977 @@
       "gold_sources": [],
       "required_refusal_terms": [
         "not found",
-        "did not find enough relevant text",
+        "not provided",
         "cannot determine",
-        "not enough information"
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_005_invoice_payment_period",
+      "question": "When must Buyer pay undisputed invoices under the supply agreement?",
+      "answer_type": "answerable",
+      "gold_answer": "Buyer must pay undisputed invoices within 30 calendar days after receiving a valid invoice.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-C-5.1"
+        }
+      ],
+      "required_answer_terms": [
+        "30 calendar days",
+        "valid invoice"
+      ],
+      "forbidden_answer_terms": [
+        "45 days",
+        "annual"
+      ]
+    },
+    {
+      "id": "eval_006_product_warranty_duration",
+      "question": "How long does the product warranty last after acceptance?",
+      "answer_type": "answerable",
+      "gold_answer": "The delivered goods warranty lasts for 12 months after acceptance.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-C-9.1"
+        }
+      ],
+      "required_answer_terms": [
+        "12 months",
+        "acceptance"
+      ],
+      "forbidden_answer_terms": [
+        "five years",
+        "30 days"
+      ]
+    },
+    {
+      "id": "eval_007_supplier_record_retention",
+      "question": "How long must Supplier maintain delivery and invoice records?",
+      "answer_type": "answerable",
+      "gold_answer": "Supplier must maintain delivery, testing, and invoice records for two years after final payment.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 2,
+          "chunk_id": 10,
+          "marker": "EVAL-C-16.1"
+        }
+      ],
+      "required_answer_terms": [
+        "two years",
+        "final payment"
+      ],
+      "forbidden_answer_terms": [
+        "seven years",
+        "one year"
+      ]
+    },
+    {
+      "id": "eval_008_supplier_delay_cap_chinese",
+      "question": "供应商延迟交付的违约金上限是多少?",
+      "answer_type": "answerable",
+      "gold_answer": "The cap is 10% of the delayed shipment value.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 1,
+          "chunk_id": 7,
+          "marker": "EVAL-C-12.2"
+        }
+      ],
+      "required_answer_terms": [
+        "10%"
+      ],
+      "forbidden_answer_terms": [
+        "20%"
+      ]
+    },
+    {
+      "id": "eval_009_saas_late_payment_interest",
+      "question": "What interest rate applies to overdue undisputed SaaS fees?",
+      "answer_type": "answerable",
+      "gold_answer": "Overdue undisputed amounts accrue interest at 1.5% per month or the legal maximum, whichever is lower.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-MSA-3.2"
+        }
+      ],
+      "required_answer_terms": [
+        "1.5%",
+        "per month"
+      ],
+      "forbidden_answer_terms": [
+        "5%",
+        "30 calendar days"
+      ]
+    },
+    {
+      "id": "eval_010_saas_availability_commitment",
+      "question": "What monthly availability level does the SaaS provider commit to?",
+      "answer_type": "answerable",
+      "gold_answer": "Provider commits to 99.9% monthly production service availability.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-MSA-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "99.9%",
+        "calendar month"
+      ],
+      "forbidden_answer_terms": [
+        "99.5%",
+        "weekly"
+      ]
+    },
+    {
+      "id": "eval_011_saas_service_credit",
+      "question": "What is the service credit if SaaS availability falls below the commitment?",
+      "answer_type": "answerable",
+      "gold_answer": "The sole remedy is a service credit equal to 5% of the affected monthly subscription fee.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-MSA-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "5%",
+        "monthly subscription fee"
+      ],
+      "forbidden_answer_terms": [
+        "10%",
+        "refund of all fees"
+      ]
+    },
+    {
+      "id": "eval_012_saas_liability_cap",
+      "question": "What is the general liability cap in the SaaS MSA?",
+      "answer_type": "answerable",
+      "gold_answer": "The general liability cap is the fees paid or payable in the 12 months before the claim event.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-MSA-7.3"
+        }
+      ],
+      "required_answer_terms": [
+        "12 months",
+        "fees paid or payable"
+      ],
+      "forbidden_answer_terms": [
+        "six months",
+        "unlimited"
+      ]
+    },
+    {
+      "id": "eval_013_saas_data_breach_cap",
+      "question": "What special cap applies to unauthorized disclosure of Customer Data?",
+      "answer_type": "answerable",
+      "gold_answer": "For unauthorized disclosure of Customer Data, Provider's cap is two times the fees paid or payable in the same 12 month period.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-MSA-7.3"
+        }
+      ],
+      "required_answer_terms": [
+        "two times",
+        "Customer Data"
+      ],
+      "forbidden_answer_terms": [
+        "one times",
+        "five times"
+      ]
+    },
+    {
+      "id": "eval_014_saas_cure_period",
+      "question": "How long is the cure period for material breach under the SaaS MSA?",
+      "answer_type": "answerable",
+      "gold_answer": "The cure period is 60 days after written notice.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-MSA-9.2"
+        }
+      ],
+      "required_answer_terms": [
+        "60 days",
+        "written notice"
+      ],
+      "forbidden_answer_terms": [
+        "30 days",
+        "15 days"
+      ]
+    },
+    {
+      "id": "eval_015_saas_data_export_window",
+      "question": "How long after termination will Customer Data remain available for export?",
+      "answer_type": "answerable",
+      "gold_answer": "Customer Data will be available for export for 30 days after termination.",
+      "gold_sources": [
+        {
+          "file_name": "sample_saas_msa.pdf",
+          "page": 1,
+          "chunk_id": 7,
+          "marker": "EVAL-MSA-11.4"
+        }
+      ],
+      "required_answer_terms": [
+        "30 days",
+        "CSV or JSON"
+      ],
+      "forbidden_answer_terms": [
+        "45 days",
+        "PDF only"
+      ]
+    },
+    {
+      "id": "eval_016_saas_source_code_escrow_refusal",
+      "question": "Does the SaaS MSA require source code escrow?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed SaaS MSA does not state a source code escrow requirement.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_017_dpa_processing_instructions",
+      "question": "On whose instructions may the processor process Personal Data?",
+      "answer_type": "answerable",
+      "gold_answer": "Processor may process Personal Data only on documented instructions from Controller.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 0,
+          "chunk_id": 1,
+          "marker": "EVAL-DPA-2.1"
+        }
+      ],
+      "required_answer_terms": [
+        "documented instructions",
+        "Controller"
+      ],
+      "forbidden_answer_terms": [
+        "Processor's discretion"
+      ]
+    },
+    {
+      "id": "eval_018_dpa_encryption_requirements",
+      "question": "What encryption standards must the processor use for Personal Data?",
+      "answer_type": "answerable",
+      "gold_answer": "Personal Data must be encrypted at rest using AES-256 or stronger and in transit using TLS 1.2 or higher.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-DPA-4.2"
+        }
+      ],
+      "required_answer_terms": [
+        "AES-256",
+        "TLS 1.2"
+      ],
+      "forbidden_answer_terms": [
+        "TLS 1.0",
+        "DES"
+      ]
+    },
+    {
+      "id": "eval_019_dpa_subprocessor_notice",
+      "question": "How much prior notice is required before appointing subprocessors?",
+      "answer_type": "answerable",
+      "gold_answer": "Processor must give Controller at least 15 days' prior notice.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 1,
+          "chunk_id": 4,
+          "marker": "EVAL-DPA-5.1"
+        }
+      ],
+      "required_answer_terms": [
+        "15 days",
+        "prior notice"
+      ],
+      "forbidden_answer_terms": [
+        "48 hours",
+        "30 days"
+      ]
+    },
+    {
+      "id": "eval_020_dpa_security_incident_notice",
+      "question": "How quickly must Processor notify Controller after confirming a Security Incident?",
+      "answer_type": "answerable",
+      "gold_answer": "Processor must notify Controller no later than 48 hours after confirming the incident.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-DPA-6.3"
+        }
+      ],
+      "required_answer_terms": [
+        "48 hours",
+        "confirming"
+      ],
+      "forbidden_answer_terms": [
+        "24 hours",
+        "seven days"
+      ]
+    },
+    {
+      "id": "eval_021_dpa_deletion_period",
+      "question": "When must Personal Data be returned or deleted after termination?",
+      "answer_type": "answerable",
+      "gold_answer": "Processor must return or delete Personal Data within 45 days unless law requires retention.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-DPA-8.1"
+        }
+      ],
+      "required_answer_terms": [
+        "45 days",
+        "retention"
+      ],
+      "forbidden_answer_terms": [
+        "10 business days",
+        "one year"
+      ]
+    },
+    {
+      "id": "eval_022_dpa_data_residency_refusal",
+      "question": "Does the DPA require Personal Data to remain only in Germany?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed DPA does not specify a Germany-only data residency requirement.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_023_procurement_quote_threshold",
+      "question": "How many written quotes are required for purchases over USD 25,000?",
+      "answer_type": "answerable",
+      "gold_answer": "Purchases over USD 25,000 require at least three written quotes unless an approved sole-source justification applies.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-PROC-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "three written quotes",
+        "USD 25,000"
+      ],
+      "forbidden_answer_terms": [
+        "two written quotes",
+        "USD 10,000"
+      ]
+    },
+    {
+      "id": "eval_024_procurement_cfo_approval",
+      "question": "What additional approval is required for purchases over USD 100,000?",
+      "answer_type": "answerable",
+      "gold_answer": "Purchases over USD 100,000 require CFO approval before issuing a purchase order.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-PROC-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "USD 100,000",
+        "CFO approval"
+      ],
+      "forbidden_answer_terms": [
+        "CEO approval",
+        "Legal approval only"
+      ]
+    },
+    {
+      "id": "eval_025_procurement_no_splitting",
+      "question": "Can employees split related purchases to avoid approval thresholds?",
+      "answer_type": "answerable",
+      "gold_answer": "No. Employees may not split related purchases into smaller orders to avoid thresholds or quote requirements.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-PROC-4.4"
+        }
+      ],
+      "required_answer_terms": [
+        "may not split",
+        "approval thresholds"
+      ],
+      "forbidden_answer_terms": [
+        "may split"
+      ]
+    },
+    {
+      "id": "eval_026_procurement_payment_terms",
+      "question": "What are the standard supplier payment terms under the procurement policy?",
+      "answer_type": "answerable",
+      "gold_answer": "Standard supplier payment terms are net 45 days from receipt of a valid invoice.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-PROC-6.1"
+        }
+      ],
+      "required_answer_terms": [
+        "net 45 days",
+        "valid invoice"
+      ],
+      "forbidden_answer_terms": [
+        "net 30 days"
+      ]
+    },
+    {
+      "id": "eval_027_procurement_saas_security_review",
+      "question": "What must SaaS vendors that store Confidential Information provide?",
+      "answer_type": "answerable",
+      "gold_answer": "They must complete security review and provide a current SOC 2 Type II report or equivalent independent assessment.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-PROC-7.2"
+        }
+      ],
+      "required_answer_terms": [
+        "SOC 2 Type II",
+        "security review"
+      ],
+      "forbidden_answer_terms": [
+        "ISO 9001"
+      ]
+    },
+    {
+      "id": "eval_028_procurement_quote_threshold_chinese",
+      "question": "采购金额超过 25,000 美元时需要几份书面报价?",
+      "answer_type": "answerable",
+      "gold_answer": "Purchases over USD 25,000 require at least three written quotes.",
+      "gold_sources": [
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-PROC-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "three written quotes"
+      ],
+      "forbidden_answer_terms": [
+        "two written quotes"
+      ]
+    },
+    {
+      "id": "eval_029_procurement_vendor_diversity_refusal",
+      "question": "Does the procurement policy require a minority-owned vendor preference?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed procurement policy does not state a minority-owned vendor preference requirement.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_030_security_mfa_scope",
+      "question": "For which systems is multi-factor authentication required?",
+      "answer_type": "answerable",
+      "gold_answer": "MFA is required for privileged accounts, remote access, production systems, and applications storing Confidential Information.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 0,
+          "chunk_id": 1,
+          "marker": "EVAL-SEC-3.1"
+        }
+      ],
+      "required_answer_terms": [
+        "privileged accounts",
+        "remote access",
+        "Confidential Information"
+      ],
+      "forbidden_answer_terms": [
+        "optional"
+      ]
+    },
+    {
+      "id": "eval_031_security_encryption_alignment",
+      "question": "What encryption does the information security policy require for Confidential Information?",
+      "answer_type": "answerable",
+      "gold_answer": "Confidential Information must be encrypted at rest with AES-256 or an approved equivalent and in transit with TLS 1.2 or higher.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-SEC-4.2"
+        }
+      ],
+      "required_answer_terms": [
+        "AES-256",
+        "TLS 1.2"
+      ],
+      "forbidden_answer_terms": [
+        "TLS 1.0"
+      ]
+    },
+    {
+      "id": "eval_032_security_critical_patch_sla",
+      "question": "How quickly must critical internet-facing vulnerabilities be remediated?",
+      "answer_type": "answerable",
+      "gold_answer": "Critical internet-facing vulnerabilities must be remediated or mitigated within seven calendar days after validation.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 1,
+          "chunk_id": 4,
+          "marker": "EVAL-SEC-5.2"
+        }
+      ],
+      "required_answer_terms": [
+        "seven calendar days",
+        "validation"
+      ],
+      "forbidden_answer_terms": [
+        "30 calendar days"
+      ]
+    },
+    {
+      "id": "eval_033_security_log_retention",
+      "question": "How long must production authentication and security event logs be retained?",
+      "answer_type": "answerable",
+      "gold_answer": "Those logs must be retained for at least one year.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-SEC-6.4"
+        }
+      ],
+      "required_answer_terms": [
+        "one year",
+        "logs"
+      ],
+      "forbidden_answer_terms": [
+        "two years",
+        "30 days"
+      ]
+    },
+    {
+      "id": "eval_034_security_vendor_incident_notice",
+      "question": "How quickly must vendors notify Security of a confirmed or suspected incident?",
+      "answer_type": "answerable",
+      "gold_answer": "Vendors handling Confidential Information must notify Security within 24 hours after discovering a confirmed or suspected incident.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-SEC-8.3"
+        }
+      ],
+      "required_answer_terms": [
+        "24 hours",
+        "suspected security incident"
+      ],
+      "forbidden_answer_terms": [
+        "48 hours",
+        "seven days"
+      ]
+    },
+    {
+      "id": "eval_035_security_dpa_incident_notice_conflict",
+      "question": "Compare the vendor incident notice period in the security policy with the processor incident notice period in the DPA.",
+      "answer_type": "answerable",
+      "gold_answer": "The security policy requires vendor notice within 24 hours, while the DPA requires processor notice no later than 48 hours after confirming a Security Incident.",
+      "gold_sources": [
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 1,
+          "chunk_id": 6,
+          "marker": "EVAL-SEC-8.3"
+        },
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-DPA-6.3"
+        }
+      ],
+      "required_answer_terms": [
+        "24 hours",
+        "48 hours"
+      ],
+      "forbidden_answer_terms": [
+        "same period"
+      ]
+    },
+    {
+      "id": "eval_036_security_biometric_policy_refusal",
+      "question": "Does the information security policy specify biometric data retention rules?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed information security policy does not specify biometric data retention rules.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_037_hr_remote_work_days",
+      "question": "How many days per week may eligible employees work remotely?",
+      "answer_type": "answerable",
+      "gold_answer": "Eligible employees may work remotely up to three days per week with manager approval.",
+      "gold_sources": [
+        {
+          "file_name": "sample_employee_handbook.pdf",
+          "page": 0,
+          "chunk_id": 1,
+          "marker": "EVAL-HR-2.1"
+        }
+      ],
+      "required_answer_terms": [
+        "three days",
+        "manager approval"
+      ],
+      "forbidden_answer_terms": [
+        "five days"
+      ]
+    },
+    {
+      "id": "eval_038_hr_pto_accrual",
+      "question": "How much paid time off do full-time employees accrue per calendar year?",
+      "answer_type": "answerable",
+      "gold_answer": "Full-time employees accrue 15 days of paid time off per calendar year.",
+      "gold_sources": [
+        {
+          "file_name": "sample_employee_handbook.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-HR-4.3"
+        }
+      ],
+      "required_answer_terms": [
+        "15 days",
+        "paid time off"
+      ],
+      "forbidden_answer_terms": [
+        "20 days"
+      ]
+    },
+    {
+      "id": "eval_039_hr_overtime_approval",
+      "question": "What approval is required before non-exempt employees work overtime?",
+      "answer_type": "answerable",
+      "gold_answer": "Non-exempt employees must obtain manager approval before working overtime, except in emergencies.",
+      "gold_sources": [
+        {
+          "file_name": "sample_employee_handbook.pdf",
+          "page": 1,
+          "chunk_id": 4,
+          "marker": "EVAL-HR-5.2"
+        }
+      ],
+      "required_answer_terms": [
+        "manager approval",
+        "overtime"
+      ],
+      "forbidden_answer_terms": [
+        "Finance approval"
+      ]
+    },
+    {
+      "id": "eval_040_hr_expense_deadline",
+      "question": "When must employees submit reimbursement requests with receipts?",
+      "answer_type": "answerable",
+      "gold_answer": "Employees must submit reimbursement requests with receipts within 30 days after incurring the business expense.",
+      "gold_sources": [
+        {
+          "file_name": "sample_employee_handbook.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-HR-6.1"
+        }
+      ],
+      "required_answer_terms": [
+        "30 days",
+        "receipts"
+      ],
+      "forbidden_answer_terms": [
+        "45 days"
+      ]
+    },
+    {
+      "id": "eval_041_hr_union_refusal",
+      "question": "Does the employee handbook describe a collective bargaining agreement?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed employee handbook excerpt does not describe a collective bargaining agreement.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_042_nda_confidentiality_term",
+      "question": "How long do confidentiality obligations continue under the NDA?",
+      "answer_type": "answerable",
+      "gold_answer": "Confidentiality obligations continue for five years after disclosure, while trade secrets remain protected as long as they qualify.",
+      "gold_sources": [
+        {
+          "file_name": "sample_mutual_nda.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-NDA-4.1"
+        }
+      ],
+      "required_answer_terms": [
+        "five years",
+        "trade secrets"
+      ],
+      "forbidden_answer_terms": [
+        "three years"
+      ]
+    },
+    {
+      "id": "eval_043_nda_return_deadline",
+      "question": "How quickly must Confidential Information be returned or destroyed after written request?",
+      "answer_type": "answerable",
+      "gold_answer": "The receiving party must return or destroy Confidential Information within 10 business days after written request.",
+      "gold_sources": [
+        {
+          "file_name": "sample_mutual_nda.pdf",
+          "page": 1,
+          "chunk_id": 4,
+          "marker": "EVAL-NDA-6.2"
+        }
+      ],
+      "required_answer_terms": [
+        "10 business days",
+        "written request"
+      ],
+      "forbidden_answer_terms": [
+        "30 days"
+      ]
+    },
+    {
+      "id": "eval_044_nda_archival_copy",
+      "question": "May the receiving party retain an archival copy after returning or destroying Confidential Information?",
+      "answer_type": "answerable",
+      "gold_answer": "Yes. One archival copy may be retained solely for legal compliance and backup purposes, subject to continuing confidentiality obligations.",
+      "gold_sources": [
+        {
+          "file_name": "sample_mutual_nda.pdf",
+          "page": 1,
+          "chunk_id": 4,
+          "marker": "EVAL-NDA-6.2"
+        }
+      ],
+      "required_answer_terms": [
+        "One archival copy",
+        "legal compliance"
+      ],
+      "forbidden_answer_terms": [
+        "unlimited copies"
+      ]
+    },
+    {
+      "id": "eval_045_nda_equitable_relief",
+      "question": "What remedy may the disclosing party seek for unauthorized disclosure?",
+      "answer_type": "answerable",
+      "gold_answer": "The disclosing party may seek injunctive or other equitable relief without posting bond where permitted by law.",
+      "gold_sources": [
+        {
+          "file_name": "sample_mutual_nda.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-NDA-8.1"
+        }
+      ],
+      "required_answer_terms": [
+        "injunctive",
+        "equitable relief"
+      ],
+      "forbidden_answer_terms": [
+        "liquidated damages"
+      ]
+    },
+    {
+      "id": "eval_046_nda_non_compete_refusal",
+      "question": "Does the NDA include a non-compete covenant?",
+      "answer_type": "unanswerable",
+      "gold_answer": "The indexed NDA does not include a non-compete covenant.",
+      "gold_sources": [],
+      "required_refusal_terms": [
+        "not found",
+        "not provided",
+        "cannot determine",
+        "not enough information",
+        "relevant text was not found",
+        "did not find enough relevant text",
+        "do not contain",
+        "does not contain",
+        "do not specify",
+        "does not specify",
+        "do not mention",
+        "does not mention"
+      ]
+    },
+    {
+      "id": "eval_047_cross_doc_encryption_alignment",
+      "question": "Compare the DPA encryption requirement with the information security policy encryption requirement.",
+      "answer_type": "answerable",
+      "gold_answer": "Both require AES-256 or stronger/equivalent encryption at rest and TLS 1.2 or higher for data in transit.",
+      "gold_sources": [
+        {
+          "file_name": "sample_data_processing_addendum.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-DPA-4.2"
+        },
+        {
+          "file_name": "sample_information_security_policy.pdf",
+          "page": 0,
+          "chunk_id": 2,
+          "marker": "EVAL-SEC-4.2"
+        }
+      ],
+      "required_answer_terms": [
+        "AES-256",
+        "TLS 1.2"
+      ],
+      "forbidden_answer_terms": [
+        "conflict",
+        "TLS 1.0"
+      ]
+    },
+    {
+      "id": "eval_048_cross_doc_payment_term_difference",
+      "question": "Compare the supply contract invoice payment period with the procurement policy standard supplier payment terms.",
+      "answer_type": "answerable",
+      "gold_answer": "The supply contract requires payment within 30 calendar days after a valid invoice, while the procurement policy standard is net 45 days.",
+      "gold_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 0,
+          "chunk_id": 3,
+          "marker": "EVAL-C-5.1"
+        },
+        {
+          "file_name": "sample_procurement_policy.pdf",
+          "page": 1,
+          "chunk_id": 5,
+          "marker": "EVAL-PROC-6.1"
+        }
+      ],
+      "required_answer_terms": [
+        "30 calendar days",
+        "net 45 days"
+      ],
+      "forbidden_answer_terms": [
+        "same payment term"
       ]
     }
   ]

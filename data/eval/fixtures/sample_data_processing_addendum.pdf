@@ -1,0 +1,119 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 948 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(DATA PROCESSING ADDENDUM) Tj
+0 -14 Td
+(Document ID: EVAL-DPA-003) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 2.1 Processor Instructions) Tj
+0 -14 Td
+(Marker: EVAL-DPA-2.1.) Tj
+0 -14 Td
+(Processor will process Personal Data only on documented instructions from Controller, including) Tj
+0 -14 Td
+(instructions in the agreement and applicable order forms.) Tj
+0 -14 Td
+(Processor will promptly notify Controller if it believes an instruction violates applicable data) Tj
+0 -14 Td
+(protection law.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 4.2 Technical and Organizational Measures) Tj
+0 -14 Td
+(Marker: EVAL-DPA-4.2.) Tj
+0 -14 Td
+(Processor must encrypt Personal Data at rest using AES-256 or stronger encryption and encrypt) Tj
+0 -14 Td
+(Personal Data in transit using TLS 1.2 or higher.) Tj
+0 -14 Td
+(Processor must maintain access controls, logging, vulnerability management, and annual workforce) Tj
+0 -14 Td
+(privacy training.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1128 >>
+stream
+BT
+/F1 10 Tf
+48 750 Td
+(DATA PROCESSING ADDENDUM) Tj
+0 -14 Td
+(Document ID: EVAL-DPA-003) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 5.1 Subprocessors) Tj
+0 -14 Td
+(Marker: EVAL-DPA-5.1.) Tj
+0 -14 Td
+(Processor may appoint subprocessors only after giving Controller at least 15 days' prior notice) Tj
+0 -14 Td
+(through the designated subprocessor notice portal.) Tj
+0 -14 Td
+(Controller may object on reasonable data protection grounds during the notice period.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 6.3 Security Incident Notice) Tj
+0 -14 Td
+(Marker: EVAL-DPA-6.3.) Tj
+0 -14 Td
+(Processor must notify Controller without undue delay and no later than 48 hours after confirming a) Tj
+0 -14 Td
+(Security Incident involving Personal Data.) Tj
+0 -14 Td
+(The notice must describe the nature of the incident, affected data categories, mitigation steps, and) Tj
+0 -14 Td
+(contact information.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Section 8.1 Return or Deletion) Tj
+0 -14 Td
+(Marker: EVAL-DPA-8.1.) Tj
+0 -14 Td
+(Upon termination, Processor must return or delete Personal Data within 45 days unless applicable law) Tj
+0 -14 Td
+(requires retention.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001246 00000 n 
+0000001372 00000 n 
+0000002552 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2622
+%%EOF
