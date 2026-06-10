@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Legal Document Assistant">
+  <rect width="64" height="64" rx="10" fill="#1f5fbf" />
+  <path d="M18 13h21l9 9v29H18z" fill="#ffffff" />
+  <path d="M39 13v10h9" fill="#dce9ff" />
+  <path d="M25 31h18M25 38h18M25 45h12" stroke="#1f5fbf" stroke-width="3" stroke-linecap="round" />
+  <path d="M18 13h21l9 9v29H18z" fill="none" stroke="#dce9ff" stroke-width="2" />
+</svg>

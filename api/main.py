@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -10,9 +13,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.dependencies import _memory_service, _qa_service, _vector_store
-from api.routers import chat, documents, memories, review
+from api.dependencies import _agent_service, _memory_service, _qa_service, _vector_store
+from api.routers import agent, chat, documents, matters, memories, review
+from api.schemas.responses import HealthCheckOut, HealthResponse
 from doc_assistant.config.settings import settings
+from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,7 @@ async def lifespan(app: FastAPI):
     _vector_store(settings.default_tenant_id)
     _memory_service(settings.default_tenant_id)
     _qa_service(settings.default_tenant_id)
+    _agent_service(settings.default_tenant_id)
     if not settings.api_keys:
         logger.warning("DOC_ASSISTANT_API_KEYS is not configured; API authentication is disabled.")
     yield
@@ -49,6 +55,8 @@ app.add_middleware(
 
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
+app.include_router(agent.router, prefix="/api/v1")
+app.include_router(matters.router, prefix="/api/v1")
 app.include_router(review.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
 
@@ -56,9 +64,33 @@ app.include_router(memories.router, prefix="/api/v1")
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    start_time = perf_counter()
     request.state.request_id = request_id
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "Request failed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "duration_ms": round((perf_counter() - start_time) * 1000, 2),
+            },
+        )
+        raise
+
     response.headers["X-Request-Id"] = request_id
+    logger.info(
+        "Request completed",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round((perf_counter() - start_time) * 1000, 2),
+        },
+    )
     return response
 
 
@@ -114,9 +146,63 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-@app.get("/health", tags=["health"], summary="Health check")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+@app.get("/health", response_model=HealthResponse, tags=["health"], summary="Health check")
+def health() -> HealthResponse:
+    checks = [
+        _path_check("uploads", settings.upload_dir),
+        _path_check("vector_store", settings.vector_store_dir),
+        _path_check("ingest_jobs", settings.ingest_jobs_db_path.parent),
+        _path_check("agent_tasks", settings.agent_tasks_db_path.parent),
+        _path_check("matters", settings.matter_db_path.parent),
+        _path_check("memory_store", settings.memory_db_path.parent),
+        _configuration_check(
+            "chat_api_key",
+            _chat_api_key_configured(),
+            "Chat provider API key is configured.",
+            "Chat provider API key is missing; question answering will fail until configured.",
+        ),
+        _configuration_check(
+            "embedding_api_key",
+            _embedding_api_key_configured(),
+            "Embedding provider API key is configured.",
+            "Embedding provider API key is missing; document ingestion and retrieval will fail until configured.",
+        ),
+    ]
+    overall_status = "ok" if all(check.status == "ok" for check in checks) else "degraded"
+
+    return HealthResponse(
+        status=overall_status,
+        version=app.version,
+        auth_required=bool(settings.api_keys),
+        default_tenant_id=settings.default_tenant_id,
+        providers={
+            "chat": {
+                "provider": settings.chat_provider,
+                "api": settings.chat_api,
+                "model": settings.chat_model_name,
+                "api_key_configured": _chat_api_key_configured(),
+            },
+            "embedding": {
+                "provider": settings.embedding_provider,
+                "model": settings.embedding_model_name,
+                "api_key_configured": _embedding_api_key_configured(),
+            },
+        },
+        features={
+            "authentication": bool(settings.api_keys),
+            "web_search": settings.web_search_enabled,
+            "pdf_ocr": settings.pdf_ocr_enabled,
+            "memory": True,
+            "agent_tasks": True,
+            "matters": True,
+            "tenant_isolation": True,
+        },
+        limits={
+            "max_upload_bytes": settings.max_upload_bytes,
+            "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
+        },
+        checks=checks,
+    )
 
 
 def _error_response(
@@ -138,3 +224,44 @@ def _error_response(
 
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", None) or "unknown"
+
+
+def _path_check(name: str, path: Path) -> HealthCheckOut:
+    if not path.exists():
+        return HealthCheckOut(name=name, status="degraded", detail="Configured directory does not exist.")
+    if not path.is_dir():
+        return HealthCheckOut(name=name, status="degraded", detail="Configured path is not a directory.")
+    if not os.access(path, os.W_OK):
+        return HealthCheckOut(name=name, status="degraded", detail="Configured directory is not writable.")
+    return HealthCheckOut(name=name, status="ok", detail="Configured directory is writable.")
+
+
+def _configuration_check(
+    name: str,
+    configured: bool,
+    ok_detail: str,
+    degraded_detail: str,
+) -> HealthCheckOut:
+    return HealthCheckOut(
+        name=name,
+        status="ok" if configured else "degraded",
+        detail=ok_detail if configured else degraded_detail,
+    )
+
+
+def _chat_api_key_configured() -> bool:
+    provider = settings.chat_provider.strip().lower().replace("_", "-")
+    if settings.chat_api_key:
+        return True
+    if provider in {"dashscope", "qwen", "tongyi"}:
+        return bool(settings.dashscope_api_key)
+    if provider == "deepseek":
+        return bool(settings.deepseek_api_key)
+    return False
+
+
+def _embedding_api_key_configured() -> bool:
+    provider = settings.embedding_provider.strip().lower().replace("_", "-")
+    if provider == "dashscope":
+        return bool(settings.embedding_api_key or settings.dashscope_api_key)
+    return bool(settings.embedding_api_key)

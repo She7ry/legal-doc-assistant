@@ -29,6 +29,11 @@ frontend/.playwright-cli/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+.playwright-cli/
+playwright-report/
+test-results/
+frontend/playwright-report/
+frontend/test-results/
 output/playwright/
 
 # Local data and vector indexes
@@ -37,6 +42,8 @@ data/uploads/*
 data/vector_store/*
 !data/vector_store/.gitkeep
 data/ingest_jobs.sqlite3*
+data/agent_tasks.sqlite3*
+data/matters.sqlite3*
 data/memory.sqlite3*
 data/eval/vector_store/*
 data/eval/latest_report.json

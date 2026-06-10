@@ -1,81 +1,87 @@
-import { apiRequest } from "./http";
-import { ApiError } from "./http";
 import { readRuntimeSettings } from "../config/runtime";
-import type { AnswerResponse, AskRequest, Citation, MemoryUsage } from "./types";
+import { ApiError, apiRequest } from "./http";
+import type {
+  AgentTaskEvent,
+  AgentTaskRecordResponse,
+  AgentTaskRequest,
+  AgentTaskResumeRequest,
+} from "./types";
 
-export function askQuestion(body: AskRequest): Promise<AnswerResponse> {
-  return apiRequest<AnswerResponse>({
+export function runAgentTask(body: AgentTaskRequest): Promise<AgentTaskRecordResponse> {
+  return apiRequest<AgentTaskRecordResponse>({
     method: "POST",
-    url: "/api/v1/chat/ask",
+    url: "/api/v1/agent/tasks",
     data: body,
   });
 }
 
-export interface StreamMetadata {
-  citations: Citation[];
-  memories_used?: MemoryUsage[];
+export function getAgentTask(taskId: string): Promise<AgentTaskRecordResponse> {
+  return apiRequest<AgentTaskRecordResponse>({
+    method: "GET",
+    url: `/api/v1/agent/tasks/${taskId}`,
+  });
 }
 
-export interface StreamDelta {
-  content: string;
+export function resumeAgentTask(
+  taskId: string,
+  body: AgentTaskResumeRequest,
+): Promise<AgentTaskRecordResponse> {
+  return apiRequest<AgentTaskRecordResponse>({
+    method: "POST",
+    url: `/api/v1/agent/tasks/${taskId}/resume`,
+    data: body,
+  });
 }
 
-export interface StreamHandlers {
-  onMetadata?: (metadata: StreamMetadata) => void;
-  onDelta?: (delta: string) => void;
-  onDone?: (answer: AnswerResponse) => void;
+export interface AgentTaskEventHandlers {
+  onEvent?: (event: AgentTaskEvent) => void;
+  onError?: (message: string) => void;
 }
 
-export async function askQuestionStream(
-  body: AskRequest,
-  handlers: StreamHandlers = {},
-): Promise<AnswerResponse> {
+export async function streamAgentTaskEvents(
+  taskId: string,
+  handlers: AgentTaskEventHandlers = {},
+  afterEventId = 0,
+): Promise<void> {
   const settings = readRuntimeSettings();
   const apiBaseUrl = settings.apiBaseUrl.replace(/\/+$/, "");
-  const response = await fetch(`${apiBaseUrl}/api/v1/chat/ask/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
-      ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
-      ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
+  const response = await fetch(
+    `${apiBaseUrl}/api/v1/agent/tasks/${taskId}/events?after_event_id=${afterEventId}`,
+    {
+      method: "GET",
+      headers: {
+        ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
+        ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
+        ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
+      },
     },
-    body: JSON.stringify(body),
-  });
+  );
 
   if (!response.ok) {
     throw await toFetchApiError(response);
   }
   if (!response.body) {
-    throw new ApiError("当前浏览器不支持流式响应。");
+    throw new ApiError("当前浏览器不支持任务事件流。");
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let answer: AnswerResponse = { content: "", citations: [], memories_used: [] };
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) {
       break;
     }
-
     buffer += decoder.decode(value, { stream: true });
     const parsed = parseSseBuffer(buffer);
     buffer = parsed.rest;
-    for (const event of parsed.events) {
-      answer = handleStreamEvent(event, answer, handlers);
-    }
+    parsed.events.forEach((event) => handleEvent(event, handlers));
   }
 
   buffer += decoder.decode();
   const parsed = parseSseBuffer(`${buffer}\n\n`);
-  for (const event of parsed.events) {
-    answer = handleStreamEvent(event, answer, handlers);
-  }
-
-  return answer;
+  parsed.events.forEach((event) => handleEvent(event, handlers));
 }
 
 interface SseEvent {
@@ -118,18 +124,13 @@ function parseSseBlock(block: string): SseEvent | null {
     return null;
   }
 
-  const dataText = dataLines.join("\n");
   let data: unknown;
   try {
-    data = JSON.parse(dataText);
-  } catch (error) {
-    throw new ApiError("流式响应格式错误。", { detail: dataText });
+    data = JSON.parse(dataLines.join("\n"));
+  } catch {
+    throw new ApiError("任务事件流格式错误。", { detail: dataLines.join("\n") });
   }
-
-  return {
-    event,
-    data,
-  };
+  return { event, data };
 }
 
 function findSseBoundary(value: string): { index: number; length: number } | null {
@@ -137,44 +138,16 @@ function findSseBoundary(value: string): { index: number; length: number } | nul
   return match?.index === undefined ? null : { index: match.index, length: match[0].length };
 }
 
-function handleStreamEvent(
-  event: SseEvent,
-  answer: AnswerResponse,
-  handlers: StreamHandlers,
-): AnswerResponse {
-  if (event.event === "metadata") {
-    const metadata = event.data as StreamMetadata;
-    answer = {
-      ...answer,
-      citations: metadata.citations,
-      memories_used: metadata.memories_used ?? [],
-    };
-    handlers.onMetadata?.(metadata);
-    return answer;
+function handleEvent(event: SseEvent, handlers: AgentTaskEventHandlers) {
+  if (event.event === "heartbeat") {
+    return;
   }
-
-  if (event.event === "delta") {
-    const delta = event.data as StreamDelta;
-    answer = { ...answer, content: answer.content + delta.content };
-    handlers.onDelta?.(delta.content);
-    return answer;
-  }
-
-  if (event.event === "done") {
-    answer = event.data as AnswerResponse;
-    handlers.onDone?.(answer);
-    return answer;
-  }
-
   if (event.event === "error") {
-    const payload = event.data as { code?: string; detail?: unknown };
-    throw new ApiError(String(payload.detail || "流式请求失败。"), {
-      code: payload.code,
-      detail: payload.detail,
-    });
+    const payload = event.data as { detail?: unknown };
+    handlers.onError?.(String(payload.detail || "任务事件流错误。"));
+    return;
   }
-
-  return answer;
+  handlers.onEvent?.(event.data as AgentTaskEvent);
 }
 
 async function toFetchApiError(response: Response): Promise<ApiError> {
