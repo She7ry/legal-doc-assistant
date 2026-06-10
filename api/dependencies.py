@@ -8,12 +8,15 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from api.agent_tasks import AgentTaskStore
 from api.jobs import IngestJobStore
 from doc_assistant.config.settings import settings
+from doc_assistant.matter.store import MatterStore
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.vector_store import MemoryVectorStore
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
+from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.services.qa_service import DocumentQAService
 from doc_assistant.services.tool_calling_service import ToolCallingChatService
 
@@ -21,6 +24,8 @@ _TENANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,126}$")
 _bearer_scheme = HTTPBearer(auto_error=False)
 _job_store = IngestJobStore(settings.ingest_jobs_db_path)
+_agent_task_store = AgentTaskStore(settings.agent_tasks_db_path)
+_matter_store = MatterStore(settings.matter_db_path)
 _memory_store = MemoryStore()
 
 
@@ -111,6 +116,11 @@ def _tool_calling_service(tenant_id: str | None = None) -> ToolCallingChatServic
     return ToolCallingChatService(_qa_service(tenant_id))
 
 
+@lru_cache(maxsize=128)
+def _agent_service(tenant_id: str | None = None) -> LegalAgentService:
+    return LegalAgentService(_qa_service(tenant_id))
+
+
 TenantIdDep = Annotated[str, Depends(get_tenant_id)]
 UserIdDep = Annotated[str, Depends(get_user_id)]
 
@@ -127,6 +137,10 @@ def get_tool_calling_service(tenant_id: TenantIdDep) -> ToolCallingChatService:
     return _tool_calling_service(tenant_id)
 
 
+def get_agent_service(tenant_id: TenantIdDep) -> LegalAgentService:
+    return _agent_service(tenant_id)
+
+
 def get_memory_service(tenant_id: TenantIdDep) -> MemoryService:
     return _memory_service(tenant_id)
 
@@ -135,8 +149,19 @@ def get_ingest_job_store() -> IngestJobStore:
     return _job_store
 
 
+def get_agent_task_store() -> AgentTaskStore:
+    return _agent_task_store
+
+
+def get_matter_store() -> MatterStore:
+    return _matter_store
+
+
 VectorStoreDep = Annotated[DocumentVectorStore, Depends(get_vector_store)]
 QAServiceDep = Annotated[DocumentQAService, Depends(get_qa_service)]
 ToolCallingServiceDep = Annotated[ToolCallingChatService, Depends(get_tool_calling_service)]
+AgentServiceDep = Annotated[LegalAgentService, Depends(get_agent_service)]
 MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 JobStoreDep = Annotated[IngestJobStore, Depends(get_ingest_job_store)]
+AgentTaskStoreDep = Annotated[AgentTaskStore, Depends(get_agent_task_store)]
+MatterStoreDep = Annotated[MatterStore, Depends(get_matter_store)]

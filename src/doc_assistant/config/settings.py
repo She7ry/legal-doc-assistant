@@ -71,6 +71,14 @@ class Settings:
         "DOC_ASSISTANT_INGEST_JOBS_DB_PATH",
         PROJECT_ROOT / "data" / "ingest_jobs.sqlite3",
     )
+    agent_tasks_db_path: Path = _path_env(
+        "DOC_ASSISTANT_AGENT_TASKS_DB_PATH",
+        PROJECT_ROOT / "data" / "agent_tasks.sqlite3",
+    )
+    matter_db_path: Path = _path_env(
+        "DOC_ASSISTANT_MATTER_DB_PATH",
+        PROJECT_ROOT / "data" / "matters.sqlite3",
+    )
     memory_db_path: Path = _path_env(
         "DOC_ASSISTANT_MEMORY_DB_PATH",
         PROJECT_ROOT / "data" / "memory.sqlite3",
@@ -134,4 +142,6 @@ settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 settings.vector_store_dir.mkdir(parents=True, exist_ok=True)
 settings.ingest_jobs_db_path.parent.mkdir(parents=True, exist_ok=True)
+settings.agent_tasks_db_path.parent.mkdir(parents=True, exist_ok=True)
+settings.matter_db_path.parent.mkdir(parents=True, exist_ok=True)
 settings.memory_db_path.parent.mkdir(parents=True, exist_ok=True)

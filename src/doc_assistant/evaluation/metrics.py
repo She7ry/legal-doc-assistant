@@ -31,7 +31,7 @@ def source_candidate_from_citation(citation: Any) -> SourceCandidate:
             file_name=_optional_str(citation.get("file_name")),
             page=citation.get("page") if isinstance(citation.get("page"), int) else None,
             chunk_id=citation.get("chunk_id") if isinstance(citation.get("chunk_id"), int) else None,
-            text=str(citation.get("preview") or ""),
+            text=str(citation.get("exact_quote") or citation.get("preview") or ""),
             source_id=_optional_str(citation.get("source_id")),
         )
 
@@ -43,7 +43,7 @@ def source_candidate_from_citation(citation: Any) -> SourceCandidate:
             if isinstance(getattr(citation, "chunk_id", None), int)
             else None
         ),
-        text=str(getattr(citation, "preview", "") or ""),
+        text=str(getattr(citation, "exact_quote", None) or getattr(citation, "preview", "") or ""),
         source_id=_optional_str(getattr(citation, "source_id", None)),
     )
 
