@@ -127,6 +127,429 @@ class ToolChatResponse(BaseModel):
     evidence: dict[str, Any] | None = None
 
 
+class AgentPlanStepOut(BaseModel):
+    step_id: str
+    title: str
+    purpose: str
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    requires_confirmation: bool = False
+
+    @classmethod
+    def from_step(cls, step) -> "AgentPlanStepOut":
+        return cls(
+            step_id=step.step_id,
+            title=step.title,
+            purpose=step.purpose,
+            tool=step.tool,
+            arguments=step.arguments,
+            requires_confirmation=step.requires_confirmation,
+        )
+
+
+class AgentStepResultOut(BaseModel):
+    step_id: str
+    title: str
+    tool: str
+    status: str
+    summary: str
+    citations: list[CitationOut] = Field(default_factory=list)
+    evidence: dict[str, Any] | None = None
+    guard_warnings: list[str] = Field(default_factory=list)
+    output: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_step(cls, step) -> "AgentStepResultOut":
+        return cls(
+            step_id=step.step_id,
+            title=step.title,
+            tool=step.tool,
+            status=step.status,
+            summary=step.summary,
+            citations=[CitationOut.from_citation(citation) for citation in step.citations],
+            evidence=step.evidence,
+            guard_warnings=step.guard_warnings,
+            output=step.output,
+        )
+
+
+class AgentFindingOut(BaseModel):
+    finding_id: str
+    category: str
+    severity: str
+    summary: str
+    citations: list[str] = Field(default_factory=list)
+    recommended_action: str = ""
+    needs_human_review: bool = True
+    source_step_id: str = ""
+    clause_reference: str = ""
+    evidence_coverage: str = "missing"
+    support_level: str = "missing"
+    unsupported_reason: str = ""
+    source_quote: str = ""
+    location_label: str = ""
+    human_review_status: str = "pending"
+    status: str = "open"
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+    @classmethod
+    def from_finding(cls, finding) -> "AgentFindingOut":
+        return cls(
+            finding_id=finding.finding_id,
+            category=finding.category,
+            severity=finding.severity,
+            summary=finding.summary,
+            citations=finding.citations,
+            recommended_action=finding.recommended_action,
+            needs_human_review=finding.needs_human_review,
+            source_step_id=finding.source_step_id,
+            clause_reference=getattr(finding, "clause_reference", ""),
+            evidence_coverage=getattr(finding, "evidence_coverage", "missing"),
+            support_level=getattr(finding, "support_level", "missing"),
+            unsupported_reason=getattr(finding, "unsupported_reason", ""),
+            source_quote=getattr(finding, "source_quote", ""),
+            location_label=getattr(finding, "location_label", ""),
+            human_review_status=getattr(finding, "human_review_status", "pending"),
+            status=getattr(finding, "status", "open"),
+            evidence=getattr(finding, "evidence", []),
+        )
+
+
+class MatterProfileOut(BaseModel):
+    matter_id: str
+    document_type: str = "Unknown"
+    parties: list[str] = Field(default_factory=list)
+    user_side: str = ""
+    governing_law: str = ""
+    jurisdiction: str = ""
+    key_dates: list[dict[str, Any]] = Field(default_factory=list)
+    review_scope: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    confidence: str = "Low"
+    citations: list[str] = Field(default_factory=list)
+    source_step_id: str = ""
+    confirmation_gates: list[dict[str, Any]] = Field(default_factory=list)
+
+    @classmethod
+    def from_profile(cls, profile) -> "MatterProfileOut":
+        return cls(
+            matter_id=profile.matter_id,
+            document_type=profile.document_type,
+            parties=profile.parties,
+            user_side=profile.user_side,
+            governing_law=profile.governing_law,
+            jurisdiction=profile.jurisdiction,
+            key_dates=profile.key_dates,
+            review_scope=profile.review_scope,
+            open_questions=profile.open_questions,
+            confidence=profile.confidence,
+            citations=profile.citations,
+            source_step_id=profile.source_step_id,
+            confirmation_gates=getattr(profile, "confirmation_gates", []),
+        )
+
+
+class AgentArtifactOut(BaseModel):
+    artifact_id: str
+    artifact_type: str
+    title: str
+    summary: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    source_finding_ids: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_artifact(cls, artifact) -> "AgentArtifactOut":
+        return cls(
+            artifact_id=artifact.artifact_id,
+            artifact_type=artifact.artifact_type,
+            title=artifact.title,
+            summary=artifact.summary,
+            items=artifact.items,
+            source_finding_ids=artifact.source_finding_ids,
+            citations=artifact.citations,
+            metadata=artifact.metadata,
+        )
+
+
+class AgentConfirmationGateOut(BaseModel):
+    gate_id: str
+    gate_type: str
+    title: str
+    question: str
+    status: str = "pending"
+    priority: str = "normal"
+    required: bool = True
+    reason: str = ""
+    related_finding_ids: list[str] = Field(default_factory=list)
+    related_artifact_ids: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_gate(cls, gate) -> "AgentConfirmationGateOut":
+        return cls(
+            gate_id=gate.gate_id,
+            gate_type=gate.gate_type,
+            title=gate.title,
+            question=gate.question,
+            status=gate.status,
+            priority=gate.priority,
+            required=gate.required,
+            reason=gate.reason,
+            related_finding_ids=gate.related_finding_ids,
+            related_artifact_ids=gate.related_artifact_ids,
+            citations=gate.citations,
+            metadata=gate.metadata,
+        )
+
+
+class MatterArtifactRecordOut(BaseModel):
+    artifact_id: str
+    matter_id: str
+    artifact_type: str
+    title: str
+    summary: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    source_finding_ids: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_task_id: str
+    version: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, artifact) -> "MatterArtifactRecordOut":
+        return cls(
+            artifact_id=artifact.artifact_id,
+            matter_id=artifact.matter_id,
+            artifact_type=artifact.artifact_type,
+            title=artifact.title,
+            summary=artifact.summary,
+            items=artifact.items,
+            source_finding_ids=artifact.source_finding_ids,
+            citations=artifact.citations,
+            metadata=artifact.metadata,
+            source_task_id=artifact.source_task_id,
+            version=artifact.version,
+            status=artifact.status,
+            created_at=artifact.created_at,
+            updated_at=artifact.updated_at,
+        )
+
+
+class MatterFindingRecordOut(BaseModel):
+    finding_id: str
+    matter_id: str
+    category: str
+    severity: str
+    summary: str
+    recommended_action: str = ""
+    citations: list[str] = Field(default_factory=list)
+    source_step_id: str = ""
+    clause_reference: str = ""
+    evidence_coverage: str = "missing"
+    support_level: str = "missing"
+    unsupported_reason: str = ""
+    source_quote: str = ""
+    location_label: str = ""
+    needs_human_review: bool = True
+    human_review_status: str = "pending"
+    status: str = "open"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_task_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, finding) -> "MatterFindingRecordOut":
+        return cls(
+            finding_id=finding.finding_id,
+            matter_id=finding.matter_id,
+            category=finding.category,
+            severity=finding.severity,
+            summary=finding.summary,
+            recommended_action=finding.recommended_action,
+            citations=finding.citations,
+            source_step_id=finding.source_step_id,
+            clause_reference=finding.clause_reference,
+            evidence_coverage=finding.evidence_coverage,
+            support_level=finding.support_level,
+            unsupported_reason=finding.unsupported_reason,
+            source_quote=finding.source_quote,
+            location_label=finding.location_label,
+            needs_human_review=finding.needs_human_review,
+            human_review_status=finding.human_review_status,
+            status=finding.status,
+            metadata=finding.metadata,
+            source_task_id=finding.source_task_id,
+            created_at=finding.created_at,
+            updated_at=finding.updated_at,
+        )
+
+
+class MatterRecordOut(BaseModel):
+    matter_id: str
+    title: str
+    status: str
+    matter_profile: dict[str, Any]
+    source_task_id: str
+    latest_task_id: str
+    created_at: datetime
+    updated_at: datetime
+    artifacts: list[MatterArtifactRecordOut] = Field(default_factory=list)
+    findings: list[MatterFindingRecordOut] = Field(default_factory=list)
+
+    @classmethod
+    def from_record(cls, matter) -> "MatterRecordOut":
+        return cls(
+            matter_id=matter.matter_id,
+            title=matter.title,
+            status=matter.status,
+            matter_profile=matter.matter_profile,
+            source_task_id=matter.source_task_id,
+            latest_task_id=matter.latest_task_id,
+            created_at=matter.created_at,
+            updated_at=matter.updated_at,
+            artifacts=[
+                MatterArtifactRecordOut.from_record(artifact)
+                for artifact in matter.artifacts or []
+            ],
+            findings=[
+                MatterFindingRecordOut.from_record(finding)
+                for finding in getattr(matter, "findings", None) or []
+            ],
+        )
+
+
+class MatterListResponse(BaseModel):
+    matters: list[MatterRecordOut]
+    total: int
+
+
+class AgentTaskResponse(BaseModel):
+    task_id: str
+    status: str
+    objective: str
+    plan: list[AgentPlanStepOut]
+    steps: list[AgentStepResultOut]
+    findings: list[AgentFindingOut]
+    missing_information: list[str] = Field(default_factory=list)
+    human_review_required: bool = True
+    report: str
+    citations: list[CitationOut] = Field(default_factory=list)
+    confidence: str | None = None
+    guard_warnings: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] | None = None
+    matter_profile: MatterProfileOut | None = None
+    artifacts: list[AgentArtifactOut] = Field(default_factory=list)
+    confirmation_gates: list[AgentConfirmationGateOut] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_result(cls, result) -> "AgentTaskResponse":
+        matter_profile = (
+            MatterProfileOut.from_profile(result.matter_profile)
+            if result.matter_profile
+            else None
+        )
+        return cls(
+            task_id=result.task_id,
+            status=result.status,
+            objective=result.objective,
+            plan=[AgentPlanStepOut.from_step(step) for step in result.plan],
+            steps=[AgentStepResultOut.from_step(step) for step in result.steps],
+            findings=[AgentFindingOut.from_finding(finding) for finding in result.findings],
+            missing_information=result.missing_information,
+            human_review_required=result.human_review_required,
+            report=result.report,
+            citations=[CitationOut.from_citation(citation) for citation in result.citations],
+            confidence=result.confidence,
+            guard_warnings=result.guard_warnings,
+            evidence=result.evidence,
+            matter_profile=matter_profile,
+            artifacts=[
+                AgentArtifactOut.from_artifact(artifact)
+                for artifact in result.artifacts
+            ],
+            confirmation_gates=[
+                AgentConfirmationGateOut.from_gate(gate)
+                for gate in getattr(result, "confirmation_gates", [])
+            ],
+            metadata=result.metadata,
+        )
+
+
+class AgentTaskEventOut(BaseModel):
+    event_id: int
+    task_id: str
+    event_type: str
+    stage: str
+    progress: int
+    message: str
+    created_at: datetime
+    step_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_event(cls, event) -> "AgentTaskEventOut":
+        return cls(
+            event_id=event.event_id,
+            task_id=event.task_id,
+            event_type=event.event_type,
+            stage=event.stage,
+            progress=event.progress,
+            message=event.message,
+            created_at=event.created_at,
+            step_id=event.step_id,
+            payload=event.payload or {},
+        )
+
+
+class AgentTaskRecordResponse(BaseModel):
+    task_id: str
+    status: str
+    objective: str
+    focus_areas: list[str] = Field(default_factory=list)
+    user_role: str
+    max_steps: int
+    conversation_id: str | None = None
+    matter_id: str | None = None
+    stage: str
+    progress: int
+    submitted_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: AgentTaskResponse | None = None
+    error: str | None = None
+    events: list[AgentTaskEventOut] = Field(default_factory=list)
+
+    @classmethod
+    def from_record(cls, record) -> "AgentTaskRecordResponse":
+        result = AgentTaskResponse(**record.result) if record.result else None
+        return cls(
+            task_id=record.task_id,
+            status=record.status.value if hasattr(record.status, "value") else record.status,
+            objective=record.objective,
+            focus_areas=record.focus_areas,
+            user_role=record.user_role,
+            max_steps=record.max_steps,
+            conversation_id=record.conversation_id,
+            matter_id=getattr(record, "matter_id", None),
+            stage=record.stage,
+            progress=record.progress,
+            submitted_at=record.submitted_at,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            result=result,
+            error=record.error,
+            events=[AgentTaskEventOut.from_event(event) for event in record.events or []],
+        )
+
+
 class ClauseRiskReasonOut(BaseModel):
     reason: str = ""
     citation: str | None = None
@@ -272,3 +695,20 @@ class ErrorResponse(BaseModel):
     code: str
     detail: str
     request_id: str | None = None
+
+
+class HealthCheckOut(BaseModel):
+    name: str
+    status: str
+    detail: str = ""
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    auth_required: bool
+    default_tenant_id: str
+    providers: dict[str, Any]
+    features: dict[str, bool]
+    limits: dict[str, Any]
+    checks: list[HealthCheckOut]

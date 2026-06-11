@@ -7,6 +7,57 @@ from typing import Any
 from doc_assistant.schemas.citation import Citation
 
 SOURCE_REF_PATTERN = re.compile(r"\[([SCDPW]\d+)\]", re.IGNORECASE)
+TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|\d+(?:\.\d+)?%?|[\u4e00-\u9fff]")
+FACT_PATTERN = re.compile(
+    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|"
+    r"\b\d{4}年\d{1,2}月\d{1,2}日\b|"
+    r"\$\s?\d[\d,]*(?:\.\d+)?|"
+    r"\b(?:USD|EUR|RMB|CNY)\s?\d[\d,]*(?:\.\d+)?\b|"
+    r"\b\d+(?:\.\d+)?%\b|"
+    r"\b\d+\s+(?:days?|business days?|calendar days?|months?|years?)\b|"
+    r"\d+\s*(?:个工作日|工作日|日|天|个月|月|年)",
+    re.IGNORECASE,
+)
+STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "and",
+    "are",
+    "based",
+    "before",
+    "between",
+    "but",
+    "can",
+    "cannot",
+    "confidence",
+    "could",
+    "does",
+    "for",
+    "from",
+    "has",
+    "have",
+    "high",
+    "into",
+    "low",
+    "may",
+    "medium",
+    "must",
+    "not",
+    "only",
+    "or",
+    "should",
+    "source",
+    "that",
+    "the",
+    "this",
+    "under",
+    "with",
+    "within",
+    "would",
+}
+DIRECT_SUPPORT_THRESHOLD = 0.45
+PARTIAL_SUPPORT_THRESHOLD = 0.20
 
 
 def build_evidence_profile(
@@ -22,9 +73,17 @@ def build_evidence_profile(
         cited_ids = _source_ids(text)
         valid_ids = [source_id for source_id in cited_ids if source_id in citations_by_id]
         evidence = [_evidence_item(citations_by_id[source_id]) for source_id in valid_ids]
-        support_level = _support_level(cited_ids, valid_ids)
+        cited_text = "\n".join(str(item["quote"] or "") for item in evidence)
+        support_score = _support_score(text, cited_text)
+        unsupported_facts = _unsupported_facts(text, cited_text) if valid_ids else []
+        support_level = _support_level(
+            cited_ids,
+            valid_ids,
+            support_score=support_score,
+            unsupported_facts=unsupported_facts,
+        )
         needs_human_review = support_level != "direct"
-        uncertainty = _uncertainty_for_claim(support_level)
+        uncertainty = _uncertainty_for_claim(support_level, unsupported_facts)
 
         if support_level == "missing":
             unsupported_claims.append(text)
@@ -35,6 +94,8 @@ def build_evidence_profile(
                 "text": text,
                 "citations": valid_ids,
                 "support_level": support_level,
+                "support_score": support_score,
+                "unsupported_facts": unsupported_facts,
                 "evidence": evidence,
                 "uncertainty": uncertainty,
                 "needs_human_review": needs_human_review,
@@ -82,21 +143,85 @@ def _source_ids(text: str) -> list[str]:
     return result
 
 
-def _support_level(cited_ids: list[str], valid_ids: list[str]) -> str:
+def _support_level(
+    cited_ids: list[str],
+    valid_ids: list[str],
+    *,
+    support_score: float,
+    unsupported_facts: list[str],
+) -> str:
     if not cited_ids:
         return "missing"
-    if len(valid_ids) == len(cited_ids):
-        return "direct"
-    if valid_ids:
+    if not valid_ids:
+        return "missing"
+    if len(valid_ids) != len(cited_ids):
         return "partial"
-    return "missing"
+    if unsupported_facts:
+        return "partial"
+    if support_score >= DIRECT_SUPPORT_THRESHOLD:
+        return "direct"
+    if support_score >= PARTIAL_SUPPORT_THRESHOLD:
+        return "partial"
+    return "partial"
 
 
-def _uncertainty_for_claim(support_level: str) -> str:
+def _support_score(claim: str, cited_text: str) -> float:
+    claim_tokens = _material_tokens(_strip_source_refs(claim))
+    if not claim_tokens:
+        return 1.0 if cited_text.strip() else 0.0
+    cited_tokens = _material_tokens(cited_text)
+    if not cited_tokens:
+        return 0.0
+
+    overlap = claim_tokens & cited_tokens
+    return len(overlap) / len(claim_tokens)
+
+
+def _unsupported_facts(claim: str, cited_text: str) -> list[str]:
+    normalized_evidence = _normalize_fact_text(cited_text)
+    unsupported = []
+    for fact in _fact_terms(_strip_source_refs(claim)):
+        if _normalize_fact_text(fact) not in normalized_evidence:
+            unsupported.append(fact)
+    return unsupported
+
+
+def _fact_terms(text: str) -> list[str]:
+    facts = []
+    for match in FACT_PATTERN.finditer(text or ""):
+        fact = " ".join(match.group(0).split())
+        if fact not in facts:
+            facts.append(fact)
+    return facts
+
+
+def _material_tokens(text: str) -> set[str]:
+    tokens = set()
+    for match in TOKEN_PATTERN.finditer(text or ""):
+        token = match.group(0).casefold()
+        if token in STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _strip_source_refs(text: str) -> str:
+    return SOURCE_REF_PATTERN.sub("", text or "")
+
+
+def _normalize_fact_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").casefold()
+
+
+def _uncertainty_for_claim(support_level: str, unsupported_facts: Sequence[str]) -> str:
     if support_level == "direct":
         return "Supported by the cited excerpt, subject to full-document context."
     if support_level == "partial":
-        return "Some cited source IDs were not available in retrieved evidence."
+        if unsupported_facts:
+            return "The cited excerpt does not contain these specific facts: " + ", ".join(
+                unsupported_facts
+            )
+        return "The citation is available, but the claim only partially matches the cited excerpt."
     return "No source citation was attached to this material claim."
 
 

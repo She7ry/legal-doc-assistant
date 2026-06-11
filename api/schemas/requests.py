@@ -23,6 +23,43 @@ class ToolChatRequest(AskRequest):
     max_tool_iterations: int | None = Field(default=None, ge=1, le=10)
 
 
+class AgentTaskRequest(BaseModel):
+    objective: str = Field(..., min_length=1, max_length=2000)
+    focus_areas: list[str] = Field(default_factory=list, max_length=8)
+    user_role: str = Field(default="ordinary", pattern="^(ordinary|lawyer)$")
+    max_steps: int = Field(default=6, ge=3, le=10)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    matter_id: str | None = Field(default=None, max_length=128)
+
+
+class AgentTaskResumeRequest(BaseModel):
+    objective: str | None = Field(default=None, min_length=1, max_length=2000)
+    clarification_answers: list[str] = Field(default_factory=list, max_length=6)
+    focus_areas: list[str] | None = Field(default=None, max_length=8)
+    user_role: str | None = Field(default=None, pattern="^(ordinary|lawyer)$")
+    max_steps: int | None = Field(default=None, ge=3, le=10)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    matter_id: str | None = Field(default=None, max_length=128)
+
+
+class MatterConfirmationGateUpdateRequest(BaseModel):
+    status: str = Field(..., pattern="^(pending|approved|waived|needs_info)$")
+    note: str | None = Field(default=None, max_length=1000)
+    confirmed_value: str | None = Field(default=None, max_length=1000)
+
+
+class MatterFormalReportCreateRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class MatterFindingUpdateRequest(BaseModel):
+    human_review_status: str = Field(
+        ...,
+        pattern="^(pending|approved|waived|needs_info|resolved)$",
+    )
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class MemoryCreateRequest(BaseModel):
     scope: str = Field(default="user", pattern="^(user|org|session|task)$")
     type: str = Field(default="preference", pattern="^(preference|fact|task_state|feedback|correction)$")

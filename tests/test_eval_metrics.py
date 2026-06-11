@@ -5,7 +5,10 @@ from doc_assistant.evaluation.metrics import (
     aggregate_scores,
     score_generation_case,
     score_retrieval_case,
+    source_candidate_from_citation,
 )
+from doc_assistant.schemas.citation import Citation
+from scripts.run_rag_eval import _evaluate_thresholds, _parse_min_score
 
 
 def test_retrieval_metrics_score_gold_marker_rank() -> None:
@@ -81,3 +84,46 @@ def test_aggregate_scores_ignores_not_applicable_values() -> None:
 
     assert aggregate == {"recall": 0.5, "refusal_accuracy": 1.0}
 
+
+def test_source_candidate_from_citation_prefers_exact_quote_for_eval_matching() -> None:
+    citation = Citation(
+        source_id="S1",
+        file_name="contract.pdf",
+        preview="Short preview",
+        exact_quote="Full exact quote with Marker: EVAL-C-12.2.",
+    )
+
+    candidate = source_candidate_from_citation(citation)
+
+    assert "EVAL-C-12.2" in candidate.text
+
+
+def test_eval_thresholds_pass_and_fail_by_metric_path() -> None:
+    summary = {
+        "retrieval": {"at_5": {"recall": 0.8}},
+        "generation": {"citation_accuracy": 0.75},
+    }
+
+    results = _evaluate_thresholds(
+        summary,
+        ["retrieval.at_5.recall=0.75", "generation.citation_accuracy=0.9"],
+    )
+
+    assert results == [
+        {
+            "metric": "retrieval.at_5.recall",
+            "minimum": 0.75,
+            "actual": 0.8,
+            "passed": True,
+        },
+        {
+            "metric": "generation.citation_accuracy",
+            "minimum": 0.9,
+            "actual": 0.75,
+            "passed": False,
+        },
+    ]
+
+
+def test_parse_min_score_requires_metric_and_numeric_value() -> None:
+    assert _parse_min_score("generation.faithfulness=1") == ("generation.faithfulness", 1.0)
