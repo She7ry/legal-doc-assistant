@@ -175,8 +175,27 @@ class MemoryService:
         *,
         status: str | None = "active",
         include_expired: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MemoryRecord]:
         return self.store.list_memories(
+            tenant_id,
+            user_id,
+            status=status,
+            include_expired=include_expired,
+            limit=limit,
+            offset=offset,
+        )
+
+    def count_memories(
+        self,
+        tenant_id: str,
+        user_id: str,
+        *,
+        status: str | None = "active",
+        include_expired: bool = False,
+    ) -> int:
+        return self.store.count_memories(
             tenant_id,
             user_id,
             status=status,
@@ -328,4 +347,3 @@ class MemoryService:
 
 def _can_read_memory(memory: MemoryRecord, user_id: str) -> bool:
     return memory.user_id == user_id or memory.visibility in {"team", "org"}
-

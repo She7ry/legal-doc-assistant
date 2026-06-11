@@ -5,7 +5,7 @@ import json
 import logging
 from time import sleep
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
@@ -20,6 +20,7 @@ from api.dependencies import (
 )
 from api.schemas.requests import AgentTaskRequest, AgentTaskResumeRequest
 from api.schemas.responses import AgentTaskRecordResponse, AgentTaskResponse
+from api.task_queue import submit_background_task
 from doc_assistant.services.agent_service import (
     LegalAgentService,
     clarification_questions_for_task,
@@ -39,7 +40,6 @@ router = APIRouter(prefix="/agent", tags=["agent"], dependencies=[Depends(requir
 )
 def create_agent_task(
     body: AgentTaskRequest,
-    background_tasks: BackgroundTasks,
     agent_service: AgentServiceDep,
     task_store: AgentTaskStoreDep,
     matter_store: MatterStoreDep,
@@ -68,7 +68,7 @@ def create_agent_task(
         updated = task_store.get(record.task_id, tenant_id, user_id) or record
         return AgentTaskRecordResponse.from_record(updated)
 
-    background_tasks.add_task(_run_agent_task, record, agent_service, task_store, matter_store)
+    enqueue_agent_task(record, agent_service, task_store, matter_store)
     return AgentTaskRecordResponse.from_record(record)
 
 
@@ -81,7 +81,6 @@ def create_agent_task(
 def resume_agent_task(
     task_id: str,
     body: AgentTaskResumeRequest,
-    background_tasks: BackgroundTasks,
     agent_service: AgentServiceDep,
     task_store: AgentTaskStoreDep,
     matter_store: MatterStoreDep,
@@ -133,7 +132,7 @@ def resume_agent_task(
         updated = task_store.get(task_id, tenant_id, user_id) or resumed
         return AgentTaskRecordResponse.from_record(updated)
 
-    background_tasks.add_task(_run_agent_task, resumed, agent_service, task_store, matter_store)
+    enqueue_agent_task(resumed, agent_service, task_store, matter_store)
     return AgentTaskRecordResponse.from_record(resumed)
 
 
@@ -206,6 +205,12 @@ def _run_agent_task(
         )
         response = AgentTaskResponse.from_result(result)
         encoded_response = jsonable_encoder(response)
+    except Exception as exc:
+        logger.exception("Agent task failed", extra={"task_id": task_id})
+        task_store.mark_failed(task_id, f"Failed to run Agent task: {exc}")
+        return
+
+    try:
         matter_store.upsert_from_agent_result(
             tenant_id=record.tenant_id,
             user_id=record.user_id,
@@ -213,11 +218,28 @@ def _run_agent_task(
             result=encoded_response,
         )
     except Exception as exc:
-        logger.exception("Agent task failed", extra={"task_id": task_id})
-        task_store.mark_failed(task_id, f"Failed to run Agent task: {exc}")
-        return
+        logger.exception("Agent task completed but matter persistence failed", extra={"task_id": task_id})
+        metadata = dict(encoded_response.get("metadata") or {})
+        metadata["matter_persist_error"] = str(exc)
+        encoded_response["metadata"] = metadata
 
     task_store.mark_succeeded(task_id, encoded_response)
+
+
+def enqueue_agent_task(
+    record: AgentTaskRecord,
+    agent_service: LegalAgentService,
+    task_store: AgentTaskStore,
+    matter_store: MatterStore,
+) -> bool:
+    return submit_background_task(
+        f"agent:{record.task_id}",
+        _run_agent_task,
+        record,
+        agent_service,
+        task_store,
+        matter_store,
+    )
 
 
 def _agent_task_event_stream(

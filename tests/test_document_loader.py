@@ -53,3 +53,39 @@ def test_load_docx_extracts_paragraphs_and_tables(tmp_path) -> None:
     assert "Section 1 Term" in documents[0].page_content
     assert "Party | Acme" in documents[0].page_content
     assert documents[0].metadata["file_extension"] == ".docx"
+
+
+def test_load_docx_extracts_headers_footers_footnotes_and_alt_text(tmp_path) -> None:
+    path = tmp_path / "contract.docx"
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+  <w:body>
+    <w:p><w:r><w:t>Main agreement text.</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:docPr id="1" name="Logo" descr="Acme logo alt text"/></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>
+"""
+    header_xml = """<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Confidential header</w:t></w:r></w:p>
+</w:hdr>"""
+    footer_xml = """<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Page footer</w:t></w:r></w:p>
+</w:ftr>"""
+    footnotes_xml = """<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote><w:p><w:r><w:t>Footnote disclosure.</w:t></w:r></w:p></w:footnote>
+</w:footnotes>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/header1.xml", header_xml)
+        archive.writestr("word/footer1.xml", footer_xml)
+        archive.writestr("word/footnotes.xml", footnotes_xml)
+
+    documents = document_loader.load_documents(path)
+    content = documents[0].page_content
+
+    assert "Main agreement text." in content
+    assert "Acme logo alt text" in content
+    assert "Confidential header" in content
+    assert "Page footer" in content
+    assert "Footnote disclosure." in content

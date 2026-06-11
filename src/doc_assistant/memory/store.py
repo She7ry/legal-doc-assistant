@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -18,7 +21,10 @@ from doc_assistant.memory.schemas import (
     VALID_MEMORY_STATUSES,
     VALID_MEMORY_TYPES,
     VALID_MEMORY_VISIBILITIES,
+    is_unset,
 )
+
+SCHEMA_VERSION = 1
 
 
 class MemoryStore:
@@ -31,17 +37,8 @@ class MemoryStore:
         self._ensure_schema()
 
     def ensure_user(self, tenant_id: str, user_id: str) -> None:
-        now = _to_db_time(_utc_now())
         with self._connect() as connection, self._lock:
-            connection.execute(
-                """
-                INSERT INTO users (tenant_id, user_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(tenant_id, user_id)
-                DO UPDATE SET updated_at = excluded.updated_at
-                """,
-                (tenant_id, user_id, now, now),
-            )
+            self._ensure_user_row(connection, tenant_id, user_id)
 
     def ensure_conversation(
         self,
@@ -50,20 +47,9 @@ class MemoryStore:
         conversation_id: str,
         title: str | None = None,
     ) -> None:
-        self.ensure_user(tenant_id, user_id)
-        now = _to_db_time(_utc_now())
         with self._connect() as connection, self._lock:
-            connection.execute(
-                """
-                INSERT INTO conversations (
-                    conversation_id, tenant_id, user_id, title, status, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, 'active', ?, ?)
-                ON CONFLICT(conversation_id)
-                DO UPDATE SET updated_at = excluded.updated_at
-                """,
-                (conversation_id, tenant_id, user_id, title, now, now),
-            )
+            self._ensure_user_row(connection, tenant_id, user_id)
+            self._ensure_conversation_row(connection, tenant_id, user_id, conversation_id, title)
 
     def add_message(
         self,
@@ -77,7 +63,6 @@ class MemoryStore:
         if role not in {"user", "assistant"}:
             raise ValueError("Message role must be 'user' or 'assistant'.")
 
-        self.ensure_conversation(tenant_id, user_id, conversation_id)
         record = MessageRecord(
             message_id=message_id or uuid4().hex,
             conversation_id=conversation_id,
@@ -88,6 +73,8 @@ class MemoryStore:
             created_at=_utc_now(),
         )
         with self._connect() as connection, self._lock:
+            self._ensure_user_row(connection, tenant_id, user_id)
+            self._ensure_conversation_row(connection, tenant_id, user_id, conversation_id)
             connection.execute(
                 """
                 INSERT INTO messages (
@@ -110,6 +97,56 @@ class MemoryStore:
                 (_to_db_time(record.created_at), conversation_id),
             )
         return record
+
+    def _ensure_user_row(
+        self,
+        connection: sqlite3.Connection,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        now = _to_db_time(_utc_now())
+        connection.execute(
+            """
+            INSERT INTO users (tenant_id, user_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(tenant_id, user_id)
+            DO UPDATE SET updated_at = excluded.updated_at
+            """,
+            (tenant_id, user_id, now, now),
+        )
+
+    def _ensure_conversation_row(
+        self,
+        connection: sqlite3.Connection,
+        tenant_id: str,
+        user_id: str,
+        conversation_id: str,
+        title: str | None = None,
+    ) -> None:
+        now = _to_db_time(_utc_now())
+        existing = connection.execute(
+            """
+            SELECT tenant_id, user_id FROM conversations
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if existing and (existing["tenant_id"] != tenant_id or existing["user_id"] != user_id):
+            raise ValueError("Conversation id belongs to a different tenant or user.")
+
+        connection.execute(
+            """
+            INSERT INTO conversations (
+                conversation_id, tenant_id, user_id, title, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'active', ?, ?)
+            ON CONFLICT(conversation_id)
+            DO UPDATE SET
+                updated_at = excluded.updated_at,
+                title = COALESCE(excluded.title, conversations.title)
+            """,
+            (conversation_id, tenant_id, user_id, title, now, now),
+        )
 
     def save_memory(self, memory: MemoryRecord) -> MemoryRecord:
         _validate_memory(memory)
@@ -220,27 +257,61 @@ class MemoryStore:
         *,
         status: str | None = "active",
         include_expired: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MemoryRecord]:
         clauses = ["tenant_id = ?", "(user_id = ? OR visibility IN ('team', 'org'))"]
         values: list[object] = [tenant_id, user_id]
         if status is not None:
             clauses.append("status = ?")
             values.append(status)
+        if not include_expired:
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
+            values.append(_to_db_time(_utc_now()))
 
+        pagination = ""
+        if limit is not None:
+            pagination = " LIMIT ? OFFSET ?"
+            values.extend([max(0, limit), max(0, offset)])
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
                 SELECT * FROM memories
                 WHERE {' AND '.join(clauses)}
                 ORDER BY updated_at DESC
+                {pagination}
                 """,
                 values,
             ).fetchall()
 
-        memories = [_row_to_memory(row) for row in rows]
-        if include_expired:
-            return memories
-        return [memory for memory in memories if not memory.is_expired()]
+        return [_row_to_memory(row) for row in rows]
+
+    def count_memories(
+        self,
+        tenant_id: str,
+        user_id: str,
+        *,
+        status: str | None = "active",
+        include_expired: bool = False,
+    ) -> int:
+        clauses = ["tenant_id = ?", "(user_id = ? OR visibility IN ('team', 'org'))"]
+        values: list[object] = [tenant_id, user_id]
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        if not include_expired:
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
+            values.append(_to_db_time(_utc_now()))
+
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*) AS count FROM memories
+                WHERE {' AND '.join(clauses)}
+                """,
+                values,
+            ).fetchone()
+        return int(row["count"] if row else 0)
 
     def find_active_memory_by_key(
         self,
@@ -287,12 +358,12 @@ class MemoryStore:
             type=current.type,
             key=_normalize_key(update.key) if update.key is not None else current.key,
             content=update.content.strip() if update.content is not None else current.content,
-            value_json=update.value_json if update.value_json is not None else current.value_json,
+            value_json=current.value_json if is_unset(update.value_json) else update.value_json,
             source=update.source if update.source is not None else current.source,
             confidence=update.confidence if update.confidence is not None else current.confidence,
             created_at=current.created_at,
             updated_at=_utc_now(),
-            expires_at=update.expires_at if update.expires_at is not None else current.expires_at,
+            expires_at=current.expires_at if is_unset(update.expires_at) else update.expires_at,
             visibility=update.visibility if update.visibility is not None else current.visibility,
             permissions=update.permissions if update.permissions is not None else current.permissions,
             embedding_id=current.embedding_id,
@@ -359,12 +430,24 @@ class MemoryStore:
         current = self.get_memory(tenant_id, user_id, memory_id)
         if current is None or current.user_id != user_id:
             return None
-        return self.update_memory(
-            tenant_id,
-            user_id,
-            memory_id,
-            MemoryUpdate(status=status),  # type: ignore[arg-type]
-        )
+        updated = replace(current, status=status, updated_at=_utc_now())  # type: ignore[arg-type]
+        _validate_memory(updated)
+        with self._connect() as connection, self._lock:
+            connection.execute(
+                """
+                UPDATE memories
+                SET status = ?, updated_at = ?
+                WHERE memory_id = ? AND tenant_id = ? AND user_id = ?
+                """,
+                (
+                    updated.status,
+                    _to_db_time(updated.updated_at),
+                    updated.memory_id,
+                    tenant_id,
+                    user_id,
+                ),
+            )
+        return updated
 
     def search_memories_lexical(
         self,
@@ -375,12 +458,35 @@ class MemoryStore:
         limit: int = 5,
         min_confidence: float = 0.0,
     ) -> list[MemoryCandidate]:
-        terms = [term.casefold() for term in query.split() if len(term.strip()) >= 2]
-        memories = [
-            memory
-            for memory in self.list_memories(tenant_id, user_id, status="active")
-            if memory.confidence >= min_confidence and not memory.is_expired()
+        terms = _lexical_terms(query)
+        clauses = [
+            "tenant_id = ?",
+            "(user_id = ? OR visibility IN ('team', 'org'))",
+            "status = 'active'",
+            "confidence >= ?",
+            "(expires_at IS NULL OR expires_at > ?)",
         ]
+        values: list[object] = [tenant_id, user_id, min_confidence, _to_db_time(_utc_now())]
+        if terms:
+            term_clauses = []
+            for term in terms:
+                term_clauses.append("LOWER(type || ' ' || key || ' ' || content) LIKE ?")
+                values.append(f"%{term}%")
+            clauses.append(f"({' OR '.join(term_clauses)})")
+
+        sql_limit = limit if not terms else max(limit * 20, limit)
+        values.append(sql_limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM memories
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        memories = [_row_to_memory(row) for row in rows]
         if not terms:
             return [MemoryCandidate(memory=memory, score=None) for memory in memories[:limit]]
 
@@ -431,6 +537,12 @@ class MemoryStore:
         with self._connect() as connection, self._lock:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS users (
                     tenant_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
@@ -446,7 +558,10 @@ class MemoryStore:
                     title TEXT,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (tenant_id, user_id)
+                        REFERENCES users(tenant_id, user_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -456,7 +571,13 @@ class MemoryStore:
                     user_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (tenant_id, user_id)
+                        REFERENCES users(tenant_id, user_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS memories (
@@ -480,7 +601,13 @@ class MemoryStore:
                     status TEXT NOT NULL DEFAULT 'active',
                     source_message_id TEXT,
                     conversation_id TEXT,
-                    task_id TEXT
+                    task_id TEXT,
+                    FOREIGN KEY (source_message_id)
+                        REFERENCES messages(message_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE SET NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS task_states (
@@ -492,7 +619,13 @@ class MemoryStore:
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    expires_at TEXT
+                    expires_at TEXT,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (tenant_id, user_id)
+                        REFERENCES users(tenant_id, user_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS retrieval_logs (
@@ -504,7 +637,13 @@ class MemoryStore:
                     document_count INTEGER NOT NULL,
                     memory_count INTEGER NOT NULL,
                     selected_memory_ids_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (tenant_id, user_id)
+                        REFERENCES users(tenant_id, user_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS feedback_events (
@@ -515,7 +654,16 @@ class MemoryStore:
                     message_id TEXT,
                     rating INTEGER,
                     comment TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (message_id)
+                        REFERENCES messages(message_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (tenant_id, user_id)
+                        REFERENCES users(tenant_id, user_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_memories_subject
@@ -528,12 +676,28 @@ class MemoryStore:
                     ON retrieval_logs (tenant_id, user_id, created_at);
                 """
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+                VALUES (?, ?, ?)
+                """,
+                (SCHEMA_VERSION, "memory_schema_v1", _to_db_time(_utc_now())),
+            )
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 def _memory_values(memory: MemoryRecord) -> tuple[object, ...]:
@@ -613,6 +777,17 @@ def _normalize_key(value: str | None) -> str:
     return key[:120]
 
 
+def _lexical_terms(query: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in query.split():
+        normalized = term.strip().casefold()
+        if len(normalized) >= 2 and normalized not in seen:
+            terms.append(normalized)
+            seen.add(normalized)
+    return terms
+
+
 def _json_dump(value: object | None) -> str | None:
     if value is None:
         return None
@@ -649,4 +824,3 @@ def _empty_to_none(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
-

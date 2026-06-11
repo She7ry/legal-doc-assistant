@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from doc_assistant.matter.export import render_artifact_pdf
 from doc_assistant.matter.store import MatterStore
 
 
@@ -51,6 +52,13 @@ def test_matter_store_upserts_profile_and_artifact_versions(tmp_path) -> None:
     assert loaded.artifacts[0].artifact_type == "risk_matrix"
     assert loaded.artifacts[0].version == 2
     assert loaded.artifacts[0].items[0]["category"] == "termination"
+
+    events = store.list_events("matter-1", "tenant-a", "user-a")
+    assert events is not None
+    assert {event.event_type for event in events} >= {
+        "matter_profile_upserted",
+        "artifact_upserted",
+    }
 
 
 def test_matter_store_isolates_tenants_and_users(tmp_path) -> None:
@@ -296,6 +304,10 @@ def test_matter_store_creates_formal_report_after_gates_are_resolved(tmp_path) -
     assert formal_report.items[0]["generated_by"] == "lawyer-1"
     assert formal_report.items[0]["source_artifact_ids"] == ["risk_matrix"]
     assert formal_report.metadata["note"] == ""
+
+    pdf = render_artifact_pdf(matter=second, artifact=formal_report)
+    assert pdf.startswith(b"%PDF-1.4")
+    assert b"%%EOF" in pdf
 
 
 def test_matter_store_rejects_formal_report_with_unresolved_gates(tmp_path) -> None:

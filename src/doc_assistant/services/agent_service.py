@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+from time import sleep
 from typing import Any, Callable
 from uuid import uuid4
 
+from doc_assistant.config.settings import settings
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.evidence import build_evidence_profile
@@ -76,6 +80,19 @@ AGENT_TOOL_REGISTRY: dict[str, dict[str, str]] = {
         "description": "Compile the final task report with gates and artifacts.",
     },
 }
+
+PLANNER_PROMPT = """You are a legal review planner. Given the user's objective and available tools, create an execution plan.
+Available tools:
+{tool_descriptions}
+
+Objective:
+{objective}
+
+Focus areas:
+{focus_areas}
+
+Output a JSON array of steps. Each step must include step_id, title, purpose, tool, and arguments.
+Only use tools from the available tools list. Keep the plan under {max_steps} steps and include synthesize_report as the final step."""
 
 VERSION_COMPARE_KEYWORDS = (
     "compare versions",
@@ -434,44 +451,21 @@ class LegalAgentService:
             payload={"plan": [_plan_step_payload(step) for step in plan]},
         )
         citation_registry = _CitationRegistry()
-        steps: list[AgentStepResult] = []
         findings: list[AgentFinding] = []
         missing_information: list[str] = []
 
-        executable_steps = [step for step in plan if step.tool != "synthesize_report"]
-        step_count = max(len(executable_steps), 1)
-        for step_index, plan_step in enumerate(plan, start=1):
-            if plan_step.tool != "synthesize_report":
-                _emit_progress(
-                    progress_callback,
-                    event_type="step_started",
-                    stage=plan_step.step_id,
-                    progress=10 + int((step_index - 1) / step_count * 70),
-                    message=f"Started step: {plan_step.title}",
-                    step_id=plan_step.step_id,
-                    payload={"step": _plan_step_payload(plan_step)},
-                )
-            step = self._execute_step(
-                plan_step,
-                objective=objective,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                task_id=resolved_task_id,
-                citation_registry=citation_registry,
-            )
-            steps.append(step)
+        steps = self._execute_plan_steps(
+            plan,
+            objective=objective,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=resolved_task_id,
+            citation_registry=citation_registry,
+            progress_callback=progress_callback,
+        )
+        for step in steps:
             findings.extend(self._findings_from_step(step))
             missing_information.extend(_dedupe_texts(step.output.get("missing_information", [])))
-            if plan_step.tool != "synthesize_report":
-                _emit_progress(
-                    progress_callback,
-                    event_type="step_completed",
-                    stage=plan_step.step_id,
-                    progress=15 + int(step_index / step_count * 70),
-                    message=f"Completed step: {plan_step.title}",
-                    step_id=plan_step.step_id,
-                    payload={"step": _step_result_payload(step)},
-                )
 
         findings = _audit_findings(_renumber_findings(findings), citation_registry.citations)
         missing_information = _dedupe_texts(missing_information)
@@ -726,7 +720,252 @@ class LegalAgentService:
                 arguments={},
             )
         )
-        return _trim_plan(plan, normalized_max_steps)
+        heuristic_plan = _trim_plan(plan, normalized_max_steps)
+        if self._should_use_llm_planner(objective, focus_areas, heuristic_plan):
+            llm_plan = self.plan_task_with_llm(
+                objective=objective,
+                focus_areas=focus_areas,
+                max_steps=normalized_max_steps,
+            )
+            if llm_plan:
+                return llm_plan
+        return heuristic_plan
+
+    def _should_use_llm_planner(
+        self,
+        objective: str,
+        focus_areas: list[str],
+        heuristic_plan: list[AgentPlanStep],
+    ) -> bool:
+        if not getattr(settings, "agent_llm_planner_enabled", True):
+            return False
+        if focus_areas:
+            return False
+        if len(heuristic_plan) <= 2:
+            return True
+        lowered = objective.casefold()
+        return any(
+            keyword in lowered
+            for keyword in (
+                "gdpr",
+                "ccpa",
+                "hipaa",
+                "compliance",
+                "data processing",
+                "privacy compliance",
+                "regulatory",
+                "合规",
+                "监管",
+                "个人信息",
+            )
+        )
+
+    def plan_task_with_llm(
+        self,
+        *,
+        objective: str,
+        focus_areas: list[str],
+        max_steps: int,
+    ) -> list[AgentPlanStep]:
+        tool_descriptions = "\n".join(
+            f"- {name}: {info['description']}"
+            for name, info in sorted(AGENT_TOOL_REGISTRY.items())
+        )
+        prompt = PLANNER_PROMPT.format(
+            tool_descriptions=tool_descriptions,
+            objective=objective,
+            focus_areas=", ".join(focus_areas) or "None provided",
+            max_steps=max_steps,
+        )
+        try:
+            response = self.qa_service._invoke_chat_messages(
+                [
+                    {"role": "system", "content": "You are a legal workflow planner."},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+        except Exception:
+            return []
+        return _parse_llm_plan(response, max_steps)
+
+    def _execute_plan_steps(
+        self,
+        plan: list[AgentPlanStep],
+        *,
+        objective: str,
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str,
+        citation_registry: "_CitationRegistry",
+        progress_callback: ProgressCallback | None,
+    ) -> list[AgentStepResult]:
+        executable_steps = [step for step in plan if step.tool != "synthesize_report"]
+        step_count = max(len(executable_steps), 1)
+        executable_index = {
+            id(step): index
+            for index, step in enumerate(executable_steps, start=1)
+        }
+
+        def run_sequential(plan_step: AgentPlanStep) -> AgentStepResult:
+            self._emit_step_started(
+                plan_step,
+                progress_callback=progress_callback,
+                step_index=executable_index.get(id(plan_step), 1),
+                step_count=step_count,
+            )
+            step = self._execute_step(
+                plan_step,
+                objective=objective,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                citation_registry=citation_registry,
+            )
+            self._emit_step_completed(
+                step,
+                progress_callback=progress_callback,
+                step_index=executable_index.get(id(plan_step), 1),
+                step_count=step_count,
+            )
+            return step
+
+        if not plan:
+            return []
+
+        ordered_steps: list[AgentStepResult] = []
+        remaining_steps = list(plan)
+        if remaining_steps and remaining_steps[0].tool != "synthesize_report":
+            ordered_steps.append(run_sequential(remaining_steps.pop(0)))
+
+        report_steps = [step for step in remaining_steps if step.tool == "synthesize_report"]
+        middle_steps = [step for step in remaining_steps if step.tool != "synthesize_report"]
+        parallel_steps = [
+            step for step in middle_steps if _is_parallel_agent_step(step)
+        ]
+        dependent_steps = [
+            step for step in middle_steps if not _is_parallel_agent_step(step)
+        ]
+
+        if len(parallel_steps) > 1 and _agent_max_parallel_steps() > 1:
+            ordered_steps.extend(
+                self._execute_parallel_steps(
+                    parallel_steps,
+                    objective=objective,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                    citation_registry=citation_registry,
+                    progress_callback=progress_callback,
+                    executable_index=executable_index,
+                    step_count=step_count,
+                )
+            )
+        else:
+            for plan_step in parallel_steps:
+                ordered_steps.append(run_sequential(plan_step))
+
+        for plan_step in dependent_steps:
+            ordered_steps.append(run_sequential(plan_step))
+
+        for plan_step in report_steps:
+            ordered_steps.append(run_sequential(plan_step))
+
+        return ordered_steps
+
+    def _execute_parallel_steps(
+        self,
+        plan_steps: list[AgentPlanStep],
+        *,
+        objective: str,
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str,
+        citation_registry: "_CitationRegistry",
+        progress_callback: ProgressCallback | None,
+        executable_index: dict[int, int],
+        step_count: int,
+    ) -> list[AgentStepResult]:
+        for plan_step in plan_steps:
+            self._emit_step_started(
+                plan_step,
+                progress_callback=progress_callback,
+                step_index=executable_index.get(id(plan_step), 1),
+                step_count=step_count,
+            )
+
+        raw_results: dict[str, QAAnswer | AgentStepResult] = {}
+        max_workers = min(_agent_max_parallel_steps(), len(plan_steps))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._execute_step_raw_with_retry,
+                    plan_step,
+                    objective=objective,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                ): plan_step
+                for plan_step in plan_steps
+            }
+            for future in as_completed(futures):
+                plan_step = futures[future]
+                raw_results[plan_step.step_id] = future.result()
+
+        ordered_results = []
+        for plan_step in plan_steps:
+            step = self._finalize_step_execution(
+                plan_step,
+                raw_results[plan_step.step_id],
+                citation_registry,
+            )
+            ordered_results.append(step)
+            self._emit_step_completed(
+                step,
+                progress_callback=progress_callback,
+                step_index=executable_index.get(id(plan_step), 1),
+                step_count=step_count,
+            )
+        return ordered_results
+
+    def _emit_step_started(
+        self,
+        plan_step: AgentPlanStep,
+        *,
+        progress_callback: ProgressCallback | None,
+        step_index: int,
+        step_count: int,
+    ) -> None:
+        if plan_step.tool == "synthesize_report":
+            return
+        _emit_progress(
+            progress_callback,
+            event_type="step_started",
+            stage=plan_step.step_id,
+            progress=10 + int((step_index - 1) / step_count * 70),
+            message=f"Started step: {plan_step.title}",
+            step_id=plan_step.step_id,
+            payload={"step": _plan_step_payload(plan_step)},
+        )
+
+    def _emit_step_completed(
+        self,
+        step: AgentStepResult,
+        *,
+        progress_callback: ProgressCallback | None,
+        step_index: int,
+        step_count: int,
+    ) -> None:
+        if step.tool == "synthesize_report":
+            return
+        _emit_progress(
+            progress_callback,
+            event_type="step_completed",
+            stage=step.step_id,
+            progress=15 + int(step_index / step_count * 70),
+            message=f"Completed step: {step.title}",
+            step_id=step.step_id,
+            payload={"step": _step_result_payload(step)},
+        )
 
     def _execute_step(
         self,
@@ -738,42 +977,94 @@ class LegalAgentService:
         task_id: str,
         citation_registry: "_CitationRegistry",
     ) -> AgentStepResult:
+        raw_result = self._execute_step_raw_with_retry(
+            plan_step,
+            objective=objective,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+        )
+        return self._finalize_step_execution(plan_step, raw_result, citation_registry)
+
+    def _execute_step_raw_with_retry(
+        self,
+        plan_step: AgentPlanStep,
+        *,
+        objective: str,
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str,
+    ) -> QAAnswer | AgentStepResult:
+        max_retries = max(0, int(getattr(settings, "agent_step_max_retries", 2)))
+        backoff_seconds = _agent_retry_backoff_seconds()
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return self._execute_step_raw(
+                    plan_step,
+                    objective=objective,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                )
+            except (RuntimeError, TimeoutError, ConnectionError) as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    sleep(backoff_seconds[min(attempt, len(backoff_seconds) - 1)])
+
+        return AgentStepResult(
+            step_id=plan_step.step_id,
+            title=plan_step.title,
+            tool=plan_step.tool,
+            status="failed",
+            summary=(
+                f"Step failed after {max_retries + 1} attempt(s): "
+                f"{last_error or 'unknown error'}"
+            ),
+            output={"error": str(last_error or "unknown error")},
+        )
+
+    def _execute_step_raw(
+        self,
+        plan_step: AgentPlanStep,
+        *,
+        objective: str,
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str,
+    ) -> QAAnswer | AgentStepResult:
         if plan_step.tool == "document_qa":
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 str(plan_step.arguments["question"]),
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "extract_parties_dates_jurisdiction":
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 str(plan_step.arguments["question"]),
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "review_clause":
-            answer = self.qa_service.review_clause(
+            return self.qa_service.review_clause(
                 clause_type=str(plan_step.arguments["clause_type"]),
                 top_k=int(plan_step.arguments.get("top_k") or 5),
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "check_conflict":
-            answer = self.qa_service.check_conflict(
+            return self.qa_service.check_conflict(
                 contract_query=str(plan_step.arguments["contract_query"]),
                 policy_query=str(plan_step.arguments["policy_query"]),
                 top_k=int(plan_step.arguments.get("top_k") or 5),
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "compare_document_versions":
             query = str(plan_step.arguments.get("query") or objective)
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 (
                     "Compare the available document versions or drafts relevant to this task. "
                     "Identify changed obligations, risk allocation, dates, parties, governing law, "
@@ -784,11 +1075,10 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "create_obligation_calendar":
             query = str(plan_step.arguments.get("query") or objective)
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 (
                     "Extract a structured obligation calendar from the cited documents. "
                     "For each item include obligation, trigger, deadline, owner if stated, "
@@ -799,11 +1089,10 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "suggest_clause_revision":
             clause_type = str(plan_step.arguments.get("clause_type") or "requested clause")
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 (
                     "Suggest a revised clause position for the requested legal issue. "
                     "Do not invent facts. Tie each drafting suggestion to the current cited clause "
@@ -814,10 +1103,9 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "build_evidence_profile":
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 (
                     "Build an evidence profile for the task. List material claims, source "
                     "citations, exact quoted support, support level, and unsupported reasons. "
@@ -827,10 +1115,9 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "generate_negotiation_checklist":
-            answer = self.qa_service.ask(
+            return self.qa_service.ask(
                 (
                     "Generate a negotiation checklist from the cited contract excerpts. "
                     "For each issue include the ask, fallback position, priority, owner, and "
@@ -841,7 +1128,6 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
-            return self._answer_step(plan_step, answer, citation_registry)
 
         if plan_step.tool == "synthesize_report":
             return AgentStepResult(
@@ -861,6 +1147,16 @@ class LegalAgentService:
             summary=f"Unknown agent tool: {plan_step.tool}",
             output={"error": f"Unknown agent tool: {plan_step.tool}"},
         )
+
+    def _finalize_step_execution(
+        self,
+        plan_step: AgentPlanStep,
+        raw_result: QAAnswer | AgentStepResult,
+        citation_registry: "_CitationRegistry",
+    ) -> AgentStepResult:
+        if isinstance(raw_result, AgentStepResult):
+            return raw_result
+        return self._answer_step(plan_step, raw_result, citation_registry)
 
     def _answer_step(
         self,
@@ -1173,6 +1469,103 @@ def _review_scope_from_plan(plan: list[AgentPlanStep]) -> list[str]:
         if clause_type:
             scope.append(clause_type)
     return _dedupe_texts(scope)
+
+
+def _parse_llm_plan(response: str, max_steps: int) -> list[AgentPlanStep]:
+    data = _extract_json_array(response)
+    if not isinstance(data, list):
+        return []
+
+    steps: list[AgentPlanStep] = []
+    seen_step_ids = set()
+    for index, item in enumerate(data[:max_steps], start=1):
+        if not isinstance(item, dict):
+            continue
+        tool = _clean_text(item.get("tool"))
+        if tool not in AGENT_TOOL_REGISTRY:
+            continue
+        step_id = _clean_step_id(item.get("step_id")) or f"step_{index}"
+        if step_id in seen_step_ids:
+            step_id = f"{step_id}_{index}"
+        seen_step_ids.add(step_id)
+        arguments = item.get("arguments")
+        steps.append(
+            AgentPlanStep(
+                step_id=step_id,
+                title=_clean_text(item.get("title")) or AGENT_TOOL_REGISTRY[tool]["label"],
+                purpose=_clean_text(item.get("purpose")) or AGENT_TOOL_REGISTRY[tool]["description"],
+                tool=tool,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                requires_confirmation=bool(item.get("requires_confirmation", False)),
+            )
+        )
+
+    if not steps:
+        return []
+    if steps[0].tool == "synthesize_report":
+        return []
+    if steps[-1].tool != "synthesize_report":
+        if len(steps) >= max_steps:
+            steps = steps[: max_steps - 1]
+        steps.append(
+            AgentPlanStep(
+                step_id="report",
+                title="Compile report",
+                purpose="Synthesize findings, evidence, missing information, and human-review gates.",
+                tool="synthesize_report",
+                arguments={},
+            )
+        )
+    return steps[:max_steps]
+
+
+def _extract_json_array(content: str) -> list[Any] | None:
+    text = (content or "").strip()
+    if not text:
+        return None
+    fenced_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.IGNORECASE | re.DOTALL)
+    candidates = [fenced_match.group(1)] if fenced_match else []
+    candidates.append(text)
+    first_bracket = text.find("[")
+    last_bracket = text.rfind("]")
+    if 0 <= first_bracket < last_bracket:
+        candidates.append(text[first_bracket : last_bracket + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            return parsed
+    return None
+
+
+def _clean_step_id(value: Any) -> str:
+    text = _clean_text(value).casefold().replace(" ", "_")
+    text = re.sub(r"[^a-z0-9_-]+", "_", text).strip("_-")
+    return text[:80]
+
+
+def _is_parallel_agent_step(step: AgentPlanStep) -> bool:
+    return step.tool == "review_clause"
+
+
+def _agent_max_parallel_steps() -> int:
+    return max(1, int(getattr(settings, "agent_max_parallel_steps", 3)))
+
+
+def _agent_retry_backoff_seconds() -> list[float]:
+    raw_value = getattr(settings, "agent_step_retry_backoff_seconds", (2.0, 5.0))
+    if not isinstance(raw_value, str):
+        return [max(0.0, float(value)) for value in raw_value] or [2.0, 5.0]
+
+    values = []
+    for item in raw_value.split(","):
+        try:
+            values.append(max(0.0, float(item.strip())))
+        except ValueError:
+            continue
+    return values or [2.0, 5.0]
 
 
 def _workflow_type(objective: str) -> str:

@@ -83,6 +83,14 @@ class MemoryUpdateRequest(BaseModel):
     status: str | None = Field(default=None, pattern="^(active|stale|deleted)$")
 
 
+class MemoryBatchCreateRequest(BaseModel):
+    memories: list[MemoryCreateRequest] = Field(..., min_length=1, max_length=100)
+
+
+class MemoryBatchDeleteRequest(BaseModel):
+    memory_ids: list[str] = Field(..., min_length=1, max_length=100)
+
+
 class ClauseReviewRequest(BaseModel):
     clause_type: str = Field(
         ...,

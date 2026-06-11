@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Final, Literal, get_args
 
 
 MemoryScope = Literal["user", "org", "session", "task"]
@@ -11,11 +11,24 @@ MemorySource = Literal["explicit", "inferred", "imported", "system_generated"]
 MemoryStatus = Literal["active", "stale", "deleted"]
 MemoryVisibility = Literal["private", "team", "org"]
 
-VALID_MEMORY_SCOPES = {"user", "org", "session", "task"}
-VALID_MEMORY_TYPES = {"preference", "fact", "task_state", "feedback", "correction"}
-VALID_MEMORY_SOURCES = {"explicit", "inferred", "imported", "system_generated"}
-VALID_MEMORY_STATUSES = {"active", "stale", "deleted"}
-VALID_MEMORY_VISIBILITIES = {"private", "team", "org"}
+VALID_MEMORY_SCOPES = set(get_args(MemoryScope))
+VALID_MEMORY_TYPES = set(get_args(MemoryType))
+VALID_MEMORY_SOURCES = set(get_args(MemorySource))
+VALID_MEMORY_STATUSES = set(get_args(MemoryStatus))
+VALID_MEMORY_VISIBILITIES = set(get_args(MemoryVisibility))
+
+
+@dataclass(frozen=True)
+class _UnsetType:
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET: Final = _UnsetType()
+
+
+def is_unset(value: object) -> bool:
+    return value is UNSET
 
 
 @dataclass(frozen=True)
@@ -81,12 +94,12 @@ class MemoryWriteIntent:
 @dataclass(frozen=True)
 class MemoryUsage:
     memory_id: str
-    type: str
+    type: MemoryType
     key: str
     content: str
-    source: str
+    source: MemorySource
     confidence: float
-    scope: str
+    scope: MemoryScope
     score: float | None = None
 
 
@@ -94,10 +107,10 @@ class MemoryUsage:
 class MemoryUpdate:
     key: str | None = None
     content: str | None = None
-    value_json: dict[str, Any] | None = None
+    value_json: dict[str, Any] | None | _UnsetType = UNSET
     source: MemorySource | None = None
     confidence: float | None = None
-    expires_at: datetime | None = None
+    expires_at: datetime | None | _UnsetType = UNSET
     visibility: MemoryVisibility | None = None
     permissions: tuple[str, ...] | None = None
     status: MemoryStatus | None = None

@@ -15,6 +15,7 @@ dependencies = [
     "pypdf>=5.0,<7.0",
     "dashscope>=1.20,<2.0",
     "requests>=2.31,<3.0",
+    "httpx>=0.27,<1.0",
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
     "python-multipart>=0.0.9,<1.0",
@@ -23,13 +24,31 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "coverage[toml]>=7.0,<8.0",
     "ruff>=0.8,<1.0",
 ]
+eval = [
+    "reportlab>=4.0,<5.0",
+]
+
+[project.scripts]
+run-rag-eval = "doc_assistant.evaluation.cli:run_eval"
+generate-eval-fixtures = "doc_assistant.evaluation.cli:generate_fixtures"
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "RUF001"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

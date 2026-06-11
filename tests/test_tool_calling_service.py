@@ -25,6 +25,17 @@ class SingleDocumentVectorStore:
         ]
 
 
+class DuplicateDocumentVectorStore:
+    tenant_id = "default"
+
+    def search(self, query: str, k: int | None = None) -> list[Document]:
+        document = Document(
+            page_content="Payment is due within 30 days after invoice approval.",
+            metadata={"file_name": "supply-contract.pdf", "page": 2, "chunk_id": 7},
+        )
+        return [document, document]
+
+
 class DocumentToolModel:
     def __init__(self) -> None:
         self.calls = 0
@@ -114,6 +125,17 @@ def test_tool_calling_service_executes_search_documents_tool() -> None:
     assert answer.citations[0].file_name == "supply-contract.pdf"
     assert answer.tool_calls[0].name == "search_documents"
     assert answer.tool_calls[0].result["result_count"] == 1
+
+
+def test_tool_calling_service_reuses_duplicate_document_source_ids() -> None:
+    model = DocumentToolModel()
+    qa_service = DocumentQAService(vector_store=DuplicateDocumentVectorStore(), chat_model=model)
+    service = ToolCallingChatService(qa_service)
+
+    answer = service.ask("What are the payment terms?")
+
+    assert [citation.source_id for citation in answer.citations] == ["D1"]
+    assert [item["source_id"] for item in answer.tool_calls[0].result["results"]] == ["D1", "D1"]
 
 
 def test_tool_calling_service_executes_web_search_when_enabled() -> None:
