@@ -1,24 +1,21 @@
 from __future__ import annotations
 
-# ruff: noqa: E402
-
-from dataclasses import dataclass, field
+import argparse
+import hashlib
 import json
-import sys
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import wrap
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from doc_assistant.config.settings import settings
+from doc_assistant.evaluation.constants import DEFAULT_REFUSAL_TERMS
 from doc_assistant.ingestion.document_loader import file_sha256, load_documents
-from doc_assistant.retrieval.vector_store import _chunk_text_with_heading, _split_legal_sections
+from doc_assistant.retrieval.vector_store import (
+    INGESTION_CHUNK_SEPARATORS,
+    split_documents_for_ingestion,
+)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = PROJECT_ROOT / "data" / "eval" / "fixtures"
 DATASET_PATH = PROJECT_ROOT / "data" / "eval" / "eval_dataset.json"
 
@@ -38,7 +35,7 @@ class EvalCase:
     markers: tuple[str, ...] = ()
     required_answer_terms: tuple[str, ...] = ()
     forbidden_answer_terms: tuple[str, ...] = ()
-    required_refusal_terms: tuple[str, ...] = field(default_factory=tuple)
+    required_refusal_terms: tuple[str, ...] = ()
 
 
 DOCUMENTS = [
@@ -325,22 +322,6 @@ DOCUMENTS = [
         ],
     ),
 ]
-
-
-REFUSAL_TERMS = (
-    "not found",
-    "not provided",
-    "cannot determine",
-    "not enough information",
-    "relevant text was not found",
-    "did not find enough relevant text",
-    "do not contain",
-    "does not contain",
-    "do not specify",
-    "does not specify",
-    "do not mention",
-    "does not mention",
-)
 
 
 CASES = [
@@ -756,6 +737,9 @@ CASES = [
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate the starter RAG eval fixtures.")
+    parser.parse_args()
+
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
     DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -776,6 +760,8 @@ def main() -> None:
             "Expanded synthetic legal RAG evaluation dataset. Documents are fictitious "
             "but structured to resemble realistic contracts, policies, and legal work product."
         ),
+        "default_refusal_terms": list(DEFAULT_REFUSAL_TERMS),
+        "chunking": _chunking_metadata(),
         "documents": [
             {
                 "file_name": path.name,
@@ -797,17 +783,51 @@ def _case_to_dict(case: EvalCase, marker_sources: dict[str, dict[str, object]]) 
         "id": case.id,
         "question": case.question,
         "answer_type": case.answer_type,
+        "category": _case_category(case),
+        "tags": _case_tags(case),
         "gold_answer": case.gold_answer,
         "gold_sources": [marker_sources[marker] for marker in case.markers],
     }
     if case.answer_type == "unanswerable":
-        data["required_refusal_terms"] = list(case.required_refusal_terms or REFUSAL_TERMS)
+        if case.required_refusal_terms:
+            data["required_refusal_terms"] = list(case.required_refusal_terms)
         return data
     if case.required_answer_terms:
         data["required_answer_terms"] = list(case.required_answer_terms)
     if case.forbidden_answer_terms:
         data["forbidden_answer_terms"] = list(case.forbidden_answer_terms)
     return data
+
+
+def _case_category(case: EvalCase) -> str:
+    if len(case.markers) > 1 or "cross_doc" in case.id:
+        return "cross_document"
+    if "_procurement_" in case.id:
+        return "procurement_policy"
+    if "_security_" in case.id:
+        return "information_security_policy"
+    if "_dpa_" in case.id:
+        return "data_processing_addendum"
+    if "_saas_" in case.id:
+        return "saas_msa"
+    if "_hr_" in case.id:
+        return "employee_handbook"
+    if "_nda_" in case.id:
+        return "mutual_nda"
+    return "supply_contract"
+
+
+def _case_tags(case: EvalCase) -> list[str]:
+    tags = [case.answer_type, _case_category(case)]
+    if _contains_cjk(case.question):
+        tags.append("chinese_query")
+    if len(case.markers) > 1 or "cross_doc" in case.id:
+        tags.append("cross_document")
+    return tags
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
 def _find_marker_sources(
@@ -841,37 +861,56 @@ def _find_marker_sources(
 
 
 def _split_like_ingestion(pdf_path: Path):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-        separators=[
-            "\n第",
-            "\nSection ",
-            "\nArticle ",
-            "\nClause ",
-            "\nSchedule ",
-            "\nExhibit ",
-            "\n\n",
-            "\n",
-            "。 ",
-            "；",
-            ". ",
-            "; ",
-            ", ",
-            " ",
-            "",
-        ],
-    )
-    chunks = splitter.split_documents(_split_legal_sections(load_documents(pdf_path)))
-    for chunk in chunks:
-        chunk.page_content = _chunk_text_with_heading(
-            chunk.page_content,
-            chunk.metadata.get("section_heading"),
-        )
-    return chunks
+    return split_documents_for_ingestion(load_documents(pdf_path))
+
+
+def _chunking_metadata() -> dict[str, object]:
+    payload = {
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        "separators": list(INGESTION_CHUNK_SEPARATORS),
+    }
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return {**payload, "config_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
 
 def _write_simple_pdf(path: Path, pages: list[list[str]]) -> None:
+    if _write_reportlab_pdf(path, pages):
+        return
+    _write_minimal_pdf(path, pages)
+
+
+def _write_reportlab_pdf(path: Path, pages: list[list[str]]) -> bool:
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfgen import canvas
+    except ImportError:
+        return False
+
+    font_name = "STSong-Light"
+    pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+    document = canvas.Canvas(str(path), pagesize=letter)
+    _, page_height = letter
+    for lines in pages:
+        y = page_height - 42
+        document.setFont(font_name, 10)
+        for raw_line in lines:
+            wrapped_lines = wrap(raw_line, width=96) if raw_line else [""]
+            for line in wrapped_lines:
+                if y < 42:
+                    document.showPage()
+                    document.setFont(font_name, 10)
+                    y = page_height - 42
+                document.drawString(48, y, line)
+                y -= 14
+        document.showPage()
+    document.save()
+    return True
+
+
+def _write_minimal_pdf(path: Path, pages: list[list[str]]) -> None:
     objects: list[bytes] = []
     page_object_numbers: list[int] = []
     font_object_number = 3 + len(pages) * 2

@@ -5,8 +5,10 @@ import logging
 import math
 import re
 import threading
+import time
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,8 @@ from doc_assistant.ingestion.document_loader import (
     load_documents,
 )
 from doc_assistant.models.language_model import build_embedding_model
+from doc_assistant.observability import traced_operation
+from doc_assistant.retrieval.bm25_index import BM25Document, PersistentBM25Index
 from doc_assistant.schemas.citation import IngestResult
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,23 @@ _LEGAL_SECTION_PATTERN = re.compile(
     r"(?:Section|Article|Clause|Schedule|Exhibit|Appendix)\s+[\w\dIVXLC]+"
     r")\s*[:：.-]?\s*(.*)$",
     re.IGNORECASE,
+)
+INGESTION_CHUNK_SEPARATORS: tuple[str, ...] = (
+    "\n第",
+    "\nSection ",
+    "\nArticle ",
+    "\nClause ",
+    "\nSchedule ",
+    "\nExhibit ",
+    "\n\n",
+    "\n",
+    "。 ",
+    "；",
+    ". ",
+    "; ",
+    ", ",
+    " ",
+    "",
 )
 ProgressCallback = Callable[[str, int, str | None], None]
 
@@ -58,6 +79,41 @@ class _SearchCandidate:
     relevance: float = 0.0
 
 
+class _QueryCache:
+    def __init__(self, *, ttl_seconds: int, max_size: int) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_size = max_size
+        self._values: dict[str, tuple[float, list[Document]]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> list[Document] | None:
+        if self._ttl_seconds <= 0 or self._max_size <= 0:
+            return None
+        with self._lock:
+            entry = self._values.get(key)
+            if entry is None:
+                return None
+            stored_at, documents = entry
+            if time.time() - stored_at > self._ttl_seconds:
+                self._values.pop(key, None)
+                return None
+            self._values[key] = (time.time(), documents)
+            return [_copy_document(document) for document in documents]
+
+    def set(self, key: str, documents: list[Document]) -> None:
+        if self._ttl_seconds <= 0 or self._max_size <= 0:
+            return
+        with self._lock:
+            if len(self._values) >= self._max_size and key not in self._values:
+                oldest_key = min(self._values, key=lambda item: self._values[item][0])
+                self._values.pop(oldest_key, None)
+            self._values[key] = (time.time(), [_copy_document(document) for document in documents])
+
+    def clear(self) -> None:
+        with self._lock:
+            self._values.clear()
+
+
 class DocumentVectorStore:
     def __init__(
         self,
@@ -70,33 +126,29 @@ class DocumentVectorStore:
             settings.collection_name,
             self.tenant_id,
         )
+        effective_persist_directory = Path(persist_directory or settings.vector_store_dir)
         self.vector_store = Chroma(
             collection_name=effective_collection_name,
             embedding_function=build_embedding_model(),
-            persist_directory=str(persist_directory or settings.vector_store_dir),
+            persist_directory=str(effective_persist_directory),
+        )
+        self._bm25_index = PersistentBM25Index(
+            _bm25_index_path(effective_persist_directory, effective_collection_name)
+        )
+        self._bm25_rebuild_attempted = False
+        self._query_cache = _QueryCache(
+            ttl_seconds=max(0, int(getattr(settings, "retrieval_cache_ttl_seconds", 300))),
+            max_size=max(0, int(getattr(settings, "retrieval_cache_max_size", 128))),
         )
         self._write_lock = threading.Lock()
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
-            separators=[
-                "\n第",
-                "\nSection ",
-                "\nArticle ",
-                "\nClause ",
-                "\nSchedule ",
-                "\nExhibit ",
-                "\n\n",
-                "\n",
-                "。 ",
-                "；",
-                ". ",
-                "; ",
-                ", ",
-                " ",
-                "",
-            ],
+            separators=list(INGESTION_CHUNK_SEPARATORS),
         )
+
+    def split_documents(self, file_path: Path) -> list[Document]:
+        return split_documents_for_ingestion(load_documents(file_path), splitter=self.splitter)
 
     def ingest_file(
         self,
@@ -167,14 +219,9 @@ class DocumentVectorStore:
             document.metadata["file_extension"] = file_path.suffix.lower()
 
         _report_progress(progress_callback, "chunking", 40)
-        section_documents = _split_legal_sections(documents)
-        chunks = self.splitter.split_documents(section_documents)
+        chunks = split_documents_for_ingestion(documents, splitter=self.splitter)
         ids = []
         for index, chunk in enumerate(chunks):
-            chunk.page_content = _chunk_text_with_heading(
-                chunk.page_content,
-                chunk.metadata.get("section_heading"),
-            )
             chunk.metadata["file_id"] = file_id
             chunk.metadata["file_name"] = display_name
             chunk.metadata["tenant_id"] = self.tenant_id
@@ -199,6 +246,7 @@ class DocumentVectorStore:
             with self._write_lock:
                 try:
                     self.vector_store.delete(ids=ids)
+                    self._bm25_index.delete_documents(ids)
                 except Exception as exc:
                     logger.warning(
                         "Failed to clear stale chunks for this ingest version",
@@ -208,9 +256,11 @@ class DocumentVectorStore:
                     raise RuntimeError("Failed to prepare vector store for document ingest.") from exc
 
                 _report_progress(progress_callback, "indexing", 85)
-                self.vector_store.add_documents(chunks, ids=ids)
+                self._batch_embed_and_add(chunks, ids)
+                self._bm25_index.add_documents(_bm25_documents_for_chunks(chunks, ids))
                 try:
                     self._deactivate_records(active_records, superseded_by_file_id=file_id)
+                    self._bm25_index.mark_inactive(record["id"] for record in active_records)
                 except Exception as exc:
                     warning = (
                         "New document version was indexed, but older versions could not be "
@@ -223,6 +273,7 @@ class DocumentVectorStore:
                     )
                     warnings.append(warning)
                     _report_progress(progress_callback, "indexing", 92, warning)
+                self._query_cache.clear()
 
         _report_progress(progress_callback, "completed", 100)
         return IngestResult(
@@ -240,14 +291,45 @@ class DocumentVectorStore:
 
     def search(self, query: str, k: int | None = None) -> list[Document]:
         top_k = max(1, int(k or settings.top_k))
+        cache_key = self._query_cache_key(query, top_k)
+        query_cache = getattr(self, "_query_cache", None)
+        cached_documents = query_cache.get(cache_key) if query_cache is not None else None
+        if cached_documents is not None:
+            return cached_documents
+
         fetch_k = max(top_k, int(settings.retrieval_fetch_k), top_k * 5)
-        candidates = self._rank_candidates(query, fetch_k=fetch_k)
+        with traced_operation(
+            "vector_search",
+            tenant_id=getattr(self, "tenant_id", getattr(settings, "default_tenant_id", "default")),
+            top_k=top_k,
+            fetch_k=fetch_k,
+            query=query[:120],
+        ):
+            candidates = self._rank_candidates(query, fetch_k=fetch_k)
         selected = _select_diverse_candidates(
             candidates,
             top_k=top_k,
             lambda_mult=_clamp_float(settings.retrieval_mmr_lambda, minimum=0.0, maximum=1.0),
         )
-        return [_document_with_retrieval_metadata(candidate) for candidate in selected]
+        documents = [_document_with_retrieval_metadata(candidate) for candidate in selected]
+        if query_cache is not None:
+            query_cache.set(cache_key, documents)
+        return [_copy_document(document) for document in documents]
+
+    def _query_cache_key(self, query: str, top_k: int) -> str:
+        mode = str(settings.retrieval_mode or "hybrid").strip().lower()
+        parts = [
+            getattr(self, "tenant_id", getattr(settings, "default_tenant_id", "default")),
+            mode,
+            str(top_k),
+            str(settings.retrieval_fetch_k),
+            str(settings.retrieval_min_relevance),
+            str(getattr(settings, "retrieval_rerank_mode", "lexical")),
+            str(getattr(settings, "retrieval_rerank_weight", 0.25)),
+            str(settings.retrieval_mmr_lambda),
+            query.strip(),
+        ]
+        return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
     def list_documents(self) -> list[dict[str, Any]]:
         records = self._all_records(include_documents=False)
@@ -391,7 +473,51 @@ class DocumentVectorStore:
         *,
         fetch_k: int,
     ) -> list[tuple[Document, float, str]]:
+        index = getattr(self, "_bm25_index", None)
+        if index is not None:
+            try:
+                query_tokens = _tokenize_for_search(query)
+                hits = index.search(query_tokens, fetch_k)
+                if hits or index.active_document_count() > 0:
+                    return [
+                        (
+                            Document(
+                                page_content=hit.document,
+                                metadata=dict(hit.metadata),
+                            ),
+                            hit.score,
+                            hit.doc_id,
+                        )
+                        for hit in hits
+                    ]
+
+                if not getattr(self, "_bm25_rebuild_attempted", True):
+                    self._rebuild_bm25_index()
+                    hits = index.search(query_tokens, fetch_k)
+                    return [
+                        (
+                            Document(
+                                page_content=hit.document,
+                                metadata=dict(hit.metadata),
+                            ),
+                            hit.score,
+                            hit.doc_id,
+                        )
+                        for hit in hits
+                    ]
+                return []
+            except Exception:
+                logger.warning(
+                    "Persistent BM25 search failed; falling back to Chroma full scan.",
+                    extra={"tenant_id": self.tenant_id},
+                    exc_info=True,
+                )
         return _bm25_rank(query, self._active_records_for_search(), fetch_k)
+
+    def _rebuild_bm25_index(self) -> None:
+        self._bm25_rebuild_attempted = True
+        records = self._active_records_for_search()
+        self._bm25_index.replace_all(_bm25_documents_for_records(records))
 
     def _active_records_for_search(self) -> list[dict[str, Any]]:
         try:
@@ -460,6 +586,45 @@ class DocumentVectorStore:
 
         self.vector_store._collection.update(ids=ids, metadatas=metadatas)
 
+    def _batch_embed_and_add(self, chunks: list[Document], ids: list[str]) -> None:
+        embedding_function = getattr(self.vector_store, "_embedding_function", None)
+        collection = getattr(self.vector_store, "_collection", None)
+        embed_documents = getattr(embedding_function, "embed_documents", None)
+        if collection is None or embed_documents is None:
+            self.vector_store.add_documents(chunks, ids=ids)
+            return
+
+        texts = [chunk.page_content for chunk in chunks]
+        metadatas = [_clean_metadata(chunk.metadata) for chunk in chunks]
+        batch_size = max(1, int(getattr(settings, "embedding_batch_size", 20)))
+        max_workers = max(1, int(getattr(settings, "embedding_max_workers", 4)))
+
+        if max_workers == 1 or len(texts) <= batch_size:
+            embeddings = list(embed_documents(texts))
+        else:
+            batches = [
+                texts[index : index + batch_size]
+                for index in range(0, len(texts), batch_size)
+            ]
+            embeddings = []
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(batches))) as executor:
+                futures = [executor.submit(embed_documents, batch) for batch in batches]
+                for future in futures:
+                    embeddings.extend(future.result())
+
+        if len(embeddings) != len(texts):
+            raise RuntimeError(
+                "Embedding provider returned "
+                f"{len(embeddings)} embeddings for {len(texts)} chunks."
+            )
+
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=metadatas,
+        )
+
 
 def _records_from_collection(collection: dict[str, Any]) -> list[dict[str, Any]]:
     ids = collection.get("ids") or []
@@ -475,6 +640,56 @@ def _records_from_collection(collection: dict[str, Any]) -> list[dict[str, Any]]
             }
         )
     return records
+
+
+def _bm25_index_path(persist_directory: Path, collection_name: str) -> Path:
+    return persist_directory / f"{_sanitize_collection_component(collection_name)}_bm25.sqlite3"
+
+
+def _bm25_documents_for_chunks(
+    chunks: list[Document],
+    ids: list[str],
+) -> list[BM25Document]:
+    documents = []
+    for chunk, doc_id in zip(chunks, ids, strict=True):
+        record = {
+            "id": doc_id,
+            "metadata": chunk.metadata or {},
+            "document": chunk.page_content or "",
+        }
+        indexed = _bm25_document_for_record(record)
+        if indexed is not None:
+            documents.append(indexed)
+    return documents
+
+
+def _bm25_documents_for_records(records: list[dict[str, Any]]) -> list[BM25Document]:
+    documents = []
+    for record in records:
+        indexed = _bm25_document_for_record(record)
+        if indexed is not None:
+            documents.append(indexed)
+    return documents
+
+
+def _bm25_document_for_record(record: dict[str, Any]) -> BM25Document | None:
+    record_id = str(record.get("id") or "")
+    if not record_id:
+        return None
+
+    metadata = dict(record.get("metadata") or {})
+    search_text = _record_search_text(record)
+    tokens = _tokenize_for_search(search_text)
+    if not tokens:
+        return None
+
+    return BM25Document(
+        doc_id=record_id,
+        tokens=tokens,
+        document=str(record.get("document") or ""),
+        metadata=_clean_metadata(metadata),
+        active=_metadata_is_active(metadata),
+    )
 
 
 def _bm25_rank(
@@ -605,7 +820,34 @@ def _tokenize_for_search(text: str) -> list[str]:
     return [token.casefold() for token in _SEARCH_TOKEN_PATTERN.findall(text or "")]
 
 
-def _chunk_text_with_heading(text: str, heading: Any) -> str:
+def build_ingestion_text_splitter(
+    *,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size or settings.chunk_size,
+        chunk_overlap=chunk_overlap if chunk_overlap is not None else settings.chunk_overlap,
+        separators=list(INGESTION_CHUNK_SEPARATORS),
+    )
+
+
+def split_documents_for_ingestion(
+    documents: list[Document],
+    *,
+    splitter: RecursiveCharacterTextSplitter | None = None,
+) -> list[Document]:
+    text_splitter = splitter or build_ingestion_text_splitter()
+    chunks = text_splitter.split_documents(split_legal_sections(documents))
+    for chunk in chunks:
+        chunk.page_content = chunk_text_with_heading(
+            chunk.page_content,
+            chunk.metadata.get("section_heading"),
+        )
+    return chunks
+
+
+def chunk_text_with_heading(text: str, heading: Any) -> str:
     heading_text = str(heading or "").strip()
     content = text or ""
     if not heading_text:
@@ -613,6 +855,10 @@ def _chunk_text_with_heading(text: str, heading: Any) -> str:
     if content.lstrip().startswith(heading_text):
         return content
     return f"{heading_text}\n{content}".strip()
+
+
+def _chunk_text_with_heading(text: str, heading: Any) -> str:
+    return chunk_text_with_heading(text, heading)
 
 
 def _document_identity(document: Document, fallback_id: str | None) -> str:
@@ -716,6 +962,10 @@ def _document_with_retrieval_metadata(candidate: _SearchCandidate) -> Document:
     return Document(page_content=candidate.document.page_content, metadata=_clean_metadata(metadata))
 
 
+def _copy_document(document: Document) -> Document:
+    return Document(page_content=document.page_content, metadata=dict(document.metadata or {}))
+
+
 def _clamp_float(value: float | None, *, minimum: float, maximum: float) -> float:
     if value is None:
         return minimum
@@ -786,7 +1036,7 @@ def _page_count(documents: list[Document]) -> int | None:
     return len(documents) if documents else None
 
 
-def _split_legal_sections(documents: list[Document]) -> list[Document]:
+def split_legal_sections(documents: list[Document]) -> list[Document]:
     section_documents = []
     for document in documents:
         text = document.page_content or ""
@@ -803,6 +1053,10 @@ def _split_legal_sections(documents: list[Document]) -> list[Document]:
             section_documents.append(Document(page_content=content, metadata=metadata))
 
     return section_documents
+
+
+def _split_legal_sections(documents: list[Document]) -> list[Document]:
+    return split_legal_sections(documents)
 
 
 def _section_blocks(text: str) -> list[tuple[str | None, str]]:

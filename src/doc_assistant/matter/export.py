@@ -22,6 +22,12 @@ def artifact_docx_filename(matter_id: str, artifact_id: str, version: int) -> st
     return f"{matter_slug}-{artifact_slug}-v{version}.docx"
 
 
+def artifact_pdf_filename(matter_id: str, artifact_id: str, version: int) -> str:
+    matter_slug = _slug(matter_id) or "matter"
+    artifact_slug = _slug(artifact_id) or "artifact"
+    return f"{matter_slug}-{artifact_slug}-v{version}.pdf"
+
+
 def artifact_bundle_filename(matter_id: str, export_format: str) -> str:
     matter_slug = _slug(matter_id) or "matter"
     format_slug = _slug(export_format) or "artifacts"
@@ -121,6 +127,19 @@ def render_artifacts_zip(
                     ),
                     render_artifact_docx(matter=matter, artifact=artifact),
                 )
+            if export_format in {"pdf", "both"}:
+                archive.writestr(
+                    _bundle_path(
+                        export_format=export_format,
+                        filename=artifact_pdf_filename(
+                            matter.matter_id,
+                            artifact.artifact_id,
+                            artifact.version,
+                        ),
+                        extension="pdf",
+                    ),
+                    render_artifact_pdf(matter=matter, artifact=artifact),
+                )
     return buffer.getvalue()
 
 
@@ -199,6 +218,15 @@ def render_artifact_docx(
         archive.writestr("word/styles.xml", _styles_xml())
         archive.writestr("word/_rels/document.xml.rels", _document_rels_xml())
     return buffer.getvalue()
+
+
+def render_artifact_pdf(
+    *,
+    matter: MatterRecord,
+    artifact: MatterArtifactRecord,
+) -> bytes:
+    markdown = render_artifact_markdown(matter=matter, artifact=artifact)
+    return _simple_pdf(markdown)
 
 
 def _bundle_manifest(
@@ -358,6 +386,89 @@ def _styles_xml() -> str:
         '<w:pPr><w:ind w:left="360"/></w:pPr></w:style>'
         "</w:styles>"
     )
+
+
+def _simple_pdf(text: str) -> bytes:
+    lines = _pdf_lines(text)
+    page_chunks = [lines[index : index + 52] for index in range(0, len(lines), 52)] or [[]]
+    objects: list[bytes] = []
+    page_refs = []
+
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    for page_index, chunk in enumerate(page_chunks):
+        content_stream = _pdf_content_stream(chunk)
+        content_object_number = len(objects) + 2
+        page_object_number = len(objects) + 1
+        page_refs.append(f"{page_object_number} 0 R")
+        objects.append(
+            (
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_object_number} 0 R >>"
+            ).encode("ascii")
+        )
+        objects.append(
+            (
+                f"<< /Length {len(content_stream)} >>\nstream\n"
+            ).encode("ascii")
+            + content_stream
+            + b"\nendstream"
+        )
+
+    objects[1] = (
+        f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>"
+    ).encode("ascii")
+
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode("ascii"))
+        output.extend(obj)
+        output.extend(b"\nendobj\n")
+
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(output)
+
+
+def _pdf_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            lines.append("")
+            continue
+        while len(line) > 92:
+            lines.append(line[:92])
+            line = line[92:]
+        lines.append(line)
+    return lines
+
+
+def _pdf_content_stream(lines: list[str]) -> bytes:
+    commands = ["BT", "/F1 10 Tf", "14 TL", "50 750 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            commands.append("T*")
+        commands.append(f"({_pdf_escape(line)}) Tj")
+    commands.append("ET")
+    return "\n".join(commands).encode("latin-1", errors="replace")
+
+
+def _pdf_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def _format_value(value: Any) -> str:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -25,6 +27,34 @@ from doc_assistant.services.review_taxonomy import (
     resolve_clause_profile,
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
+
+logger = logging.getLogger(__name__)
+
+QUERY_REWRITE_PROMPT = """Given the user's legal question and chat history, rewrite it as a precise document retrieval query.
+Keep legal terms, party names, dates, and clause names intact.
+Output only the rewritten query.
+
+Chat history:
+{chat_history}
+
+Original question:
+{question}
+
+Rewritten query:"""
+
+_VAGUE_QUERY_TERMS = (
+    "这个",
+    "那个",
+    "它",
+    "上面",
+    "前面",
+    "刚才",
+    "this",
+    "that",
+    "it",
+    "above",
+    "previous",
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +103,25 @@ class DocumentQAService:
             task_id=task_id,
         )
         content = self._invoke_chat_messages(prepared.messages)
+        return self.finalize_prepared_answer(prepared, content)
+
+    async def aask(
+        self,
+        question: str,
+        chat_history: list[dict[str, object]] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+    ) -> QAAnswer:
+        prepared = await asyncio.to_thread(
+            self.prepare_answer,
+            question,
+            chat_history,
+            user_id,
+            conversation_id,
+            task_id,
+        )
+        content = await self._ainvoke_chat_messages(prepared.messages)
         return self.finalize_prepared_answer(prepared, content)
 
     def finalize_prepared_answer(
@@ -151,19 +200,25 @@ class DocumentQAService:
                 )
                 memory_context = self.memory_service.format_for_prompt(memory_candidates)
             except Exception:
+                logger.debug(
+                    "Memory enrichment failed; continuing without memory context.",
+                    extra={"tenant_id": self.tenant_id, "user_id": user_id},
+                    exc_info=True,
+                )
                 # Memory failure should not prevent citation-first document QA.
                 memory_candidates = []
                 memory_context = "No relevant user memory."
 
-        documents = self.vector_store.search(question)
+        chat_history_text = self._format_chat_history(chat_history or [])
+        retrieval_query = self._rewrite_query(question, chat_history_text)
+        documents = self.vector_store.search(retrieval_query)
         self._log_retrieval(
-            question=question,
+            question=retrieval_query,
             user_id=user_id,
             conversation_id=resolved_conversation_id,
             document_count=len(documents),
             memory_candidates=memory_candidates,
         )
-        chat_history_text = self._format_chat_history(chat_history or [])
         memories_used = (
             self.memory_service.usages_from_candidates(memory_candidates)
             if self.memory_service
@@ -204,6 +259,17 @@ class DocumentQAService:
 
     def stream_prepared_answer(self, prepared: PreparedQAAnswer) -> Iterator[str]:
         yield from self._stream_chat_messages(prepared.messages)
+
+    def guard_streamed_answer(
+        self,
+        prepared: PreparedQAAnswer,
+        content: str,
+    ) -> AnswerGuardResult:
+        return validate_answer(
+            content,
+            prepared.citations,
+            has_retrieved_documents=prepared.has_retrieved_documents,
+        )
 
     def record_prepared_answer(self, prepared: PreparedQAAnswer, content: str) -> None:
         self._record_assistant_message(
@@ -581,7 +647,15 @@ class DocumentQAService:
         guard_result: AnswerGuardResult,
         prepared: PreparedQAAnswer,
     ) -> str:
-        return self._repair_content(answer, guard_result, prepared.citations)
+        return self.repair_content(answer, guard_result, prepared.citations)
+
+    def repair_content(
+        self,
+        answer: str,
+        guard_result: AnswerGuardResult,
+        citations: list[Citation],
+    ) -> str:
+        return self._repair_content(answer, guard_result, citations)
 
     def _repair_content(
         self,
@@ -592,6 +666,10 @@ class DocumentQAService:
         if not guard_result.issues:
             return answer
 
+        repaired, fixed_all = _try_lightweight_repair(answer, guard_result, citations)
+        if fixed_all:
+            return repaired
+
         source_ids = ", ".join(citation.source_id for citation in citations) or "None"
         repair_prompt = self.answer_repair_prompt.format(
             issues="\n".join(f"- {issue}" for issue in guard_result.issues),
@@ -599,6 +677,40 @@ class DocumentQAService:
             answer=answer,
         )
         return self._invoke_chat_messages(self._build_messages(repair_prompt))
+
+    def _rewrite_query(self, question: str, chat_history_text: str) -> str:
+        if not getattr(settings, "query_rewrite_enabled", True):
+            return question
+        if chat_history_text == "No previous messages.":
+            return question
+        normalized_question = question.casefold()
+        if len(question) > 50 and not any(term in normalized_question for term in _VAGUE_QUERY_TERMS):
+            return question
+        if not any(term in normalized_question for term in _VAGUE_QUERY_TERMS):
+            return question
+
+        prompt = QUERY_REWRITE_PROMPT.format(
+            chat_history=chat_history_text[-1000:],
+            question=question,
+        )
+        try:
+            rewritten = self._invoke_chat_messages(
+                [
+                    {"role": "system", "content": "You rewrite document retrieval queries."},
+                    {"role": "user", "content": prompt},
+                ]
+            ).strip()
+        except Exception:
+            logger.debug(
+                "Query rewrite failed; using original question.",
+                extra={"tenant_id": self.tenant_id},
+                exc_info=True,
+            )
+            return question
+
+        if not rewritten or len(rewritten) > 500:
+            return question
+        return rewritten
 
     @staticmethod
     def _extract_json_object(content: str) -> dict[str, Any] | None:
@@ -888,6 +1000,21 @@ class DocumentQAService:
 
         raise ValueError("The configured chat model does not support message-based chat.")
 
+    async def _ainvoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
+        ainvoke_messages = getattr(self.chat_model, "ainvoke_messages", None)
+        if callable(ainvoke_messages):
+            response = await ainvoke_messages(messages)
+            return str(response.get("content") or "")
+        ainvoke = getattr(self.chat_model, "ainvoke", None)
+        if callable(ainvoke):
+            try:
+                response = await ainvoke(messages=messages)
+            except TypeError:
+                response = await ainvoke(self._messages_to_prompt(messages))
+            content = getattr(response, "content", response)
+            return str(content)
+        return await asyncio.to_thread(self._invoke_chat_messages, messages)
+
     def _stream_chat_messages(self, messages: list[dict[str, str]]) -> Iterator[str]:
         stream = getattr(self.chat_model, "stream", None)
         if callable(stream):
@@ -931,6 +1058,11 @@ class DocumentQAService:
                 content=content,
             )
         except Exception:
+            logger.debug(
+                "Assistant message persistence failed.",
+                extra={"tenant_id": self.tenant_id, "user_id": user_id},
+                exc_info=True,
+            )
             return
 
     def _log_retrieval(
@@ -954,6 +1086,11 @@ class DocumentQAService:
                 memories=memory_candidates,
             )
         except Exception:
+            logger.debug(
+                "Retrieval logging failed.",
+                extra={"tenant_id": self.tenant_id, "user_id": user_id},
+                exc_info=True,
+            )
             return
 
     @staticmethod
@@ -969,3 +1106,80 @@ class DocumentQAService:
             history_parts.append(f"{label}: {content}")
 
         return "\n".join(history_parts) if history_parts else "No previous messages."
+
+
+def _try_lightweight_repair(
+    content: str,
+    guard_result: AnswerGuardResult,
+    citations: list[Citation],
+) -> tuple[str, bool]:
+    valid_ids = {citation.source_id.upper() for citation in citations}
+    if not valid_ids:
+        return content, False
+
+    repaired = content
+    fixed_any = False
+    fixed_all = True
+    first_ref = f"[{next(iter(sorted(valid_ids)))}]"
+
+    for issue in guard_result.issues:
+        lowered = issue.casefold()
+        if "source ids that were not returned" in lowered:
+            repaired = re.sub(
+                r"\[([SCDPW]\d+)\]",
+                lambda match: match.group(0)
+                if match.group(1).upper() in valid_ids
+                else "",
+                repaired,
+                flags=re.IGNORECASE,
+            )
+            fixed_any = True
+        elif "does not include any source citations" in lowered:
+            repaired = f"{repaired.rstrip()} {first_ref}".strip()
+            fixed_any = True
+        elif "material paragraph lacks a source citation" in lowered:
+            repaired = _append_default_citations_to_material_paragraphs(repaired, first_ref)
+            fixed_any = True
+        elif "specific fact" in lowered and "without a nearby citation" in lowered:
+            repaired = _append_default_citations_to_fact_sentences(repaired, first_ref)
+            fixed_any = True
+        else:
+            fixed_all = False
+
+    if fixed_any and not re.search(r"\[[SCDPW]\d+\]", repaired, flags=re.IGNORECASE):
+        repaired = f"{repaired.rstrip()} {first_ref}".strip()
+
+    return repaired if fixed_any else content, fixed_all and fixed_any
+
+
+def _append_default_citations_to_material_paragraphs(content: str, source_ref: str) -> str:
+    blocks = re.split(r"(\n\s*\n)", content)
+    repaired_blocks = []
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped or block.startswith("\n"):
+            repaired_blocks.append(block)
+            continue
+        if stripped.startswith("#") or re.search(r"\[[SCDPW]\d+\]", block, flags=re.IGNORECASE):
+            repaired_blocks.append(block)
+            continue
+        if len(stripped) >= 40:
+            repaired_blocks.append(f"{block.rstrip()} {source_ref}")
+        else:
+            repaired_blocks.append(block)
+    return "".join(repaired_blocks)
+
+
+def _append_default_citations_to_fact_sentences(content: str, source_ref: str) -> str:
+    sentences = re.split(r"([.!?。！？]\s*)", content)
+    repaired = []
+    for index in range(0, len(sentences), 2):
+        sentence = sentences[index]
+        punctuation = sentences[index + 1] if index + 1 < len(sentences) else ""
+        if (
+            re.search(r"\b\d+(?:\.\d+)?%|\b\d+\s+(?:days?|business days?|months?|years?)\b|\$\s?\d", sentence)
+            and not re.search(r"\[[SCDPW]\d+\]", sentence, flags=re.IGNORECASE)
+        ):
+            sentence = f"{sentence.rstrip()} {source_ref}"
+        repaired.append(sentence + punctuation)
+    return "".join(repaired)

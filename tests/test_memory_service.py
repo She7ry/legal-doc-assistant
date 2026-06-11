@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from langchain_core.documents import Document
 
+from doc_assistant.memory.policy import extract_memory_write_intents
+from doc_assistant.memory.schemas import MemoryUpdate
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.services.qa_service import DocumentQAService
@@ -121,6 +125,72 @@ def test_memory_retrieval_uses_structured_fallback_without_vector_store(tmp_path
 
     assert len(results) == 1
     assert results[0].memory.memory_id == memory.memory_id
+
+
+def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
+    service = build_memory_service(tmp_path)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=3)
+    memory = service.create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="fact",
+        key="matter",
+        content="Matter is active.",
+        value_json={"text": "Matter is active."},
+        expires_at=expires_at,
+    )
+
+    unchanged = service.update_memory("tenant-a", "user-a", memory.memory_id, MemoryUpdate())
+    assert unchanged is not None
+    assert unchanged.value_json == {"text": "Matter is active."}
+    assert unchanged.expires_at == expires_at
+
+    cleared = service.update_memory(
+        "tenant-a",
+        "user-a",
+        memory.memory_id,
+        MemoryUpdate(value_json=None, expires_at=None),
+    )
+
+    assert cleared is not None
+    assert cleared.value_json is None
+    assert cleared.expires_at is None
+
+
+def test_memory_list_supports_pagination_and_count(tmp_path) -> None:
+    service = build_memory_service(tmp_path)
+    for index in range(3):
+        service.create_memory(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            scope="user",
+            type="fact",
+            key=f"matter_{index}",
+            content=f"Matter fact {index}.",
+        )
+
+    page = service.list_memories("tenant-a", "user-a", limit=2, offset=1)
+
+    assert len(page) == 2
+    assert service.count_memories("tenant-a", "user-a") == 3
+
+
+def test_memory_policy_splits_multiple_explicit_intents() -> None:
+    intents = extract_memory_write_intents(
+        "请记住：以后回答用中文并保持简洁，并且我的职位是法务总监"
+    )
+
+    assert [intent.key for intent in intents] == ["answer_style", "business_context"]
+    assert all("请记住" not in intent.content for intent in intents)
+
+
+def test_memory_policy_strips_always_answer_marker() -> None:
+    intents = extract_memory_write_intents("Always answer in concise Chinese.")
+
+    assert len(intents) == 1
+    assert intents[0].key == "answer_style"
+    assert intents[0].content == "in concise Chinese"
 
 
 def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None:

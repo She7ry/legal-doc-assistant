@@ -8,6 +8,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from api.routers.chat import _stream_answer_events
 from doc_assistant.models import language_model
 from doc_assistant.models.language_model import OpenAICompatibleChatModel
+from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.qa_service import DocumentQAService
 
 
@@ -87,7 +88,74 @@ def test_stream_answer_events_emit_metadata_delta_and_done() -> None:
     assert "event: metadata" in events
     assert 'event: delta\ndata: {"content": "Hel"}' in events
     assert 'event: delta\ndata: {"content": "lo!"}' in events
+    assert "event: guard_result" in events
     assert 'event: done\ndata: {"content": "Hello!"' in events
+
+
+def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
+    vector_store = StaticVectorStore(
+        [
+            Document(
+                page_content="Termination requires 30 days written notice.",
+                metadata={"file_name": "contract.pdf", "page": 0, "chunk_id": 1},
+            )
+        ]
+    )
+    service = DocumentQAService(
+        vector_store=vector_store,
+        chat_model=FakeListChatModel(
+            responses=[
+                "termination notice period",
+                "Termination requires 30 days written notice [S1].",
+            ]
+        ),
+    )
+
+    answer = service.ask(
+        "这个期限是多少？",
+        chat_history=[
+            {"role": "user", "content": "请看 termination 条款。"},
+            {"role": "assistant", "content": "我会查看终止条款。"},
+        ],
+    )
+
+    assert vector_store.queries[0] == "termination notice period"
+    assert answer.content == "Termination requires 30 days written notice [S1]."
+
+
+def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
+    class CountingChatModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_messages(self, messages):
+            self.calls += 1
+            return {"content": "initial"}
+
+    chat_model = CountingChatModel()
+    service = DocumentQAService(vector_store=EmptyVectorStore(), chat_model=chat_model)
+    prepared = service.prepare_answer("hello")
+    prepared = type(prepared)(
+        messages=prepared.messages,
+        citations=[
+            Citation(
+                source_id="S1",
+                file_name="contract.pdf",
+                preview="The notice period is 30 days.",
+            )
+        ],
+        memories_used=prepared.memories_used,
+        user_id=prepared.user_id,
+        conversation_id=prepared.conversation_id,
+        user_message_recorded=prepared.user_message_recorded,
+        has_retrieved_documents=True,
+    )
+
+    answer = service.finalize_prepared_answer(prepared, "The notice period is 30 days [S9].")
+
+    assert "[S9]" not in answer.content
+    assert "[S1]" in answer.content
+    assert chat_model.calls == 0
 
 
 def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() -> None:

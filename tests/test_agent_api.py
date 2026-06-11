@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import time
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
@@ -110,6 +111,22 @@ class ExplodingAgentService:
         raise AssertionError("Agent service should not run when clarification is required.")
 
 
+def _wait_for_agent_task(client: TestClient, task_id: str, *, user_id: str = "api-test-user") -> dict:
+    deadline = time.monotonic() + 3
+    last_data = None
+    while time.monotonic() < deadline:
+        loaded = client.get(
+            f"/api/v1/agent/tasks/{task_id}",
+            headers={"X-User-Id": user_id},
+        )
+        assert loaded.status_code == 200
+        last_data = loaded.json()
+        if last_data["status"] in {"succeeded", "failed", "needs_input"}:
+            return last_data
+        time.sleep(0.02)
+    raise AssertionError(f"Agent task did not finish in time: {last_data}")
+
+
 def test_agent_task_api_creates_gets_and_streams_events(tmp_path) -> None:
     store = AgentTaskStore()
     matter_store = MatterStore(tmp_path / "matters.sqlite3")
@@ -132,12 +149,7 @@ def test_agent_task_api_creates_gets_and_streams_events(tmp_path) -> None:
         assert created.status_code == 202
         task_id = created.json()["task_id"]
 
-        loaded = client.get(
-            f"/api/v1/agent/tasks/{task_id}",
-            headers={"X-User-Id": "api-test-user"},
-        )
-        assert loaded.status_code == 200
-        data = loaded.json()
+        data = _wait_for_agent_task(client, task_id)
         assert data["status"] == "succeeded"
         assert data["result"]["report"] == "Test report."
 
@@ -231,11 +243,7 @@ def test_agent_task_api_resumes_task_after_supplemental_input(tmp_path) -> None:
         assert resumed.json()["status"] == "queued"
         assert resumed.json()["events"][-2]["event_type"] == "input_received"
 
-        loaded = client.get(
-            f"/api/v1/agent/tasks/{task_id}",
-            headers={"X-User-Id": "api-test-user"},
-        )
-        data = loaded.json()
+        data = _wait_for_agent_task(client, task_id)
         assert data["status"] == "succeeded"
         assert data["user_role"] == "lawyer"
         assert data["focus_areas"] == ["payment", "termination"]
@@ -303,13 +311,9 @@ def test_agent_task_api_persists_matter_profile_and_artifacts(tmp_path) -> None:
         assert created.status_code == 202
         task_id = created.json()["task_id"]
 
-        loaded = client.get(
-            f"/api/v1/agent/tasks/{task_id}",
-            headers={"X-User-Id": "api-test-user"},
-        )
-        assert loaded.status_code == 200
-        assert loaded.json()["status"] == "succeeded"
-        assert loaded.json()["matter_id"] == "matter-saas-1"
+        loaded_data = _wait_for_agent_task(client, task_id)
+        assert loaded_data["status"] == "succeeded"
+        assert loaded_data["matter_id"] == "matter-saas-1"
 
         matter = client.get(
             "/api/v1/matters/matter-saas-1",
@@ -350,6 +354,17 @@ def test_agent_task_api_persists_matter_profile_and_artifacts(tmp_path) -> None:
             document_xml = archive.read("word/document.xml").decode("utf-8")
         assert "Risk matrix" in document_xml
         assert "termination" in document_xml
+
+        exported_pdf = client.get(
+            "/api/v1/matters/matter-saas-1/artifacts/risk_matrix/export?format=pdf",
+            headers={"X-User-Id": "api-test-user"},
+        )
+        assert exported_pdf.status_code == 200
+        assert exported_pdf.headers["content-type"].startswith("application/pdf")
+        assert "matter-saas-1-risk_matrix-v1.pdf" in exported_pdf.headers[
+            "content-disposition"
+        ]
+        assert exported_pdf.content.startswith(b"%PDF-1.4")
 
         exported_zip = client.get(
             "/api/v1/matters/matter-saas-1/artifacts/export?format=docx",

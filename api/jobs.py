@@ -69,6 +69,31 @@ class IngestJobStore:
                 return None
             return replace(record)
 
+    def list_restartable(self, *, limit: int = 100) -> list[IngestJobRecord]:
+        with self._lock:
+            if self.db_path:
+                with self._connect() as connection:
+                    rows = connection.execute(
+                        """
+                        SELECT * FROM ingest_jobs
+                        WHERE status IN (?, ?)
+                        ORDER BY submitted_at ASC
+                        LIMIT ?
+                        """,
+                        (
+                            IngestJobStatus.QUEUED.value,
+                            IngestJobStatus.RUNNING.value,
+                            max(1, min(limit, 500)),
+                        ),
+                    ).fetchall()
+                return [_row_to_record(row) for row in rows]
+
+            return [
+                replace(record)
+                for record in self._jobs.values()
+                if record.status in {IngestJobStatus.QUEUED, IngestJobStatus.RUNNING}
+            ][:limit]
+
     def mark_running(self, job_id: str, stage: str = "parsing", progress: int = 15) -> None:
         with self._lock:
             record = self._require_record(job_id)
