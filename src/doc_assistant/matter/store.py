@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from threading import Lock
 from typing import Any
+from uuid import uuid4
 
 from doc_assistant.config.settings import settings
 
@@ -59,6 +60,21 @@ class MatterFindingRecord:
 
 
 @dataclass(frozen=True)
+class MatterEventRecord:
+    event_id: str
+    matter_id: str
+    tenant_id: str
+    user_id: str
+    event_type: str
+    entity_type: str
+    entity_id: str
+    old_value: dict[str, Any] | list[Any] | str | None
+    new_value: dict[str, Any] | list[Any] | str | None
+    actor: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class MatterRecord:
     matter_id: str
     tenant_id: str
@@ -102,12 +118,13 @@ class MatterStore:
         with self._connect() as connection, self._lock:
             existing = connection.execute(
                 """
-                SELECT created_at FROM matters
+                SELECT created_at, matter_profile_json, status FROM matters
                 WHERE tenant_id = ? AND user_id = ? AND matter_id = ?
                 """,
                 (tenant_id, user_id, matter_id),
             ).fetchone()
             created_at = _datetime_from_db(existing["created_at"]) if existing else now
+            old_profile = json.loads(existing["matter_profile_json"] or "{}") if existing else None
             connection.execute(
                 """
                 INSERT INTO matters (
@@ -135,6 +152,19 @@ class MatterStore:
                     _datetime_to_db(created_at or now),
                     _datetime_to_db(now),
                 ),
+            )
+            self._emit_event(
+                connection,
+                matter_id=matter_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="matter_profile_upserted",
+                entity_type="matter",
+                entity_id=matter_id,
+                old_value=old_profile,
+                new_value=profile,
+                actor=user_id,
+                created_at=now,
             )
 
             for artifact in _as_dict_list(result.get("artifacts")):
@@ -261,6 +291,28 @@ class MatterStore:
                 user_id=user_id,
             )
 
+    def list_events(
+        self,
+        matter_id: str,
+        tenant_id: str,
+        user_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[MatterEventRecord] | None:
+        if self.get(matter_id, tenant_id, user_id) is None:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM matter_events
+                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (matter_id, tenant_id, user_id, max(1, min(limit, 500))),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def update_confirmation_gate(
         self,
         *,
@@ -357,6 +409,19 @@ class MatterStore:
                     user_id,
                 ),
             )
+            self._emit_event(
+                connection,
+                matter_id=matter_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="confirmation_gate_updated",
+                entity_type="confirmation_gate",
+                entity_id=normalized_gate_id,
+                old_value=None,
+                new_value=gate,
+                actor=decision["decided_by"],
+                created_at=now,
+            )
 
         return self.get(
             matter_id,
@@ -416,6 +481,19 @@ class MatterStore:
                 WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
                 """,
                 (_datetime_to_db(now), matter_id, tenant_id, user_id),
+            )
+            self._emit_event(
+                connection,
+                matter_id=matter_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="finding_decision_updated",
+                entity_type="finding",
+                entity_id=normalized_finding_id,
+                old_value=None,
+                new_value=decision,
+                actor=decision["decided_by"],
+                created_at=now,
             )
 
         return self.get(
@@ -549,6 +627,19 @@ class MatterStore:
                 """,
                 (_datetime_to_db(now), matter_id, tenant_id, user_id),
             )
+            self._emit_event(
+                connection,
+                matter_id=matter_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="formal_report_created",
+                entity_type="artifact",
+                entity_id="formal_report",
+                old_value=None,
+                new_value=artifact,
+                actor=generated_by,
+                created_at=now,
+            )
 
         return self.get(
             matter_id,
@@ -576,7 +667,7 @@ class MatterStore:
             return
         existing = connection.execute(
             """
-            SELECT version, created_at FROM matter_artifacts
+            SELECT version, created_at, title, summary, status FROM matter_artifacts
             WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND artifact_id = ?
             """,
             (tenant_id, user_id, matter_id, artifact_id),
@@ -623,6 +714,25 @@ class MatterStore:
                 _datetime_to_db(created_at or now),
                 _datetime_to_db(now),
             ),
+        )
+        self._emit_event(
+            connection,
+            matter_id=matter_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            event_type="artifact_upserted",
+            entity_type="artifact",
+            entity_id=artifact_id,
+            old_value=dict(existing) if existing else None,
+            new_value={
+                "artifact_id": artifact_id,
+                "artifact_type": _clean_text(artifact.get("artifact_type")) or "custom",
+                "title": _clean_text(artifact.get("title")) or artifact_id,
+                "summary": _clean_text(artifact.get("summary")),
+                "version": version,
+            },
+            actor=user_id,
+            created_at=now,
         )
 
     def _upsert_finding_row(
@@ -720,6 +830,25 @@ class MatterStore:
                 _datetime_to_db(now),
             ),
         )
+        self._emit_event(
+            connection,
+            matter_id=matter_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            event_type="finding_upserted",
+            entity_type="finding",
+            entity_id=finding_id,
+            old_value=dict(existing) if existing else None,
+            new_value={
+                "finding_id": finding_id,
+                "category": _clean_text(finding.get("category")) or "Finding",
+                "severity": _clean_text(finding.get("severity")) or "Needs human review",
+                "status": status_value,
+                "human_review_status": human_review_status,
+            },
+            actor=user_id,
+            created_at=now,
+        )
 
     def _update_finding_review_rows(
         self,
@@ -805,6 +934,44 @@ class MatterStore:
             (matter_id, tenant_id, user_id),
         ).fetchall()
         return [_row_to_finding(row) for row in rows]
+
+    def _emit_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        matter_id: str,
+        tenant_id: str,
+        user_id: str,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        old_value: Any,
+        new_value: Any,
+        actor: str,
+        created_at: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO matter_events (
+                event_id, matter_id, tenant_id, user_id, event_type, entity_type,
+                entity_id, old_value_json, new_value_json, actor, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid4().hex,
+                matter_id,
+                tenant_id,
+                user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                json.dumps(old_value, ensure_ascii=False, default=str),
+                json.dumps(new_value, ensure_ascii=False, default=str),
+                _clean_text(actor) or "system",
+                _datetime_to_db(created_at),
+            ),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -905,6 +1072,31 @@ class MatterStore:
                 ON review_findings(tenant_id, user_id, matter_id)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS matter_events (
+                    event_id TEXT PRIMARY KEY,
+                    matter_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    old_value_json TEXT,
+                    new_value_json TEXT,
+                    actor TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(matter_id, tenant_id, user_id)
+                        REFERENCES matters(matter_id, tenant_id, user_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matter_events_matter
+                ON matter_events(tenant_id, user_id, matter_id, created_at)
+                """
+            )
 
 
 def _row_to_matter(row: sqlite3.Row) -> MatterRecord:
@@ -969,6 +1161,31 @@ def _row_to_finding(row: sqlite3.Row) -> MatterFindingRecord:
         created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
         updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
     )
+
+
+def _row_to_event(row: sqlite3.Row) -> MatterEventRecord:
+    return MatterEventRecord(
+        event_id=row["event_id"],
+        matter_id=row["matter_id"],
+        tenant_id=row["tenant_id"],
+        user_id=row["user_id"],
+        event_type=row["event_type"],
+        entity_type=row["entity_type"],
+        entity_id=row["entity_id"],
+        old_value=_json_value(row["old_value_json"]),
+        new_value=_json_value(row["new_value_json"]),
+        actor=row["actor"],
+        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
+    )
+
+
+def _json_value(value: str | None) -> Any:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
 
 
 def _matter_title(result: dict[str, Any], profile: dict[str, Any]) -> str:

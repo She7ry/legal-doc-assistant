@@ -13,23 +13,38 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.dependencies import _agent_service, _memory_service, _qa_service, _vector_store
+from api.dependencies import (
+    _agent_service,
+    _agent_task_store,
+    _job_store,
+    _matter_store,
+    _memory_service,
+    _qa_service,
+    _vector_store,
+)
+from api.middleware.rate_limit import SlidingWindowRateLimiter
 from api.routers import agent, chat, documents, matters, memories, review
 from api.schemas.responses import HealthCheckOut, HealthResponse
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
+_rate_limiter = SlidingWindowRateLimiter(
+    max_requests=settings.rate_limit_max_requests,
+    window_seconds=settings.rate_limit_window_seconds,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-warm singletons on startup so the first request does not bear the
     # cost of initialising storage, Chroma connections, and embedding models.
+    settings.ensure_directories()
     _vector_store(settings.default_tenant_id)
     _memory_service(settings.default_tenant_id)
     _qa_service(settings.default_tenant_id)
     _agent_service(settings.default_tenant_id)
+    _recover_background_work()
     if not settings.api_keys:
         logger.warning("DOC_ASSISTANT_API_KEYS is not configured; API authentication is disabled.")
     yield
@@ -61,9 +76,21 @@ app.include_router(review.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
 
 
+def _recover_background_work() -> None:
+    for record in _job_store.list_restartable():
+        documents.enqueue_ingest_job(record, _vector_store(record.tenant_id), _job_store)
+    for record in _agent_task_store.list_restartable():
+        agent.enqueue_agent_task(
+            record,
+            _agent_service(record.tenant_id),
+            _agent_task_store,
+            _matter_store,
+        )
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-Id") or uuid4().hex
     start_time = perf_counter()
     request.state.request_id = request_id
     try:
@@ -92,6 +119,28 @@ async def request_id_middleware(request: Request, call_next):
         },
     )
     return response
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if not settings.rate_limit_enabled or request.url.path == "/health":
+        return await call_next(request)
+
+    request.state.request_id = getattr(
+        request.state,
+        "request_id",
+        request.headers.get("X-Request-Id") or uuid4().hex,
+    )
+    key = _rate_limit_key(request)
+    if not _rate_limiter.is_allowed(key):
+        return _error_response(
+            request=request,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            code="rate_limited",
+            detail="Too many requests. Please retry later.",
+            headers={"Retry-After": str(settings.rate_limit_window_seconds)},
+        )
+    return await call_next(request)
 
 
 @app.exception_handler(HTTPException)
@@ -224,6 +273,19 @@ def _error_response(
 
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", None) or "unknown"
+
+
+def _rate_limit_key(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    if authorization.casefold().startswith("bearer "):
+        return f"bearer:{authorization[7:].strip()}"
+    api_key = request.headers.get("x-api-key")
+    if api_key:
+        return f"api-key:{api_key}"
+    tenant_id = request.headers.get("x-tenant-id", settings.default_tenant_id)
+    user_id = request.headers.get("x-user-id", "anonymous")
+    client_host = request.client.host if request.client else "unknown"
+    return f"{tenant_id}:{user_id}:{client_host}"
 
 
 def _path_check(name: str, path: Path) -> HealthCheckOut:

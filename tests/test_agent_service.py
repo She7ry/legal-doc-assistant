@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import threading
+from types import SimpleNamespace
+
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
+from doc_assistant.schemas.citation import Citation, QAAnswer
+from doc_assistant.services import agent_service as agent_service_module
 from doc_assistant.services.agent_service import (
     LegalAgentService,
     clarification_questions_for_task,
@@ -28,6 +33,68 @@ class StaticVectorStore:
                 metadata={"file_name": "saas-msa.pdf", "page": 0, "chunk_id": 1},
             )
         ]
+
+
+class ConcurrentReviewQAService:
+    tenant_id = "default"
+
+    def __init__(self) -> None:
+        self._barrier = threading.Barrier(2)
+        self._lock = threading.Lock()
+        self._active_review_calls = 0
+        self.max_active_review_calls = 0
+
+    def ask(self, *_args, **_kwargs) -> QAAnswer:
+        return QAAnswer(
+            content="The document is a SaaS agreement between VendorCo and CustomerCo [S1].",
+            citations=[
+                Citation(
+                    source_id="S1",
+                    file_name="saas-msa.pdf",
+                    preview="SaaS agreement between VendorCo and CustomerCo.",
+                    exact_quote="SaaS agreement between VendorCo and CustomerCo.",
+                )
+            ],
+        )
+
+    def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
+        del top_k
+        with self._lock:
+            self._active_review_calls += 1
+            self.max_active_review_calls = max(
+                self.max_active_review_calls,
+                self._active_review_calls,
+            )
+        try:
+            self._barrier.wait(timeout=2)
+        finally:
+            with self._lock:
+                self._active_review_calls -= 1
+
+        return QAAnswer(
+            content=f"{clause_type} needs review [S1].",
+            citations=[
+                Citation(
+                    source_id="S1",
+                    file_name=f"{clause_type}.pdf",
+                    preview=f"{clause_type} clause.",
+                    exact_quote=f"{clause_type} clause.",
+                )
+            ],
+            metadata={
+                "clause_type": clause_type,
+                "risk_level": "Medium",
+                "risk_reasons": [
+                    {
+                        "reason": f"{clause_type} risk requires review.",
+                        "citation": "S1",
+                    }
+                ],
+                "questions_for_lawyer": [],
+                "missing_information": [],
+                "needs_human_review": True,
+            },
+        )
 
 
 def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
@@ -118,6 +185,35 @@ def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
     assert "## Confirmation gates" in result.report
     assert "[S2]" in result.report
     assert vector_store.queries
+
+
+def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_service_module,
+        "settings",
+        SimpleNamespace(agent_max_parallel_steps=2),
+    )
+    qa_service = ConcurrentReviewQAService()
+    agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
+
+    result = agent.run_task(
+        objective="Review payment and termination risks in the SaaS agreement.",
+        focus_areas=["payment", "termination"],
+        user_role="lawyer",
+        max_steps=5,
+    )
+
+    assert qa_service.max_active_review_calls == 2
+    assert [step.step_id for step in result.steps] == [
+        "profile",
+        "review_1",
+        "review_2",
+        "report",
+    ]
+    assert [citation.file_name for citation in result.citations[1:3]] == [
+        "payment.pdf",
+        "termination.pdf",
+    ]
 
 
 def test_legal_agent_plans_conflict_check_for_policy_tasks() -> None:

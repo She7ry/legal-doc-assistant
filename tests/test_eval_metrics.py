@@ -6,6 +6,7 @@ from doc_assistant.evaluation.metrics import (
     score_generation_case,
     score_retrieval_case,
     source_candidate_from_citation,
+    source_matches,
 )
 from doc_assistant.schemas.citation import Citation
 from scripts.run_rag_eval import _evaluate_thresholds, _parse_min_score
@@ -25,6 +26,7 @@ def test_retrieval_metrics_score_gold_marker_rank() -> None:
         "hit": 1.0,
         "precision": 0.2,
         "mrr": 0.5,
+        "ndcg": 0.6309297535714575,
     }
 
 
@@ -83,6 +85,23 @@ def test_aggregate_scores_ignores_not_applicable_values() -> None:
     )
 
     assert aggregate == {"recall": 0.5, "refusal_accuracy": 1.0}
+
+
+def test_aggregate_scores_returns_requested_empty_metric_shape() -> None:
+    assert aggregate_scores([], keys=("recall", "ndcg")) == {"ndcg": None, "recall": None}
+
+
+def test_marker_matching_uses_token_boundaries() -> None:
+    gold_source = {"marker": "EVAL-C-5.1"}
+
+    assert source_matches(gold_source, SourceCandidate(text="Marker: EVAL-C-5.1."))
+    assert not source_matches(gold_source, SourceCandidate(text="Marker: EVAL-C-5.10."))
+
+
+def test_gold_file_requires_candidate_file_name_when_no_marker() -> None:
+    gold_source = {"file_name": "contract.pdf", "page": 1, "chunk_id": 3}
+
+    assert not source_matches(gold_source, SourceCandidate(page=1, chunk_id=3))
 
 
 def test_source_candidate_from_citation_prefers_exact_quote_for_eval_matching() -> None:

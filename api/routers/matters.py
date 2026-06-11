@@ -10,6 +10,7 @@ from api.schemas.requests import (
 )
 from api.schemas.responses import (
     MatterArtifactRecordOut,
+    MatterEventOut,
     MatterFindingRecordOut,
     MatterListResponse,
     MatterRecordOut,
@@ -18,9 +19,11 @@ from doc_assistant.matter.export import (
     artifact_bundle_filename,
     artifact_docx_filename,
     artifact_markdown_filename,
+    artifact_pdf_filename,
     render_artifacts_zip,
     render_artifact_docx,
     render_artifact_markdown,
+    render_artifact_pdf,
 )
 
 router = APIRouter(prefix="/matters", tags=["matters"], dependencies=[Depends(require_api_key)])
@@ -167,6 +170,24 @@ def list_matter_findings(
     return [MatterFindingRecordOut.from_record(finding) for finding in findings]
 
 
+@router.get(
+    "/{matter_id}/events",
+    response_model=list[MatterEventOut],
+    summary="List audit events for a persisted matter",
+)
+def list_matter_events(
+    matter_id: str,
+    matter_store: MatterStoreDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[MatterEventOut]:
+    events = matter_store.list_events(matter_id, tenant_id, user_id, limit=limit)
+    if events is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
+    return [MatterEventOut.from_record(event) for event in events]
+
+
 @router.patch(
     "/{matter_id}/findings/{finding_id}",
     response_model=MatterRecordOut,
@@ -210,7 +231,7 @@ def export_matter_artifacts(
     matter_store: MatterStoreDep,
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
-    format: str = Query(default="docx", pattern="^(markdown|docx|both)$"),
+    format: str = Query(default="docx", pattern="^(markdown|docx|pdf|both)$"),
 ) -> Response:
     matter = matter_store.get(
         matter_id,
@@ -252,7 +273,7 @@ def export_matter_artifact(
     matter_store: MatterStoreDep,
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
-    format: str = Query(default="markdown", pattern="^(markdown|docx)$"),
+    format: str = Query(default="markdown", pattern="^(markdown|docx|pdf)$"),
 ) -> Response:
     matter = matter_store.get(
         matter_id,
@@ -283,6 +304,15 @@ def export_matter_artifact(
             media_type=(
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if format == "pdf":
+        content = render_artifact_pdf(matter=matter, artifact=artifact)
+        filename = artifact_pdf_filename(matter_id, artifact_id, artifact.version)
+        return Response(
+            content=content,
+            media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 

@@ -33,29 +33,41 @@ legal_doc_assistant/
   api/
     main.py            # FastAPI application entry point
     dependencies.py    # Singleton DI (vector store, QA service)
+    jobs.py            # Persistent ingest job store
+    agent_tasks.py     # Persistent agent task store
+    task_queue.py      # Background task submission
     routers/
       documents.py     # POST /api/v1/documents/ingest, GET /api/v1/documents
       chat.py          # POST /api/v1/chat/ask
+      agent.py         # Agent task lifecycle APIs
+      matters.py       # Matter CRUD and exports
       memories.py      # CRUD for user memories
       review.py        # POST /api/v1/review/clause, POST /api/v1/review/conflict
+    middleware/
+      rate_limit.py    # Sliding-window API rate limiting
     schemas/
       requests.py      # Pydantic request models
       responses.py     # Pydantic response models
 
   src/doc_assistant/
-    config/
-    models/
-    memory/
-    ingestion/
-    retrieval/
-    services/
-    prompts/
-    schemas/
+    config/settings.py
+    evaluation/        # RAG metric helpers and CLI entry points
+    ingestion/         # File loading, hashing, upload persistence
+    matter/            # Matter storage and exports
+    memory/            # User memory policy, storage, retrieval
+    models/            # Chat and embedding provider adapters
+    retrieval/         # Chroma/BM25 hybrid retrieval and chunking
+    services/          # QA, review, evidence, tool calling, agent workflows
+    services/agent/    # Planner/executor schemas and helpers
+    tools/             # Optional external tools such as web search
+    prompts/           # Layered prompt templates
+    schemas/           # Shared API/domain schemas
     utils/
 
   data/
     uploads/
     vector_store/
+    eval/
 
   tests/
 ```
@@ -348,21 +360,50 @@ Invoke-RestMethod -Method Get `
 Generate the starter legal PDF fixture and eval dataset:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\generate_eval_fixtures.py
+generate-eval-fixtures
 ```
 
 Run the RAG evaluation after the configured chat and embedding provider keys
 are set:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_rag_eval.py
+run-rag-eval --clean --concurrency 4
 ```
 
-The starter dataset lives at `data/eval/eval_dataset.json`. It currently includes:
+The script writes `data/eval/latest_report.json`. Common CI usage:
 
-- answerable questions for `Recall@5`, `Recall@10`, `Hit Rate`, `Precision`, and `MRR`
-- unanswerable questions for refusal behavior
-- lightweight generation checks for answer correctness, faithfulness, citation accuracy, and refusal accuracy
+```powershell
+run-rag-eval --skip-ingest `
+  --baseline data/eval/baseline_report.json `
+  --fail-on-regression `
+  --min-score retrieval.at_5.recall=0.8 `
+  --min-score generation.citation_accuracy=0.9
+```
+
+The starter dataset lives at `data/eval/eval_dataset.json`. It includes answerable,
+unanswerable, Chinese-query, and cross-document cases. `default_refusal_terms`
+defines shared refusal language, while per-case `required_refusal_terms` is only
+needed for overrides. The dataset also records a chunking config hash so eval runs
+can detect stale `chunk_id` expectations after chunking changes.
+
+Retrieval metrics:
+
+- `recall`: fraction of gold sources found in the top-k retrieved chunks.
+- `hit`: `1` when at least one gold source is found in top-k.
+- `precision`: fraction of the top-k retrieved chunks that match a gold source.
+- `mrr`: reciprocal rank of the first matching source.
+- `ndcg`: ranking quality with earlier matching sources weighted more heavily.
+
+Generation metrics:
+
+- `answer_correctness`: required terms are present and forbidden terms are absent.
+- `faithfulness`: answer numbers and required answer terms are supported by cited context.
+- `citation_accuracy`: cited source ids map back to gold sources.
+- `refusal_accuracy`: unanswerable questions include expected refusal language.
+
+Interpret the report by checking `summary` first, then opening any `records[*]`
+with `status: "error"` or a low metric. Per-case failures are recorded without
+stopping the full evaluation run.
 
 ## Layered Prompts
 
@@ -379,9 +420,19 @@ Generated answers also pass through `answer_guard.py`, which checks citation val
 
 ## Roadmap
 
+Near term:
+
 1. Document original-text side-by-side review and editable artifact lifecycle.
-2. Deeper workflow policies for contract review, version comparison, dispute fact
+2. CI-published RAG baseline reports with regression gates.
+3. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
+
+Mid term:
+
+1. Deeper workflow policies for contract review, version comparison, dispute fact
    organization, compliance checks, and negotiation preparation.
-3. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
-4. Authentication (JWT) and multi-tenant collection isolation.
-5. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
+2. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
+
+Long term:
+
+1. JWT-based authentication and tenant administration.
+2. Expanded evaluation labels by document type, language, and workflow category.

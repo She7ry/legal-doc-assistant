@@ -3,9 +3,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep, require_api_key
-from api.schemas.requests import MemoryCreateRequest, MemoryUpdateRequest
-from api.schemas.responses import MemoryListResponse, MemoryOut
-from doc_assistant.memory.schemas import MemoryUpdate
+from api.schemas.requests import (
+    MemoryBatchCreateRequest,
+    MemoryBatchDeleteRequest,
+    MemoryCreateRequest,
+    MemoryUpdateRequest,
+)
+from api.schemas.responses import MemoryBatchDeleteResponse, MemoryListResponse, MemoryOut
+from doc_assistant.memory.schemas import UNSET, MemoryUpdate
 
 router = APIRouter(
     prefix="/memories",
@@ -21,8 +26,18 @@ def list_memories(
     user_id: UserIdDep,
     status_filter: str | None = Query(default="active", alias="status"),
     include_expired: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> MemoryListResponse:
     memories = memory_service.list_memories(
+        tenant_id,
+        user_id,
+        status=status_filter,
+        include_expired=include_expired,
+        limit=limit,
+        offset=offset,
+    )
+    total = memory_service.count_memories(
         tenant_id,
         user_id,
         status=status_filter,
@@ -30,7 +45,9 @@ def list_memories(
     )
     return MemoryListResponse(
         memories=[MemoryOut.from_memory(memory) for memory in memories],
-        total=len(memories),
+        total=total,
+        offset=offset,
+        limit=limit,
     )
 
 
@@ -61,6 +78,35 @@ def create_memory(
     return MemoryOut.from_memory(memory)
 
 
+@router.post("/batch", response_model=list[MemoryOut], status_code=status.HTTP_201_CREATED, summary="Create memories")
+def create_memories(
+    body: MemoryBatchCreateRequest,
+    memory_service: MemoryServiceDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> list[MemoryOut]:
+    try:
+        memories = [
+            memory_service.create_memory(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                scope=item.scope,
+                type=item.type,
+                key=item.key,
+                content=item.content,
+                value_json=item.value,
+                source=item.source,
+                confidence=item.confidence,
+                expires_at=item.expires_at,
+                visibility=item.visibility,
+            )
+            for item in body.memories
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return [MemoryOut.from_memory(memory) for memory in memories]
+
+
 @router.patch("/{memory_id}", response_model=MemoryOut, summary="Update memory")
 def update_memory(
     memory_id: str,
@@ -74,16 +120,7 @@ def update_memory(
             tenant_id,
             user_id,
             memory_id,
-            MemoryUpdate(
-                key=body.key,
-                content=body.content,
-                value_json=body.value,
-                source=body.source,  # type: ignore[arg-type]
-                confidence=body.confidence,
-                expires_at=body.expires_at,
-                visibility=body.visibility,  # type: ignore[arg-type]
-                status=body.status,  # type: ignore[arg-type]
-            ),
+            _memory_update_from_body(body),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -93,7 +130,29 @@ def update_memory(
     return MemoryOut.from_memory(memory)
 
 
-@router.delete("/{memory_id}", response_model=MemoryOut, summary="Delete memory")
+@router.post("/batch-delete", response_model=MemoryBatchDeleteResponse, summary="Delete memories")
+def delete_memories(
+    body: MemoryBatchDeleteRequest,
+    memory_service: MemoryServiceDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> MemoryBatchDeleteResponse:
+    deleted = []
+    not_found = []
+    for memory_id in body.memory_ids:
+        memory = memory_service.delete_memory(tenant_id, user_id, memory_id)
+        if memory is None:
+            not_found.append(memory_id)
+        else:
+            deleted.append(MemoryOut.from_memory(memory))
+    return MemoryBatchDeleteResponse(
+        deleted=deleted,
+        not_found=not_found,
+        total_deleted=len(deleted),
+    )
+
+
+@router.delete("/{memory_id}", response_model=MemoryOut, status_code=status.HTTP_200_OK, summary="Delete memory")
 def delete_memory(
     memory_id: str,
     memory_service: MemoryServiceDep,
@@ -105,3 +164,16 @@ def delete_memory(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found.")
     return MemoryOut.from_memory(memory)
 
+
+def _memory_update_from_body(body: MemoryUpdateRequest) -> MemoryUpdate:
+    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    return MemoryUpdate(
+        key=body.key,
+        content=body.content,
+        value_json=body.value if "value" in fields_set else UNSET,
+        source=body.source,  # type: ignore[arg-type]
+        confidence=body.confidence,
+        expires_at=body.expires_at if "expires_at" in fields_set else UNSET,
+        visibility=body.visibility,  # type: ignore[arg-type]
+        status=body.status,  # type: ignore[arg-type]
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -34,7 +35,7 @@ class MemoryVectorStore:
         self.vector_store = Chroma(
             collection_name=effective_collection_name,
             embedding_function=build_embedding_model(),
-            persist_directory=str(persist_directory or settings.vector_store_dir),
+            persist_directory=str(persist_directory or settings.memory_vector_store_dir),
         )
 
     def upsert_memory(self, memory: MemoryRecord) -> str:
@@ -53,13 +54,14 @@ class MemoryVectorStore:
             "confidence": memory.confidence,
             "visibility": memory.visibility,
             "status": memory.status,
+            "content": memory.content,
+            "created_at": memory.created_at.isoformat(),
+            "updated_at": memory.updated_at.isoformat(),
             "expires_at": memory.expires_at.isoformat() if memory.expires_at else "",
+            "conversation_id": memory.conversation_id or "",
+            "task_id": memory.task_id or "",
         }
         text = _memory_embedding_text(memory)
-        try:
-            self.vector_store.delete(ids=[memory.memory_id])
-        except Exception:
-            logger.debug("Memory vector delete before upsert failed", exc_info=True)
         self.vector_store.add_texts([text], metadatas=[metadata], ids=[memory.memory_id])
         return memory.memory_id
 
@@ -86,14 +88,17 @@ class MemoryVectorStore:
                 scope=str(metadata.get("scope") or "user"),  # type: ignore[arg-type]
                 type=str(metadata.get("type") or "preference"),  # type: ignore[arg-type]
                 key=str(metadata.get("key") or ""),
-                content=document.page_content,
+                content=str(metadata.get("content") or document.page_content),
                 value_json=None,
                 source=str(metadata.get("source") or "explicit"),  # type: ignore[arg-type]
                 confidence=float(metadata.get("confidence") or 0),
-                created_at=_metadata_datetime(),
-                updated_at=_metadata_datetime(),
+                created_at=_metadata_datetime(metadata.get("created_at")) or _utc_now(),
+                updated_at=_metadata_datetime(metadata.get("updated_at")) or _utc_now(),
+                expires_at=_metadata_datetime(metadata.get("expires_at")),
                 visibility=str(metadata.get("visibility") or "private"),  # type: ignore[arg-type]
                 status=str(metadata.get("status") or "active"),  # type: ignore[arg-type]
+                conversation_id=_metadata_text(metadata.get("conversation_id")),
+                task_id=_metadata_text(metadata.get("task_id")),
             )
             candidates.append(MemoryCandidate(memory=memory, score=score))
         return candidates
@@ -111,8 +116,24 @@ def _memory_embedding_text(memory: MemoryRecord) -> str:
     )
 
 
-def _metadata_datetime():
-    from datetime import datetime, timezone
+def _metadata_datetime(value: object | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
+
+def _metadata_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
