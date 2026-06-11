@@ -56,6 +56,30 @@ def test_protected_routes_require_api_key_when_configured(monkeypatch) -> None:
     assert response.json()["code"] == "http_401"
 
 
+def test_health_returns_runtime_diagnostics_and_request_id() -> None:
+    client = TestClient(app)
+
+    response = client.get("/health", headers={"X-Request-Id": "test-request-id"})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-Id"] == "test-request-id"
+    data = response.json()
+    assert data["status"] in {"ok", "degraded"}
+    assert data["version"] == app.version
+    assert isinstance(data["auth_required"], bool)
+    assert data["providers"]["chat"]["api_key_configured"] in {True, False}
+    assert data["providers"]["embedding"]["api_key_configured"] in {True, False}
+    assert ".pdf" in data["limits"]["supported_extensions"]
+    assert {check["name"] for check in data["checks"]} >= {
+        "uploads",
+        "vector_store",
+        "ingest_jobs",
+        "memory_store",
+        "chat_api_key",
+        "embedding_api_key",
+    }
+
+
 def test_collection_name_for_tenant_preserves_default_collection(monkeypatch) -> None:
     monkeypatch.setattr(vector_store, "settings", SimpleNamespace(default_tenant_id="default"))
 

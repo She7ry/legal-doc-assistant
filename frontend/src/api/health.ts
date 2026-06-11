@@ -1,8 +1,5 @@
 import { apiRequest } from "./http";
-
-export interface HealthResponse {
-  status: string;
-}
+import type { HealthResponse } from "./types";
 
 export function checkHealth(): Promise<HealthResponse> {
   return apiRequest<HealthResponse>({

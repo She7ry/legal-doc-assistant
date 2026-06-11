@@ -12,6 +12,14 @@ It helps users understand document content, spot risks, organize questions, and 
 - Ask questions grounded in retrieved excerpts with source citations.
 - Maintain a separate user memory system for preferences, conversation state,
   task context, and feedback without mixing it into the document RAG index.
+- Run persistent task-oriented agent reviews that plan document work, stream
+  progress events, call controlled review tools, track evidence, identify
+  missing information, and produce a human-review-ready report.
+- Persist review findings as first-class matter records with severity, status,
+  evidence coverage, support level, source quote/location, and human review
+  state.
+- Generate matter artifacts including risk matrices, lawyer questions,
+  negotiation checklists, obligation calendars, and gated formal report records.
 - Clause review: assess risk level for specific clause types.
 - Conflict detection: compare contract and policy excerpts for conflicts.
 - API key authentication, configurable CORS, upload size limits, and tenant-isolated indexes.
@@ -207,6 +215,8 @@ Document ingestion settings:
 
 ```env
 DOC_ASSISTANT_INGEST_JOBS_DB_PATH=
+DOC_ASSISTANT_AGENT_TASKS_DB_PATH=
+DOC_ASSISTANT_MATTER_DB_PATH=
 DOC_ASSISTANT_PDF_OCR_ENABLED=false
 DOC_ASSISTANT_PDF_OCR_LANG=eng
 ```
@@ -216,6 +226,20 @@ If `DOC_ASSISTANT_INGEST_JOBS_DB_PATH` is empty, ingest jobs are persisted at
 is enabled, install and configure `pdf2image`, `pytesseract`, and the local OCR
 runtime; otherwise scanned PDF pages are reported as ingest warnings instead of
 being silently indexed as empty text.
+
+If `DOC_ASSISTANT_AGENT_TASKS_DB_PATH` is empty, persistent agent task records
+and event streams are stored at `data/agent_tasks.sqlite3`.
+Agent task status can be `queued`, `running`, `needs_input`, `succeeded`, or
+`failed`; `needs_input` means the task was not executed because required
+context such as objective, deadline, jurisdiction, or party role is missing.
+
+If `DOC_ASSISTANT_MATTER_DB_PATH` is empty, persistent matter profiles and
+generated review artifacts/findings are stored at `data/matters.sqlite3`.
+Completed Agent tasks write their `matter_profile`, generated artifacts, and
+evidence-audited `findings` into this matter store, keyed by the task's
+`matter_id`. Confirmation gates can write approved matter facts such as
+`user_side` or `governing_law` back into the Matter Profile and record them in
+`confirmed_facts`.
 
 When `DOC_ASSISTANT_API_KEYS` is set, call protected endpoints with either
 `X-API-Key: <key>` or `Authorization: Bearer <key>`. Use `X-Tenant-Id` to route
@@ -287,6 +311,17 @@ VITE_API_BASE_URL=http://localhost:8000
 | GET | `/api/v1/documents` | List indexed documents |
 | POST | `/api/v1/chat/ask` | Ask a question with optional chat history |
 | POST | `/api/v1/chat/tools` | Ask with model-driven `search_documents` and optional `web_search` tools |
+| POST | `/api/v1/agent/tasks` | Create a persistent Agent task and queue background execution |
+| GET | `/api/v1/agent/tasks/{task_id}` | Get Agent task status, events, and final result |
+| POST | `/api/v1/agent/tasks/{task_id}/resume` | Resume a `needs_input` Agent task with supplemental context |
+| GET | `/api/v1/agent/tasks/{task_id}/events` | Stream Agent task progress as server-sent events |
+| GET | `/api/v1/matters` | List persisted matter profiles |
+| GET | `/api/v1/matters/{matter_id}` | Get a matter profile with generated artifacts and findings |
+| GET | `/api/v1/matters/{matter_id}/artifacts` | List generated artifacts for a matter |
+| GET | `/api/v1/matters/{matter_id}/findings` | List persisted review findings for a matter |
+| PATCH | `/api/v1/matters/{matter_id}/findings/{finding_id}` | Update a finding's human review status |
+| PATCH | `/api/v1/matters/{matter_id}/confirmation-gates/{gate_id}` | Approve, waive, or request information for a confirmation gate |
+| POST | `/api/v1/matters/{matter_id}/formal-report` | Create a gated formal report artifact |
 | GET | `/api/v1/memories` | List active user memories |
 | POST | `/api/v1/memories` | Create a user memory |
 | PATCH | `/api/v1/memories/{memory_id}` | Update a user memory |
@@ -344,7 +379,9 @@ Generated answers also pass through `answer_guard.py`, which checks citation val
 
 ## Roadmap
 
-1. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
-2. Authentication (JWT) and multi-tenant collection isolation.
-3. Async document ingestion via task queue.
-4. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
+1. Document original-text side-by-side review and editable artifact lifecycle.
+2. Deeper workflow policies for contract review, version comparison, dispute fact
+   organization, compliance checks, and negotiation preparation.
+3. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
+4. Authentication (JWT) and multi-tenant collection isolation.
+5. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
