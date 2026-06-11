@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
+logger = logging.getLogger("doc_assistant")
+
+
+@contextmanager
+def traced_operation(operation: str, **context: Any) -> Iterator[None]:
+    start = time.perf_counter()
+    try:
+        yield
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        logger.error(
+            "Operation failed",
+            extra={
+                "operation": operation,
+                "elapsed_ms": elapsed_ms,
+                "error": str(exc),
+                **context,
+            },
+            exc_info=True,
+        )
+        raise
+    else:
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        logger.info(
+            "Operation completed",
+            extra={"operation": operation, "elapsed_ms": elapsed_ms, **context},
+        )

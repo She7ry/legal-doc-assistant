@@ -28,14 +28,14 @@ router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_
     response_model=AskResponse,
     summary="Ask a question about indexed documents",
 )
-def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> AskResponse:
+async def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> AskResponse:
     """
     Ask a question. If documents are indexed, answers are grounded in retrieved
     excerpts with [S1]/[S2] citations. Otherwise falls back to general chat.
     """
     history = [{"role": m.role, "content": m.content} for m in body.chat_history]
     try:
-        answer = qa_service.ask(
+        answer = await qa_service.aask(
             body.question,
             chat_history=history,
             user_id=user_id,
@@ -164,6 +164,15 @@ def _stream_answer_events(
         return
 
     content = "".join(chunks)
+    guard_result = qa_service.guard_streamed_answer(prepared, content)
+    yield _sse(
+        "guard_result",
+        {
+            "confidence": guard_result.confidence,
+            "issues": guard_result.issues,
+            "needs_repair": guard_result.needs_repair,
+        },
+    )
     answer = qa_service.finalize_prepared_answer(prepared, content)
     yield _sse(
         "done",

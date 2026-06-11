@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from hashlib import sha1
 import json
 from typing import Any
 
@@ -58,6 +60,7 @@ class _ToolExecutionState:
     citations: list[Citation] = field(default_factory=list)
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
+    document_source_ids: dict[str, str] = field(default_factory=dict)
 
 
 class ToolCallingChatService:
@@ -68,8 +71,12 @@ class ToolCallingChatService:
     ) -> None:
         self.qa_service = qa_service
         self.chat_model = qa_service.chat_model
+        self.invoke_messages = getattr(self.chat_model, "invoke_messages", None)
+        if not callable(self.invoke_messages):
+            raise ValueError("The configured chat model does not support tool calling.")
         self.vector_store = qa_service.vector_store
-        self.web_search_client = web_search_client
+        self.web_search_client = web_search_client or build_web_search_client()
+        self._tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-call")
 
     def ask(
         self,
@@ -79,10 +86,6 @@ class ToolCallingChatService:
         enable_web_search: bool = False,
         max_tool_iterations: int | None = None,
     ) -> ToolCallingAnswer:
-        invoke_messages = getattr(self.chat_model, "invoke_messages", None)
-        if not callable(invoke_messages):
-            raise ValueError("The configured chat model does not support tool calling.")
-
         state = _ToolExecutionState()
         tools = self._tool_schemas(enable_web_search=enable_web_search)
         messages = self._initial_messages(question, chat_history or [])
@@ -93,7 +96,7 @@ class ToolCallingChatService:
         )
 
         for _ in range(iterations):
-            message = invoke_messages(messages, tools=tools, tool_choice="auto")
+            message = self.invoke_messages(messages, tools=tools, tool_choice="auto")
             tool_calls = _normalise_tool_calls(message)
             if not tool_calls:
                 return self._finalize_answer(str(message.get("content") or ""), state)
@@ -116,7 +119,7 @@ class ToolCallingChatService:
                     }
                 )
 
-        final_message = invoke_messages(messages, tools=None, tool_choice=None)
+        final_message = self.invoke_messages(messages, tools=None, tool_choice=None)
         return self._finalize_answer(str(final_message.get("content") or ""), state)
 
     def _finalize_answer(self, content: str, state: _ToolExecutionState) -> ToolCallingAnswer:
@@ -127,7 +130,7 @@ class ToolCallingChatService:
             has_retrieved_documents=bool(guard_citations),
         )
         if guard_result.needs_repair:
-            content = self.qa_service._repair_content(content, guard_result, guard_citations)
+            content = self.qa_service.repair_content(content, guard_result, guard_citations)
             guard_result = validate_answer(
                 content,
                 guard_citations,
@@ -152,7 +155,8 @@ class ToolCallingChatService:
         chat_history: list[dict[str, object]],
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [{"role": "system", "content": build_tool_system_prompt()}]
-        for message in chat_history[-12:]:
+        history_window = _clamp_int(settings.tool_call_history_window, minimum=0, maximum=100)
+        for message in chat_history[-history_window:] if history_window else []:
             role = message.get("role")
             content = str(message.get("content") or "").strip()
             if role in {"user", "assistant"} and content:
@@ -161,10 +165,7 @@ class ToolCallingChatService:
         return messages
 
     def _tool_schemas(self, *, enable_web_search: bool) -> list[dict[str, Any]]:
-        tools = [SEARCH_DOCUMENTS_TOOL_SCHEMA]
-        if enable_web_search:
-            tools.append(WEB_SEARCH_TOOL_SCHEMA)
-        return tools
+        return [schema for schema, _handler in self._enabled_tools(enable_web_search).values()]
 
     def _execute_tool_call(
         self,
@@ -175,15 +176,22 @@ class ToolCallingChatService:
         name = tool_call["function"]["name"]
         arguments = _parse_tool_arguments(tool_call)
 
+        future = None
         try:
-            if name == "search_documents":
-                result = self._search_documents(arguments, state)
-            elif name == "web_search":
-                if not enable_web_search:
-                    raise RuntimeError("web_search was called but web search is not enabled.")
-                result = self._web_search(arguments, state)
-            else:
-                result = {"error": f"Unknown tool: {name}"}
+            future = self._tool_executor.submit(
+                self._run_tool_call,
+                name,
+                arguments,
+                state,
+                enable_web_search,
+            )
+            result = future.result(timeout=max(1, settings.tool_call_timeout_seconds))
+        except FutureTimeoutError:
+            if future is not None:
+                future.cancel()
+            result = {
+                "error": f"Tool execution timed out after {settings.tool_call_timeout_seconds} seconds."
+            }
         except Exception as exc:
             result = {"error": str(exc)}
 
@@ -197,6 +205,30 @@ class ToolCallingChatService:
         )
         return result
 
+    def _enabled_tools(self, enable_web_search: bool) -> dict[str, tuple[dict[str, Any], Any]]:
+        tools: dict[str, tuple[dict[str, Any], Any]] = {
+            "search_documents": (SEARCH_DOCUMENTS_TOOL_SCHEMA, self._search_documents),
+        }
+        if enable_web_search:
+            tools["web_search"] = (WEB_SEARCH_TOOL_SCHEMA, self._web_search)
+        return tools
+
+    def _run_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        state: _ToolExecutionState,
+        enable_web_search: bool,
+    ) -> dict[str, Any]:
+        tools = self._enabled_tools(enable_web_search)
+        match = tools.get(name)
+        if match is None:
+            if name == "web_search":
+                raise RuntimeError("web_search was called but web search is not enabled.")
+            return {"error": f"Unknown tool: {name}"}
+        _schema, handler = match
+        return handler(arguments, state)
+
     def _search_documents(
         self,
         arguments: dict[str, Any],
@@ -208,26 +240,32 @@ class ToolCallingChatService:
 
         results = []
         for document in documents:
-            source_id = f"D{len(state.citations) + 1}"
+            identity = _document_identity(document)
+            source_id = state.document_source_ids.get(identity)
+            is_new_source = source_id is None
+            if source_id is None:
+                source_id = f"D{len(state.citations) + 1}"
+                state.document_source_ids[identity] = source_id
             item = _document_result(source_id, document)
-            state.citations.append(
-                Citation(
-                    source_id=source_id,
-                    file_name=item["file_name"],
-                    page=item["page"],
-                    chunk_id=item["chunk_id"],
-                    preview=item["content"][:500],
-                    source_type="document",
-                    file_id=item["file_id"],
-                    document_key=item["document_key"],
-                    document_version=item["document_version"],
-                    page_label=item["page_label"],
-                    section_heading=item["section_heading"],
-                    exact_quote=item["content"][:1200],
-                    retrieval_score=item["retrieval_score"],
-                    retrieval_relevance=item["retrieval_relevance"],
+            if is_new_source:
+                state.citations.append(
+                    Citation(
+                        source_id=source_id,
+                        file_name=item["file_name"],
+                        page=item["page"],
+                        chunk_id=item["chunk_id"],
+                        preview=item["content"][:500],
+                        source_type="document",
+                        file_id=item["file_id"],
+                        document_key=item["document_key"],
+                        document_version=item["document_version"],
+                        page_label=item["page_label"],
+                        section_heading=item["section_heading"],
+                        exact_quote=item["content"][:1200],
+                        retrieval_score=item["retrieval_score"],
+                        retrieval_relevance=item["retrieval_relevance"],
+                    )
                 )
-            )
             results.append(item)
 
         return {"query": query, "result_count": len(results), "results": results}
@@ -237,7 +275,7 @@ class ToolCallingChatService:
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        web_search_client = self.web_search_client or build_web_search_client()
+        web_search_client = self.web_search_client
         if isinstance(web_search_client, DisabledWebSearchClient):
             raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
 
@@ -422,6 +460,21 @@ def _document_result(source_id: str, document: Document) -> dict[str, Any]:
         ),
         "content": content,
     }
+
+
+def _document_identity(document: Document) -> str:
+    metadata = document.metadata or {}
+    identity = {
+        "file_id": _optional_string(metadata.get("file_id")),
+        "document_key": _optional_string(metadata.get("document_key")),
+        "document_version": metadata.get("document_version"),
+        "page": metadata.get("page"),
+        "chunk_id": metadata.get("chunk_id"),
+        "source": _optional_string(metadata.get("source") or metadata.get("file_name")),
+    }
+    if any(value is not None for value in identity.values()):
+        return json.dumps(identity, ensure_ascii=False, sort_keys=True)
+    return sha1(_compact_text(document.page_content).encode("utf-8")).hexdigest()
 
 
 def _web_source(source_id: str, result: WebSearchResult) -> WebSource:

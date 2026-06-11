@@ -148,24 +148,97 @@ def _ocr_pdf_pages(path: Path, pages: list[int]) -> tuple[dict[int, str], list[s
 
 def _load_docx_documents(path: Path) -> list[Document]:
     try:
+        return _load_docx_documents_with_python_docx(path)
+    except ImportError:
+        return _load_docx_documents_from_xml(path)
+
+
+def _load_docx_documents_with_python_docx(path: Path) -> list[Document]:
+    from docx import Document as DocxDocument
+
+    doc = DocxDocument(str(path))
+    documents: list[Document] = []
+    current_heading: str | None = None
+    current_parts: list[str] = []
+
+    def flush_section() -> None:
+        nonlocal current_parts
+        content = "\n\n".join(part for part in current_parts if part).strip()
+        if not content:
+            return
+        metadata = {"source": str(path), "file_name": path.name}
+        if current_heading:
+            metadata["section_heading"] = current_heading
+        documents.append(Document(page_content=content, metadata=metadata))
+        current_parts = []
+
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style_name = getattr(paragraph.style, "name", "") or ""
+        if style_name.casefold().startswith("heading"):
+            flush_section()
+            current_heading = text
+            current_parts = [text]
+        else:
+            current_parts.append(text)
+
+    for table in doc.tables:
+        rows = []
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            current_parts.append("\n".join(rows))
+
+    for section in doc.sections:
+        header_text = "\n".join(paragraph.text.strip() for paragraph in section.header.paragraphs if paragraph.text.strip())
+        footer_text = "\n".join(paragraph.text.strip() for paragraph in section.footer.paragraphs if paragraph.text.strip())
+        if header_text:
+            current_parts.append(f"Header:\n{header_text}")
+        if footer_text:
+            current_parts.append(f"Footer:\n{footer_text}")
+
+    flush_section()
+    if documents:
+        return documents
+
+    document = Document(page_content="", metadata={"source": str(path), "file_name": path.name})
+    _append_warnings(document, ["DOCX file contained no extractable text."])
+    return [document]
+
+
+def _load_docx_documents_from_xml(path: Path) -> list[Document]:
+    try:
         with zipfile.ZipFile(path) as archive:
-            with archive.open("word/document.xml") as document_xml:
-                root = ElementTree.parse(document_xml).getroot()
+            parts = []
+            root = _read_docx_xml_part(archive, "word/document.xml")
+            if root is not None:
+                body = root.find(f"{_WORD_NAMESPACE}body")
+                if body is not None:
+                    body_text = _word_children_text(body)
+                    if body_text:
+                        parts.append(body_text)
+                alt_texts = _drawing_alt_texts(root)
+                if alt_texts:
+                    parts.append("Image alt text:\n" + "\n".join(alt_texts))
+
+            for part_name, label in _extra_docx_text_parts(archive):
+                part_root = _read_docx_xml_part(archive, part_name)
+                if part_root is None:
+                    continue
+                text = _word_children_text(part_root)
+                alt_texts = _drawing_alt_texts(part_root)
+                if alt_texts:
+                    text = "\n\n".join(
+                        part for part in [text, "Image alt text:\n" + "\n".join(alt_texts)] if part
+                    )
+                if text:
+                    parts.append(f"{label}:\n{text}")
     except (KeyError, zipfile.BadZipFile) as exc:
         raise ValueError("Invalid DOCX file. Expected a Word .docx package.") from exc
-
-    parts = []
-    body = root.find(f"{_WORD_NAMESPACE}body")
-    if body is not None:
-        for child in body:
-            if child.tag == f"{_WORD_NAMESPACE}p":
-                text = _paragraph_text(child)
-                if text:
-                    parts.append(text)
-            elif child.tag == f"{_WORD_NAMESPACE}tbl":
-                table_text = _table_text(child)
-                if table_text:
-                    parts.append(table_text)
 
     content = "\n\n".join(parts).strip()
     metadata = {"source": str(path), "file_name": path.name}
@@ -174,6 +247,71 @@ def _load_docx_documents(path: Path) -> list[Document]:
         _append_warnings(document, ["DOCX file contained no extractable text."])
 
     return [document]
+
+
+def _read_docx_xml_part(
+    archive: zipfile.ZipFile,
+    part_name: str,
+) -> ElementTree.Element | None:
+    try:
+        with archive.open(part_name) as xml_file:
+            return ElementTree.parse(xml_file).getroot()
+    except KeyError:
+        return None
+
+
+def _extra_docx_text_parts(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
+    parts = []
+    for name in archive.namelist():
+        if not name.startswith("word/") or not name.endswith(".xml"):
+            continue
+        file_name = Path(name).name
+        if file_name.startswith("header"):
+            parts.append((name, "Header"))
+        elif file_name.startswith("footer"):
+            parts.append((name, "Footer"))
+        elif file_name.startswith("footnotes"):
+            parts.append((name, "Footnotes"))
+        elif file_name.startswith("endnotes"):
+            parts.append((name, "Endnotes"))
+        elif file_name.startswith("comments"):
+            parts.append((name, "Comments"))
+    return parts
+
+
+def _word_children_text(element: ElementTree.Element) -> str:
+    parts = []
+    for child in element:
+        if child.tag == f"{_WORD_NAMESPACE}p":
+            text = _paragraph_text(child)
+            if text:
+                parts.append(text)
+        elif child.tag == f"{_WORD_NAMESPACE}tbl":
+            table_text = _table_text(child)
+            if table_text:
+                parts.append(table_text)
+        else:
+            nested = _word_children_text(child)
+            if nested:
+                parts.append(nested)
+    return "\n\n".join(parts).strip()
+
+
+def _drawing_alt_texts(element: ElementTree.Element) -> list[str]:
+    alt_texts = []
+    seen = set()
+    for node in element.iter():
+        local_name = node.tag.rsplit("}", 1)[-1]
+        if local_name != "docPr":
+            continue
+        for key in ("descr", "title", "name"):
+            value = node.attrib.get(key)
+            if value:
+                text = value.strip()
+                if text and text not in seen:
+                    alt_texts.append(text)
+                    seen.add(text)
+    return alt_texts
 
 
 def _paragraph_text(element: ElementTree.Element) -> str:

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from api.dependencies import JobStoreDep, TenantIdDep, VectorStoreDep, require_api_key
 from api.jobs import IngestJobRecord, IngestJobStore
 from api.schemas.responses import DocumentInfo, DocumentListResponse, IngestJobResponse, IngestResponse
+from api.task_queue import submit_background_task
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS, save_uploaded_file
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
@@ -27,7 +28,6 @@ router = APIRouter(
     summary="Upload and index a document",
 )
 def ingest_document(
-    background_tasks: BackgroundTasks,
     vector_store: VectorStoreDep,
     tenant_id: TenantIdDep,
     job_store: JobStoreDep,
@@ -51,7 +51,7 @@ def ingest_document(
     file_name = file.filename or "uploaded_document"
     saved_path = save_uploaded_file(file_name, content, tenant_id=tenant_id)
     job = job_store.create(tenant_id=tenant_id, file_name=file_name, saved_path=saved_path)
-    background_tasks.add_task(_run_ingest_job, job.job_id, saved_path, file_name, vector_store, job_store)
+    enqueue_ingest_job(job, vector_store, job_store)
 
     return _job_response(job)
 
@@ -132,6 +132,22 @@ def _run_ingest_job(
         return
 
     job_store.mark_succeeded(job_id, result)
+
+
+def enqueue_ingest_job(
+    record: IngestJobRecord,
+    vector_store: DocumentVectorStore,
+    job_store: IngestJobStore,
+) -> bool:
+    return submit_background_task(
+        f"ingest:{record.job_id}",
+        _run_ingest_job,
+        record.job_id,
+        record.saved_path,
+        record.file_name,
+        vector_store,
+        job_store,
+    )
 
 
 def _job_response(record: IngestJobRecord) -> IngestJobResponse:

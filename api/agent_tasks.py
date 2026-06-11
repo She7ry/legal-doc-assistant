@@ -131,6 +131,31 @@ class AgentTaskStore:
                 return None
             return [replace(event) for event in self._get_events(task_id, after_event_id)]
 
+    def list_restartable(self, *, limit: int = 100) -> list[AgentTaskRecord]:
+        with self._lock:
+            if self.db_path:
+                with self._connect() as connection:
+                    rows = connection.execute(
+                        """
+                        SELECT * FROM agent_tasks
+                        WHERE status IN (?, ?)
+                        ORDER BY submitted_at ASC
+                        LIMIT ?
+                        """,
+                        (
+                            AgentTaskStatus.QUEUED.value,
+                            AgentTaskStatus.RUNNING.value,
+                            max(1, min(limit, 500)),
+                        ),
+                    ).fetchall()
+                return [self._copy_record(_row_to_record(row)) for row in rows]
+
+            return [
+                self._copy_record(record)
+                for record in self._tasks.values()
+                if record.status in {AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING}
+            ][:limit]
+
     def mark_running(self, task_id: str) -> None:
         with self._lock:
             record = self._require_record(task_id)

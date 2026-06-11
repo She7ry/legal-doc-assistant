@@ -425,6 +425,32 @@ class MatterRecordOut(BaseModel):
         )
 
 
+class MatterEventOut(BaseModel):
+    event_id: str
+    matter_id: str
+    event_type: str
+    entity_type: str
+    entity_id: str
+    old_value: Any = None
+    new_value: Any = None
+    actor: str
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, event) -> "MatterEventOut":
+        return cls(
+            event_id=event.event_id,
+            matter_id=event.matter_id,
+            event_type=event.event_type,
+            entity_type=event.entity_type,
+            entity_id=event.entity_id,
+            old_value=event.old_value,
+            new_value=event.new_value,
+            actor=event.actor,
+            created_at=event.created_at,
+        )
+
+
 class MatterListResponse(BaseModel):
     matters: list[MatterRecordOut]
     total: int
@@ -689,6 +715,14 @@ class MemoryOut(BaseModel):
 class MemoryListResponse(BaseModel):
     memories: list[MemoryOut]
     total: int
+    offset: int = 0
+    limit: int | None = None
+
+
+class MemoryBatchDeleteResponse(BaseModel):
+    deleted: list[MemoryOut]
+    not_found: list[str]
+    total_deleted: int
 
 
 class ErrorResponse(BaseModel):
