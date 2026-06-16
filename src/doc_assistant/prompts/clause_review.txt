@@ -1,41 +1,41 @@
-Task: Review the provided source excerpts for the requested clause type and return a structured risk assessment.
+任务：审阅所请求条款类型的来源摘录，返回结构化风险评估。
 
-Requested clause type:
+请求条款类型：
 {clause_type}
 
-Normalized clause type:
+归一化条款类型：
 {normalized_clause_type}
 
-Available clause taxonomy:
+可用条款分类：
 {clause_taxonomy}
 
-Risk rules to apply:
+适用风险规则：
 {risk_rules}
 
-Source excerpts:
+来源摘录：
 <retrieved_documents>
 {context}
 </retrieved_documents>
 
-Use only the provided excerpts. Do not provide final legal advice. Do not cite statutes, cases, market standards, or external facts unless they appear in the excerpts.
+仅使用提供的摘录。不提供最终法律意见。不得引用摘录中未出现的法条、判例、市场标准或外部事实。
 
-Return exactly one JSON object. Do not wrap it in markdown. Use these keys:
-- clause_type: string.
-- normalized_clause_type: taxonomy key or short normalized name.
-- found: boolean if clear, otherwise null.
-- summary: short plain-language summary grounded in cited excerpts.
-- risk_level: one of Low, Medium, High, Needs human review.
-- risk_reasons: array of objects. Each object must include reason and citation. Citation must be a source id such as S1, not a markdown link.
-- affected_party: string or null.
-- plain_language_explanation: explain what the clause means and why the user should pay attention.
-- questions_for_lawyer: array of practical, non-conclusive questions the user could ask a lawyer or counterparty.
-- missing_information: array of missing facts, sections, definitions, schedules, or jurisdiction details needed for stronger review.
-- needs_human_review: boolean.
+仅返回一个 JSON 对象，不要用 markdown 包裹。字段如下（键名保持英文）：
+- clause_type: string。
+- normalized_clause_type: 分类键或简短归一化名称。
+- found: 明确则 boolean，否则 null。
+- summary: 基于引用摘录的简短通俗摘要（中文）。
+- risk_level: 取 Low、Medium、High、Needs human review 之一。
+- risk_reasons: 对象数组，每项含 reason（中文）和 citation（来源 ID，如 S1，非 markdown 链接）。
+- affected_party: string 或 null。
+- plain_language_explanation: 条款含义及用户需关注的原因（中文）。
+- questions_for_lawyer: 可向律师或对方提出的非结论性实际问题（中文）。
+- missing_information: 加强审阅所需的缺失事实、章节、定义、附件或管辖信息（中文）。
+- needs_human_review: boolean。
 
-Rules:
-- Every material claim must be tied to one or more source ids from the excerpts.
-- If the clause was not found, set found to false, risk_level to Needs human review, and explain what source text is missing.
-- Soften legal conclusions. Use "may", "could", "appears", or "needs review" instead of definitive legal advice.
-- Prefer user-facing plain language while keeping the output valid JSON.
+规则：
+- 每项实质性陈述须关联一个或多个摘录中的来源 ID。
+- 未找到条款时，设 found 为 false，risk_level 为 Needs human review，并说明缺失哪些来源文本。
+- 软化法律结论，用「可能」「或会」「似乎」「需审阅」等，避免确定性法律意见。
+- 面向用户的字符串用中文；JSON 结构须合法。
 
-Answer:
+回答：

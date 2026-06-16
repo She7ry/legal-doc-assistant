@@ -23,6 +23,16 @@ class ToolChatRequest(AskRequest):
     max_tool_iterations: int | None = Field(default=None, ge=1, le=10)
 
 
+class ConversationCreateRequest(BaseModel):
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    title: str | None = Field(default=None, max_length=200)
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    status: str | None = Field(default=None, pattern="^(active|archived)$")
+
+
 class AgentTaskRequest(BaseModel):
     objective: str = Field(..., min_length=1, max_length=2000)
     focus_areas: list[str] = Field(default_factory=list, max_length=8)
@@ -89,6 +99,23 @@ class MemoryBatchCreateRequest(BaseModel):
 
 class MemoryBatchDeleteRequest(BaseModel):
     memory_ids: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class MemoryConversationSummaryRequest(BaseModel):
+    conversation_id: str = Field(..., min_length=1, max_length=128)
+    limit: int = Field(default=40, ge=2, le=200)
+
+
+class FeedbackCreateRequest(BaseModel):
+    rating: str | int = Field(
+        ...,
+        description="positive/negative or 1/-1.",
+        examples=["positive"],
+    )
+    conversation_id: str | None = Field(default=None, max_length=128)
+    message_id: str | None = Field(default=None, max_length=128)
+    memory_ids: list[str] = Field(default_factory=list, max_length=50)
+    comment: str | None = Field(default=None, max_length=1000)
 
 
 class ClauseReviewRequest(BaseModel):

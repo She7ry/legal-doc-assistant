@@ -68,6 +68,37 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+export interface ConversationMessagesResponse {
+  conversation_id: string;
+  messages: ChatHistoryMessage[];
+}
+
+export interface ConversationRecord {
+  conversation_id: string;
+  title: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface ConversationListResponse {
+  conversations: ConversationRecord[];
+  total: number;
+  offset: number;
+  limit: number | null;
+}
+
+export interface ConversationCreateRequest {
+  conversation_id?: string | null;
+  title?: string | null;
+}
+
+export interface ConversationUpdateRequest {
+  title?: string | null;
+  status?: "active" | "archived";
+}
+
 export interface AnswerResponse {
   content: string;
   citations: Citation[];
@@ -315,6 +346,10 @@ export interface MemoryUsage {
   confidence: number;
   scope: string;
   score: number | null;
+  last_accessed_at?: string | null;
+  access_count?: number;
+  superseded_conflicting?: boolean;
+  superseded_from_content?: string | null;
 }
 
 export interface ClauseReviewRequest {
@@ -436,11 +471,69 @@ export interface MemoryRecord {
   source_message_id: string | null;
   conversation_id: string | null;
   task_id: string | null;
+  last_accessed_at: string | null;
+  access_count: number;
+  superseded_conflicting: boolean;
+  superseded_from_content: string | null;
 }
 
 export interface MemoryListResponse {
   memories: MemoryRecord[];
   total: number;
+}
+
+export interface MemoryMaintenanceResponse {
+  expired_stale: number;
+  limit_stale: number;
+  vector_deleted: number;
+  vector_upserted: number;
+}
+
+export interface MemoryAccessStats {
+  tracked_memories: number;
+  never_accessed: number;
+  accessed: number;
+  accessed_last_7d: number;
+  accessed_last_30d: number;
+  total_access_count: number;
+  average_access_count: number;
+  max_access_count: number;
+}
+
+export interface MemoryRetrievalStats {
+  total: number;
+  with_memory: number;
+  last_7d: number;
+  last_30d: number;
+  hit_rate: number;
+  average_memory_count: number;
+  average_document_count: number;
+  last_retrieval_at: string | null;
+  selected_memory_source_counts: Record<string, number>;
+  selected_memory_source_ratios: Record<string, number>;
+}
+
+export interface MemoryStatsResponse {
+  tenant_id: string;
+  user_id: string;
+  generated_at: string;
+  total_memories: number;
+  active_memories: number;
+  stale_memories: number;
+  deleted_memories: number;
+  expired_active_memories: number;
+  status_counts: Record<string, number>;
+  scope_counts: Record<string, number>;
+  type_counts: Record<string, number>;
+  average_confidence: number;
+  average_active_confidence: number;
+  access: MemoryAccessStats;
+  retrievals: MemoryRetrievalStats;
+}
+
+export interface MemoryConversationSummaryRequest {
+  conversation_id: string;
+  limit?: number;
 }
 
 export interface MemoryCreateRequest {
@@ -464,6 +557,37 @@ export interface MemoryUpdateRequest {
   expires_at?: string | null;
   visibility?: string;
   status?: string;
+}
+
+export type FeedbackRating = "positive" | "negative" | 1 | -1;
+
+export interface FeedbackCreateRequest {
+  rating: FeedbackRating;
+  conversation_id?: string | null;
+  message_id?: string | null;
+  memory_ids?: string[];
+  comment?: string | null;
+}
+
+export interface FeedbackMemoryAdjustment {
+  memory_id: string;
+  status: string;
+  previous_confidence: number | null;
+  new_confidence: number | null;
+  memory: MemoryRecord | null;
+}
+
+export interface FeedbackResponse {
+  feedback_id: string;
+  tenant_id: string;
+  user_id: string;
+  rating: number;
+  created_at: string;
+  conversation_id: string | null;
+  message_id: string | null;
+  memory_ids: string[];
+  comment: string | null;
+  adjusted_memories: FeedbackMemoryAdjustment[];
 }
 
 export interface ApiErrorPayload {

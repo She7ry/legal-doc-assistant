@@ -5,7 +5,12 @@
         <h2>Memory</h2>
         <p>User preferences and stable context</p>
       </div>
-      <el-button :icon="Refresh" :loading="loading" @click="loadMemories">Refresh</el-button>
+      <div class="memory-toolbar">
+        <el-button :icon="Tools" :loading="maintaining" @click="runMaintenance">
+          Maintain
+        </el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="loadMemories">Refresh</el-button>
+      </div>
     </div>
 
     <el-form label-position="top" class="memory-form" @submit.prevent>
@@ -39,6 +44,25 @@
       </div>
     </el-form>
 
+    <div class="memory-summary-tool">
+      <el-input
+        v-model="summaryForm.conversationId"
+        placeholder="conversation_id for session summary"
+        clearable
+      />
+      <el-input-number v-model="summaryForm.limit" :min="2" :max="200" :step="4" controls-position="right" />
+      <el-button
+        type="primary"
+        plain
+        :icon="MagicStick"
+        :loading="summarizing"
+        :disabled="!canSummarize"
+        @click="summarizeCurrentConversation"
+      >
+        Summarize
+      </el-button>
+    </div>
+
     <el-table
       v-loading="loading"
       :data="memories"
@@ -46,11 +70,16 @@
       empty-text="No active memories"
       class="memory-table"
     >
+      <el-table-column prop="scope" label="Scope" width="92" />
       <el-table-column prop="type" label="Type" width="108" />
       <el-table-column prop="key" label="Key" width="132" />
       <el-table-column prop="content" label="Content" min-width="220" show-overflow-tooltip />
       <el-table-column prop="confidence" label="Conf." width="86">
         <template #default="{ row }">{{ row.confidence.toFixed(2) }}</template>
+      </el-table-column>
+      <el-table-column prop="access_count" label="Uses" width="74" />
+      <el-table-column label="Last used" width="140">
+        <template #default="{ row }">{{ formatDateTime(row.last_accessed_at) }}</template>
       </el-table-column>
       <el-table-column label="Actions" width="132" fixed="right">
         <template #default="{ row }">
@@ -83,15 +112,24 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Delete, Edit, Plus, Refresh } from "@element-plus/icons-vue";
+import { Delete, Edit, MagicStick, Plus, Refresh, Tools } from "@element-plus/icons-vue";
 
-import { createMemory, deleteMemory, listMemories, updateMemory } from "../api/memories";
+import {
+  createMemory,
+  deleteMemory,
+  listMemories,
+  runMemoryMaintenance,
+  summarizeConversation,
+  updateMemory,
+} from "../api/memories";
 import { formatApiError } from "../api/http";
 import type { MemoryRecord } from "../api/types";
 
 const memories = ref<MemoryRecord[]>([]);
 const loading = ref(false);
 const saving = ref(false);
+const maintaining = ref(false);
+const summarizing = ref(false);
 const editDialogVisible = ref(false);
 const editingMemoryId = ref<string | null>(null);
 
@@ -107,7 +145,13 @@ const editForm = reactive({
   confidence: 0.95,
 });
 
+const summaryForm = reactive({
+  conversationId: "",
+  limit: 40,
+});
+
 const canCreate = computed(() => Boolean(form.key.trim() && form.content.trim()));
+const canSummarize = computed(() => Boolean(summaryForm.conversationId.trim()));
 
 onMounted(() => {
   void loadMemories();
@@ -148,6 +192,40 @@ async function submitMemory() {
     ElMessage.error(formatApiError(error));
   } finally {
     saving.value = false;
+  }
+}
+
+async function runMaintenance() {
+  maintaining.value = true;
+  try {
+    const result = await runMemoryMaintenance();
+    await loadMemories();
+    ElMessage.success(
+      `Maintenance complete: ${result.expired_stale} expired, ${result.limit_stale} pruned, ${result.vector_upserted} indexed`,
+    );
+  } catch (error) {
+    ElMessage.error(formatApiError(error));
+  } finally {
+    maintaining.value = false;
+  }
+}
+
+async function summarizeCurrentConversation() {
+  if (!canSummarize.value) {
+    return;
+  }
+  summarizing.value = true;
+  try {
+    const memory = await summarizeConversation({
+      conversation_id: summaryForm.conversationId.trim(),
+      limit: summaryForm.limit,
+    });
+    await loadMemories();
+    ElMessage.success(`Summary saved: ${memory.key}`);
+  } catch (error) {
+    ElMessage.error(formatApiError(error));
+  } finally {
+    summarizing.value = false;
   }
 }
 
@@ -195,5 +273,21 @@ async function removeMemory(memory: MemoryRecord) {
       ElMessage.error(formatApiError(error));
     }
   }
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 </script>

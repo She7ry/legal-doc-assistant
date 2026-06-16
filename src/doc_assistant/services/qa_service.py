@@ -65,6 +65,7 @@ class PreparedQAAnswer:
     user_id: str | None
     conversation_id: str | None
     user_message_recorded: bool
+    task_id: str | None = None
     has_retrieved_documents: bool = True
 
 
@@ -94,6 +95,7 @@ class DocumentQAService:
         user_id: str | None = None,
         conversation_id: str | None = None,
         task_id: str | None = None,
+        merge_persisted_history: bool = True,
     ) -> QAAnswer:
         prepared = self.prepare_answer(
             question,
@@ -101,6 +103,7 @@ class DocumentQAService:
             user_id=user_id,
             conversation_id=conversation_id,
             task_id=task_id,
+            merge_persisted_history=merge_persisted_history,
         )
         content = self._invoke_chat_messages(prepared.messages)
         return self.finalize_prepared_answer(prepared, content)
@@ -112,14 +115,16 @@ class DocumentQAService:
         user_id: str | None = None,
         conversation_id: str | None = None,
         task_id: str | None = None,
+        merge_persisted_history: bool = True,
     ) -> QAAnswer:
         prepared = await asyncio.to_thread(
             self.prepare_answer,
             question,
-            chat_history,
-            user_id,
-            conversation_id,
-            task_id,
+            chat_history=chat_history,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            merge_persisted_history=merge_persisted_history,
         )
         content = await self._ainvoke_chat_messages(prepared.messages)
         return self.finalize_prepared_answer(prepared, content)
@@ -166,11 +171,14 @@ class DocumentQAService:
         user_id: str | None = None,
         conversation_id: str | None = None,
         task_id: str | None = None,
+        merge_persisted_history: bool = True,
     ) -> PreparedQAAnswer:
         resolved_conversation_id = conversation_id
         memory_candidates: list[MemoryCandidate] = []
         memory_context = "No relevant user memory."
         user_message_recorded = False
+        persisted_history: list[dict[str, str]] = []
+        incoming_history = chat_history or []
 
         if self.memory_service and user_id:
             try:
@@ -179,6 +187,13 @@ class DocumentQAService:
                     user_id,
                     conversation_id,
                 )
+                if merge_persisted_history:
+                    persisted_history = self.memory_service.load_conversation_history(
+                        self.tenant_id,
+                        user_id,
+                        resolved_conversation_id,
+                        limit=max(settings.chat_history_window, len(incoming_history)),
+                    )
                 message_id = self.memory_service.record_user_message(
                     tenant_id=self.tenant_id,
                     user_id=user_id,
@@ -209,7 +224,15 @@ class DocumentQAService:
                 memory_candidates = []
                 memory_context = "No relevant user memory."
 
-        chat_history_text = self._format_chat_history(chat_history or [])
+        effective_chat_history = self._merge_chat_history(
+            persisted_history,
+            incoming_history,
+            max_messages=settings.chat_history_window,
+        )
+        chat_history_text = self._format_chat_history(
+            effective_chat_history,
+            max_messages=settings.chat_history_window,
+        )
         retrieval_query = self._rewrite_query(question, chat_history_text)
         documents = self.vector_store.search(retrieval_query)
         self._log_retrieval(
@@ -237,6 +260,7 @@ class DocumentQAService:
                 user_id=user_id,
                 conversation_id=resolved_conversation_id,
                 user_message_recorded=user_message_recorded,
+                task_id=task_id,
                 has_retrieved_documents=False,
             )
 
@@ -254,6 +278,7 @@ class DocumentQAService:
             user_id=user_id,
             conversation_id=resolved_conversation_id,
             user_message_recorded=user_message_recorded,
+            task_id=task_id,
             has_retrieved_documents=True,
         )
 
@@ -275,6 +300,7 @@ class DocumentQAService:
         self._record_assistant_message(
             user_id=prepared.user_id,
             conversation_id=prepared.conversation_id,
+            task_id=prepared.task_id,
             content=content,
             user_message_recorded=prepared.user_message_recorded,
         )
@@ -794,7 +820,7 @@ class DocumentQAService:
         if not isinstance(value, str):
             return "Insufficient information"
         normalized = value.strip().casefold()
-        if "potential" in normalized or "conflict" in normalized and "no" not in normalized:
+        if "potential" in normalized or ("conflict" in normalized and "no" not in normalized):
             return "Potential conflict"
         if "no conflict" in normalized or normalized == "none":
             return "No conflict found"
@@ -1045,17 +1071,31 @@ class DocumentQAService:
         *,
         user_id: str | None,
         conversation_id: str | None,
+        task_id: str | None,
         content: str,
         user_message_recorded: bool,
     ) -> None:
         if not (self.memory_service and user_id and conversation_id and user_message_recorded):
             return
         try:
-            self.memory_service.record_assistant_message(
+            message_id = self.memory_service.record_assistant_message(
                 tenant_id=self.tenant_id,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 content=content,
+            )
+            self.memory_service.write_memories_from_assistant_message(
+                tenant_id=self.tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                content=content,
+                task_id=task_id,
+            )
+            self.memory_service.maybe_summarize_conversation(
+                tenant_id=self.tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
             )
         except Exception:
             logger.debug(
@@ -1095,17 +1135,63 @@ class DocumentQAService:
 
     @staticmethod
     def _format_chat_history(messages: list[dict[str, object]], max_messages: int = 12) -> str:
-        history_parts = []
-        for message in messages[-max_messages:]:
+        system_parts = []
+        chat_parts = []
+        for message in messages:
             role = message.get("role")
             content = str(message.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
+            if not content:
+                continue
+            if role == "system":
+                if _is_conversation_summary_context(content):
+                    system_parts.append(f"Session summary: {content}")
+                continue
+            if role not in {"user", "assistant"}:
                 continue
 
             label = "User" if role == "user" else "Assistant"
-            history_parts.append(f"{label}: {content}")
+            chat_parts.append(f"{label}: {content}")
 
+        history_parts = [*system_parts, *chat_parts[-max_messages:]]
         return "\n".join(history_parts) if history_parts else "No previous messages."
+
+    @staticmethod
+    def _merge_chat_history(
+        persisted_history: list[dict[str, object]],
+        incoming_history: list[dict[str, object]],
+        *,
+        max_messages: int,
+    ) -> list[dict[str, object]]:
+        system_context: list[dict[str, object]] = []
+        merged: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for message in [*persisted_history, *incoming_history]:
+            role = message.get("role")
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "system":
+                if not _is_conversation_summary_context(content):
+                    continue
+                key = ("system", content)
+                if key in seen:
+                    continue
+                seen.add(key)
+                system_context.append({"role": "system", "content": content})
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            key = (str(role), content)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"role": str(role), "content": content})
+        recent_messages = merged[-max(0, max_messages) :] if max_messages else []
+        return [*system_context, *recent_messages]
+
+
+def _is_conversation_summary_context(content: str) -> bool:
+    return content.strip().casefold().startswith("conversation summary:")
 
 
 def _try_lightweight_repair(

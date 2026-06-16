@@ -4,6 +4,10 @@ import json
 
 from langchain_core.documents import Document
 
+from doc_assistant.memory import service as memory_service_module
+from doc_assistant.memory.service import MemoryService
+from doc_assistant.memory.store import MemoryStore
+from doc_assistant.services import tool_calling_service as tool_calling_module
 from doc_assistant.services.qa_service import DocumentQAService
 from doc_assistant.services.tool_calling_service import ToolCallingChatService
 from doc_assistant.tools.web_search import WebSearchResult
@@ -61,6 +65,13 @@ class DocumentToolModel:
             }
         assert any(message["role"] == "tool" and "D1" in message["content"] for message in messages)
         return {"content": "Payment must be made within 30 days [D1]."}
+
+
+class MemoryAwareToolModel(DocumentToolModel):
+    def invoke_messages(self, messages, tools=None, tool_choice=None):
+        if self.calls == 0:
+            assert "Prefer concise answers." in messages[0]["content"]
+        return super().invoke_messages(messages, tools=tools, tool_choice=tool_choice)
 
 
 class EmptyVectorStore:
@@ -149,3 +160,67 @@ def test_tool_calling_service_executes_web_search_when_enabled() -> None:
     assert answer.web_sources[0].source_id == "W1"
     assert answer.web_sources[0].url == "https://news.example/supplier"
     assert answer.tool_calls[0].name == "web_search"
+
+
+def test_tool_calling_service_uses_memory_context(tmp_path) -> None:
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    memory_service.create_memory(
+        tenant_id="default",
+        user_id="user-a",
+        scope="user",
+        type="preference",
+        key="answer_style",
+        content="Prefer concise answers.",
+    )
+    model = MemoryAwareToolModel()
+    qa_service = DocumentQAService(
+        vector_store=SingleDocumentVectorStore(),
+        chat_model=model,
+        memory_service=memory_service,
+        tenant_id="default",
+    )
+    service = ToolCallingChatService(qa_service)
+
+    answer = service.ask(
+        "Please give concise payment terms.",
+        user_id="user-a",
+        conversation_id="conversation-a",
+    )
+
+    assert answer.memories_used[0].key == "answer_style"
+    history = memory_service.load_conversation_history(
+        "default",
+        "user-a",
+        "conversation-a",
+        limit=5,
+    )
+    assert [message["role"] for message in history] == ["user", "assistant"]
+
+
+def test_tool_calling_service_triggers_auto_conversation_summary(tmp_path, monkeypatch) -> None:
+    summary_settings = memory_service_module.settings.with_overrides(
+        memory_auto_summary_threshold=2,
+        memory_auto_summary_interval=1,
+        memory_auto_summary_window=5,
+    )
+    monkeypatch.setattr(memory_service_module, "settings", summary_settings)
+    monkeypatch.setattr(tool_calling_module, "settings", summary_settings)
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    model = DocumentToolModel()
+    qa_service = DocumentQAService(
+        vector_store=SingleDocumentVectorStore(),
+        chat_model=model,
+        memory_service=memory_service,
+        tenant_id="default",
+    )
+    service = ToolCallingChatService(qa_service)
+
+    service.ask(
+        "What are the payment terms?",
+        user_id="user-a",
+        conversation_id="conversation-a",
+    )
+
+    memories = memory_service.list_memories("default", "user-a")
+
+    assert any(memory.key == "conversation_summary_conversation-a" for memory in memories)
