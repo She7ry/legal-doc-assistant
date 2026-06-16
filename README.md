@@ -156,6 +156,23 @@ DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
 DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
 ```
 
+Agent execution settings:
+
+```env
+DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS=3
+DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES=2
+DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS=2,5
+DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED=true
+DOC_ASSISTANT_AGENT_REACT_ENABLED=true
+DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS=2
+```
+
+When `DOC_ASSISTANT_AGENT_REACT_ENABLED=true`, eligible Agent review and
+deliverable steps run a small controlled ReAct evidence loop after the planned
+tool call. The loop observes missing citations, guard warnings, and weak
+evidence, then uses whitelisted document-only actions such as `document_qa` or
+`build_evidence_profile` to repair evidence before the final report is compiled.
+
 Retrieval settings:
 
 ```env

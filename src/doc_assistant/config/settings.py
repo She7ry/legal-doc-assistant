@@ -155,6 +155,8 @@ class Settings:
         )
     )
     agent_llm_planner_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED", True))
+    agent_react_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_REACT_ENABLED", True))
+    agent_react_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS", 2))
     chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
     memory_top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TOP_K", 5))
     memory_min_confidence: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55))
@@ -235,6 +237,8 @@ class Settings:
             raise ValueError("agent_step_max_retries must be greater than or equal to 0.")
         if any(value < 0 for value in self.agent_step_retry_backoff_seconds):
             raise ValueError("agent_step_retry_backoff_seconds values must be non-negative.")
+        if self.agent_react_max_iterations < 0:
+            raise ValueError("agent_react_max_iterations must be greater than or equal to 0.")
         if self.memory_auto_summary_threshold < 0:
             raise ValueError("memory_auto_summary_threshold must be greater than or equal to 0.")
         if self.memory_auto_summary_interval <= 0:
