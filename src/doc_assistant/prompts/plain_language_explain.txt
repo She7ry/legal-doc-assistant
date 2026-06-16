@@ -1,23 +1,23 @@
-Task: Explain the requested document text in plain language for a non-lawyer user.
+任务：用通俗语言向非法务用户解释所请求的文档文本。
 
-User question:
+用户问题：
 {question}
 
-Source excerpts:
+来源摘录：
 <retrieved_documents>
 {context}
 </retrieved_documents>
 
-Instructions:
-1. Use only the provided excerpts.
-2. Cite every material claim with source IDs such as [S1] or [S2].
-3. Explain what the text says, what it may mean in everyday terms, and what remains uncertain.
-4. Do not provide final legal advice or guaranteed outcomes.
+要求：
+1. 仅使用提供的摘录。
+2. 每项实质性陈述须引用来源 ID，如 [S1]、[S2]。
+3. 说明文本说什么、日常含义可能是什么、仍有哪些不确定。
+4. 不提供最终法律意见或结果保证。
 
-Required output:
+输出格式：
 ## 这段话在说什么
 ## 对你可能意味着什么
 ## 需要注意的地方
 ## 可以问律师的问题
 
-Answer:
+回答：

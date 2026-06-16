@@ -9,6 +9,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.services import agent_service as agent_service_module
 from doc_assistant.services.agent_service import (
+    AgentPlanStep,
     LegalAgentService,
     clarification_questions_for_task,
 )
@@ -95,6 +96,23 @@ class ConcurrentReviewQAService:
                 "needs_human_review": True,
             },
         )
+
+
+class RecordingAgentQAService:
+    tenant_id = "default"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def ask(self, question: str, **kwargs) -> QAAnswer:
+        self.calls.append(
+            {
+                "question": question,
+                "chat_history": kwargs.get("chat_history") or [],
+                "merge_persisted_history": kwargs.get("merge_persisted_history"),
+            }
+        )
+        return QAAnswer(content=f"Answer for {question}.")
 
 
 def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
@@ -214,6 +232,42 @@ def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) ->
         "payment.pdf",
         "termination.pdf",
     ]
+
+
+def test_legal_agent_passes_step_history_between_qa_steps() -> None:
+    qa_service = RecordingAgentQAService()
+    agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
+    plan = [
+        AgentPlanStep(
+            step_id="profile",
+            title="Build profile",
+            purpose="Profile the matter.",
+            tool="document_qa",
+            arguments={"question": "Build the matter profile."},
+        ),
+        AgentPlanStep(
+            step_id="calendar",
+            title="Build calendar",
+            purpose="Extract obligations.",
+            tool="create_obligation_calendar",
+            arguments={"query": "key dates"},
+        ),
+    ]
+
+    agent._execute_plan_steps(
+        plan,
+        objective="Review key dates.",
+        user_id=None,
+        conversation_id=None,
+        task_id="task-a",
+        citation_registry=agent_service_module._CitationRegistry(),
+        progress_callback=None,
+    )
+
+    assert qa_service.calls[0]["chat_history"][0]["content"] == "Agent objective: Review key dates."
+    assert qa_service.calls[0]["merge_persisted_history"] is False
+    assert "Completed agent step 'Build profile'" in qa_service.calls[1]["chat_history"][-1]["content"]
+    assert qa_service.calls[1]["merge_persisted_history"] is False
 
 
 def test_legal_agent_plans_conflict_check_for_policy_tasks() -> None:

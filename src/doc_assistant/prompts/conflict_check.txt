@@ -1,42 +1,42 @@
-Task: Compare contract excerpts against policy excerpts and return a structured conflict matrix.
+任务：对比合同摘录与政策摘录，返回结构化冲突矩阵。
 
-Contract excerpts:
+合同摘录：
 <contract_documents>
 {contract_context}
 </contract_documents>
 
-Policy excerpts:
+政策摘录：
 <policy_documents>
 {policy_context}
 </policy_documents>
 
-Allowed conflict types:
+允许的冲突类型：
 {conflict_types}
 
-Use only the provided excerpts. Do not provide final legal advice. Do not cite statutes, cases, market standards, or external facts unless they appear in the excerpts.
+仅使用提供的摘录。不提供最终法律意见。不得引用摘录中未出现的法条、判例、市场标准或外部事实。
 
-Return exactly one JSON object. Do not wrap it in markdown. Use these keys:
-- overall_status: one of No conflict found, Potential conflict, Insufficient information.
-- conflicts: array of conflict objects. If no conflict is supported, return an empty array.
-- needs_human_review: boolean.
-- supporting_citations: array of source ids used to support a no-conflict or insufficient-information conclusion.
+仅返回一个 JSON 对象，不要用 markdown 包裹。字段如下（键名保持英文）：
+- overall_status: 取 No conflict found、Potential conflict、Insufficient information 之一。
+- conflicts: 冲突对象数组；无支持冲突时返回空数组。
+- needs_human_review: boolean。
+- supporting_citations: 支持「无冲突」或「信息不足」结论的来源 ID 数组。
 
-Each conflict object must include:
-- topic: short label, such as Payment timeline, Data retention, Notice method, Confidentiality scope.
-- conflict_type: one allowed snake_case key, such as deadline_mismatch or direct_contradiction.
-- severity: one of Low, Medium, High, Needs human review.
-- contract_position: concise statement of what the contract excerpt says.
-- policy_position: concise statement of what the policy excerpt says.
-- why_conflict: explain why the two positions may conflict, using only cited text.
-- recommended_action: practical next step such as negotiate contract wording, request a policy exception, confirm with business owner, or ask attorney to review.
-- contract_citations: array of contract source ids such as C1.
-- policy_citations: array of policy source ids such as P1.
-- needs_human_review: boolean.
-- confidence: Low, Medium, or High.
+每个冲突对象须含：
+- topic: 简短标签，如 Payment timeline、Data retention（可用英文或中文）。
+- conflict_type: 允许的 snake_case 键，如 deadline_mismatch、direct_contradiction。
+- severity: 取 Low、Medium、High、Needs human review 之一。
+- contract_position: 合同摘录所述内容的简要陈述（中文）。
+- policy_position: 政策摘录所述内容的简要陈述（中文）。
+- why_conflict: 说明两处立场为何可能冲突，仅依据引用文本（中文）。
+- recommended_action: 可操作建议，如协商合同措辞、申请政策例外、确认业务负责人或请律师审阅（中文）。
+- contract_citations: 合同来源 ID 数组，如 C1。
+- policy_citations: 政策来源 ID 数组，如 P1。
+- needs_human_review: boolean。
+- confidence: Low、Medium 或 High。
 
-Rules:
-- Every conflict must include at least one contract citation and one policy citation.
-- If one side has no excerpts, set overall_status to Insufficient information and explain that in the structured fields where possible.
-- Soften legal conclusions. Use "may", "could", "appears", or "needs review" instead of definitive legal advice.
+规则：
+- 每项冲突须至少含一个合同引用和一个政策引用。
+- 任一侧无摘录时，设 overall_status 为 Insufficient information，并在结构化字段中说明。
+- 软化法律结论，用「可能」「或会」「似乎」「需审阅」等，避免确定性法律意见。
 
-Answer:
+回答：

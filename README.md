@@ -210,6 +210,21 @@ DOC_ASSISTANT_MEMORY_DB_PATH=
 DOC_ASSISTANT_MEMORY_COLLECTION=user_memories
 DOC_ASSISTANT_MEMORY_TOP_K=5
 DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE=0.55
+DOC_ASSISTANT_MEMORY_SEMANTIC_DEDUP_MIN_SCORE=0.88
+DOC_ASSISTANT_CHAT_HISTORY_WINDOW=12
+DOC_ASSISTANT_MEMORY_SESSION_TTL_HOURS=24
+DOC_ASSISTANT_MEMORY_TASK_TTL_HOURS=168
+DOC_ASSISTANT_MEMORY_MAX_ACTIVE_PER_USER=500
+DOC_ASSISTANT_MEMORY_DECAY_HALF_LIFE_DAYS=90
+DOC_ASSISTANT_MEMORY_MAINTENANCE_ENABLED=true
+DOC_ASSISTANT_MEMORY_MAINTENANCE_COOLDOWN_SECONDS=300
+DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD=12
+DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_INTERVAL=5
+DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_WINDOW=40
+DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS=800
+DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED=true
+DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MAX_ITEMS=3
+DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE=0.6
 ```
 
 Security and isolation settings:
@@ -323,6 +338,7 @@ VITE_API_BASE_URL=http://localhost:8000
 | GET | `/api/v1/documents` | List indexed documents |
 | POST | `/api/v1/chat/ask` | Ask a question with optional chat history |
 | POST | `/api/v1/chat/tools` | Ask with model-driven `search_documents` and optional `web_search` tools |
+| GET | `/api/v1/chat/conversations/{conversation_id}/messages` | Restore persisted chat messages for a conversation |
 | POST | `/api/v1/agent/tasks` | Create a persistent Agent task and queue background execution |
 | GET | `/api/v1/agent/tasks/{task_id}` | Get Agent task status, events, and final result |
 | POST | `/api/v1/agent/tasks/{task_id}/resume` | Resume a `needs_input` Agent task with supplemental context |
@@ -335,9 +351,13 @@ VITE_API_BASE_URL=http://localhost:8000
 | PATCH | `/api/v1/matters/{matter_id}/confirmation-gates/{gate_id}` | Approve, waive, or request information for a confirmation gate |
 | POST | `/api/v1/matters/{matter_id}/formal-report` | Create a gated formal report artifact |
 | GET | `/api/v1/memories` | List active user memories |
+| GET | `/api/v1/memories/stats` | Get memory health and retrieval statistics |
 | POST | `/api/v1/memories` | Create a user memory |
+| POST | `/api/v1/memories/maintenance` | Run expiry, pruning, and vector index maintenance |
+| POST | `/api/v1/memories/summarize-conversation` | Compress a conversation into session memory |
 | PATCH | `/api/v1/memories/{memory_id}` | Update a user memory |
 | DELETE | `/api/v1/memories/{memory_id}` | Soft-delete a user memory |
+| POST | `/api/v1/feedback` | Record answer feedback and adjust linked memory confidence |
 | POST | `/api/v1/review/clause` | Review a specific clause type with risk assessment |
 | POST | `/api/v1/review/conflict` | Detect conflicts between contract and policy excerpts |
 

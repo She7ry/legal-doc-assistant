@@ -5,9 +5,36 @@
         <h2>文档问答</h2>
         <p>基于已索引内容生成带引用的回答</p>
       </div>
-      <el-button :icon="Delete" :disabled="!messages.length || loading" @click="clearMessages">
-        清空
-      </el-button>
+      <div class="chat-panel-actions">
+        <el-select
+          v-model="conversationId"
+          class="conversation-select"
+          size="small"
+          filterable
+          :disabled="loading"
+          @change="switchConversation"
+        >
+          <el-option
+            v-for="conversation in displayedConversations"
+            :key="conversation.conversation_id"
+            :label="conversationLabel(conversation)"
+            :value="conversation.conversation_id"
+          />
+        </el-select>
+        <el-tooltip content="新建会话" placement="top">
+          <el-button :icon="Plus" :disabled="loading" @click="startConversation" />
+        </el-tooltip>
+        <el-tooltip content="归档会话" placement="top">
+          <el-button
+            :icon="FolderRemove"
+            :disabled="loading || !conversationId"
+            @click="archiveConversation"
+          />
+        </el-tooltip>
+        <el-button :icon="Delete" :disabled="!messages.length || loading" @click="clearMessages">
+          清空
+        </el-button>
+      </div>
     </div>
 
     <div ref="messageListRef" class="message-list">
@@ -94,13 +121,25 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { Delete, Promotion } from "@element-plus/icons-vue";
+import { Delete, FolderRemove, Plus, Promotion } from "@element-plus/icons-vue";
 
-import { askQuestionStream } from "../api/chat";
+import {
+  askQuestionStream,
+  createChatConversation,
+  fetchConversationMessages,
+  listChatConversations,
+  updateChatConversation,
+} from "../api/chat";
 import { formatApiError } from "../api/http";
-import type { ChatHistoryMessage, Citation, EvidenceProfile, MemoryUsage } from "../api/types";
+import type {
+  ChatHistoryMessage,
+  Citation,
+  ConversationRecord,
+  EvidenceProfile,
+  MemoryUsage,
+} from "../api/types";
 import CitationList from "./CitationList.vue";
 import EvidencePanel from "./EvidencePanel.vue";
 
@@ -116,12 +155,36 @@ interface UiMessage {
 }
 
 const CONVERSATION_STORAGE_KEY = "legal-doc-assistant.conversationId";
+const CHAT_HISTORY_WINDOW = 12;
 
 const messages = ref<UiMessage[]>([]);
 const question = ref("");
 const loading = ref(false);
 const messageListRef = ref<HTMLElement | null>(null);
 const conversationId = ref(readConversationId());
+const conversations = ref<ConversationRecord[]>([]);
+
+const displayedConversations = computed(() => {
+  if (conversations.value.some((conversation) => conversation.conversation_id === conversationId.value)) {
+    return conversations.value;
+  }
+  return [
+    {
+      conversation_id: conversationId.value,
+      title: null,
+      status: "active",
+      created_at: "",
+      updated_at: "",
+      message_count: messages.value.length,
+    },
+    ...conversations.value,
+  ];
+});
+
+onMounted(async () => {
+  await loadConversations();
+  await restoreConversation();
+});
 
 async function send() {
   const text = question.value.trim();
@@ -129,7 +192,7 @@ async function send() {
     return;
   }
 
-  const history: ChatHistoryMessage[] = messages.value.slice(-8).map((message) => ({
+  const history: ChatHistoryMessage[] = messages.value.slice(-CHAT_HISTORY_WINDOW).map((message) => ({
     role: message.role,
     content: message.content,
   }));
@@ -203,6 +266,7 @@ async function send() {
     ElMessage.error(formatApiError(error));
   } finally {
     loading.value = false;
+    void loadConversations();
   }
 }
 
@@ -210,9 +274,97 @@ function findMessage(id: string): UiMessage | undefined {
   return messages.value.find((message) => message.id === id);
 }
 
-function clearMessages() {
+async function clearMessages() {
+  await startConversation();
+}
+
+async function loadConversations() {
+  try {
+    const response = await listChatConversations({ status: "active", limit: 50 });
+    conversations.value = response.conversations;
+  } catch (error) {
+    console.warn("Failed to load conversations.", error);
+  }
+}
+
+async function switchConversation(nextConversationId: string | number) {
+  const nextId = String(nextConversationId || "");
+  if (!nextId || loading.value) {
+    return;
+  }
+  setConversationId(nextId);
   messages.value = [];
-  conversationId.value = createConversationId();
+  await restoreConversation();
+}
+
+async function startConversation() {
+  if (loading.value) {
+    return;
+  }
+  try {
+    const conversation = await createChatConversation();
+    setConversationId(conversation.conversation_id);
+    conversations.value = [
+      conversation,
+      ...conversations.value.filter(
+        (item) => item.conversation_id !== conversation.conversation_id,
+      ),
+    ];
+    messages.value = [];
+  } catch (error) {
+    ElMessage.error(formatApiError(error));
+  }
+}
+
+async function archiveConversation() {
+  if (!conversationId.value || loading.value) {
+    return;
+  }
+  const archivedId = conversationId.value;
+  try {
+    await updateChatConversation(archivedId, { status: "archived" });
+    conversations.value = conversations.value.filter(
+      (conversation) => conversation.conversation_id !== archivedId,
+    );
+    messages.value = [];
+    const nextConversation = conversations.value[0] ?? (await createChatConversation());
+    if (!conversations.value.length) {
+      conversations.value = [nextConversation];
+    }
+    setConversationId(nextConversation.conversation_id);
+    await restoreConversation();
+    ElMessage.success("会话已归档");
+  } catch (error) {
+    ElMessage.error(formatApiError(error));
+  }
+}
+
+function conversationLabel(conversation: ConversationRecord): string {
+  const title = conversation.title?.trim() || `会话 ${conversation.conversation_id.slice(0, 8)}`;
+  const count = conversation.message_count ? ` (${conversation.message_count})` : "";
+  return `${title}${count}`;
+}
+
+async function restoreConversation() {
+  if (!conversationId.value || messages.value.length) {
+    return;
+  }
+  try {
+    const response = await fetchConversationMessages(conversationId.value);
+    messages.value = response.messages.map((message) => ({
+      id: crypto.randomUUID(),
+      role: message.role,
+      content: message.content,
+      citations: [],
+      memoriesUsed: [],
+      confidence: null,
+      guardWarnings: [],
+      evidence: null,
+    }));
+    await scrollToBottom();
+  } catch (error) {
+    console.warn("Failed to restore conversation.", error);
+  }
 }
 
 function confidenceTagType(confidence: string) {
@@ -247,5 +399,10 @@ function createConversationId(): string {
   const id = crypto.randomUUID();
   localStorage.setItem(CONVERSATION_STORAGE_KEY, id);
   return id;
+}
+
+function setConversationId(id: string) {
+  conversationId.value = id;
+  localStorage.setItem(CONVERSATION_STORAGE_KEY, id);
 }
 </script>
