@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from api import dependencies
 from api.main import app
+from doc_assistant.memory.service import MemoryService
+from doc_assistant.memory.store import MemoryStore
 from doc_assistant.retrieval import vector_store
 
 
@@ -78,6 +80,160 @@ def test_health_returns_runtime_diagnostics_and_request_id() -> None:
         "chat_api_key",
         "embedding_api_key",
     }
+
+
+def test_chat_conversation_messages_endpoint_restores_history(tmp_path) -> None:
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    conversation_id = memory_service.ensure_context("tenant-a", "user-a", "conversation-a")
+    memory_service.record_user_message(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id=conversation_id,
+        content="Earlier question.",
+    )
+    memory_service.record_assistant_message(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id=conversation_id,
+        content="Earlier answer.",
+    )
+    app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
+    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
+    try:
+        client = TestClient(app)
+        response = client.get("/api/v1/chat/conversations/conversation-a/messages")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "conversation_id": "conversation-a",
+        "messages": [
+            {"role": "user", "content": "Earlier question."},
+            {"role": "assistant", "content": "Earlier answer."},
+        ],
+    }
+
+
+def test_chat_conversation_management_endpoints(tmp_path) -> None:
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
+    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
+    try:
+        client = TestClient(app)
+        created = client.post(
+            "/api/v1/chat/conversations",
+            json={"conversation_id": "conversation-a", "title": "Lease review"},
+        )
+        memory_service.record_user_message(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            conversation_id="conversation-a",
+            content="Earlier question.",
+        )
+        memory_service.record_assistant_message(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            conversation_id="conversation-a",
+            content="Earlier answer.",
+        )
+        listed = client.get("/api/v1/chat/conversations")
+        archived = client.patch(
+            "/api/v1/chat/conversations/conversation-a",
+            json={"status": "archived", "title": "Archived lease review"},
+        )
+        active_after_archive = client.get("/api/v1/chat/conversations")
+        archived_list = client.get("/api/v1/chat/conversations", params={"status": "archived"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert created.status_code == 201
+    assert created.json()["conversation_id"] == "conversation-a"
+    assert created.json()["title"] == "Lease review"
+
+    assert listed.status_code == 200
+    listed_data = listed.json()
+    assert listed_data["total"] == 1
+    assert listed_data["conversations"][0]["conversation_id"] == "conversation-a"
+    assert listed_data["conversations"][0]["message_count"] == 2
+
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert archived.json()["title"] == "Archived lease review"
+
+    assert active_after_archive.status_code == 200
+    assert active_after_archive.json()["total"] == 0
+    assert archived_list.status_code == 200
+    assert archived_list.json()["total"] == 1
+    assert archived_list.json()["conversations"][0]["status"] == "archived"
+
+
+def test_memory_stats_endpoint_returns_user_stats(tmp_path) -> None:
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    memory_service.create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="fact",
+        key="client_context",
+        content="Acme is the client.",
+    )
+    app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
+    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
+    try:
+        client = TestClient(app)
+        response = client.get("/api/v1/memories/stats")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tenant_id"] == "tenant-a"
+    assert data["user_id"] == "user-a"
+    assert data["total_memories"] == 1
+    assert data["active_memories"] == 1
+    assert data["retrievals"]["total"] == 0
+
+
+def test_feedback_endpoint_records_feedback_and_adjusts_memory(tmp_path) -> None:
+    memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+    memory = memory_service.create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="fact",
+        key="client_context",
+        content="Acme is the client.",
+        confidence=0.8,
+    )
+    app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
+    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/feedback",
+            json={
+                "rating": "positive",
+                "memory_ids": [memory.memory_id],
+                "comment": "This helped.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["rating"] == 1
+    assert data["memory_ids"] == [memory.memory_id]
+    assert data["adjusted_memories"][0]["previous_confidence"] == 0.8
+    assert data["adjusted_memories"][0]["new_confidence"] == 0.83
+    refreshed = memory_service.store.get_memory("tenant-a", "user-a", memory.memory_id)
+    assert refreshed is not None
+    assert refreshed.confidence == 0.83
 
 
 def test_collection_name_for_tenant_preserves_default_collection(monkeypatch) -> None:

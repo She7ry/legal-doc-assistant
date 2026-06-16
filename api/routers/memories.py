@@ -6,10 +6,17 @@ from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep, require_a
 from api.schemas.requests import (
     MemoryBatchCreateRequest,
     MemoryBatchDeleteRequest,
+    MemoryConversationSummaryRequest,
     MemoryCreateRequest,
     MemoryUpdateRequest,
 )
-from api.schemas.responses import MemoryBatchDeleteResponse, MemoryListResponse, MemoryOut
+from api.schemas.responses import (
+    MemoryBatchDeleteResponse,
+    MemoryListResponse,
+    MemoryMaintenanceResponse,
+    MemoryOut,
+    MemoryStatsResponse,
+)
 from doc_assistant.memory.schemas import UNSET, MemoryUpdate
 
 router = APIRouter(
@@ -49,6 +56,15 @@ def list_memories(
         offset=offset,
         limit=limit,
     )
+
+
+@router.get("/stats", response_model=MemoryStatsResponse, summary="Get memory system statistics")
+def memory_stats(
+    memory_service: MemoryServiceDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> MemoryStatsResponse:
+    return MemoryStatsResponse(**memory_service.get_memory_stats(tenant_id, user_id))
 
 
 @router.post("", response_model=MemoryOut, status_code=status.HTTP_201_CREATED, summary="Create memory")
@@ -150,6 +166,50 @@ def delete_memories(
         not_found=not_found,
         total_deleted=len(deleted),
     )
+
+
+@router.post(
+    "/maintenance",
+    response_model=MemoryMaintenanceResponse,
+    summary="Run memory maintenance",
+)
+def run_memory_maintenance(
+    memory_service: MemoryServiceDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> MemoryMaintenanceResponse:
+    expired = memory_service.cleanup_expired_memories(tenant_id, user_id)
+    limit_stale = memory_service.enforce_memory_limit(tenant_id, user_id)
+    vector_result = memory_service.repair_vector_index(tenant_id, user_id)
+    return MemoryMaintenanceResponse(
+        expired_stale=len(expired),
+        limit_stale=len(limit_stale),
+        vector_deleted=vector_result["deleted"],
+        vector_upserted=vector_result["upserted"],
+    )
+
+
+@router.post(
+    "/summarize-conversation",
+    response_model=MemoryOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Summarize conversation into session memory",
+)
+def summarize_conversation(
+    body: MemoryConversationSummaryRequest,
+    memory_service: MemoryServiceDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> MemoryOut:
+    memory = memory_service.summarize_conversation_to_memory(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        conversation_id=body.conversation_id,
+        limit=body.limit,
+    )
+    if memory is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation history not found.")
+    return MemoryOut.from_memory(memory)
 
 
 @router.delete("/{memory_id}", response_model=MemoryOut, status_code=status.HTTP_200_OK, summary="Delete memory")

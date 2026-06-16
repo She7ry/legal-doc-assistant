@@ -1,12 +1,70 @@
 import { apiRequest } from "./http";
 import { ApiError } from "./http";
 import { readRuntimeSettings } from "../config/runtime";
-import type { AnswerResponse, AskRequest, Citation, MemoryUsage } from "./types";
+import type {
+  AnswerResponse,
+  AskRequest,
+  Citation,
+  ConversationCreateRequest,
+  ConversationListResponse,
+  ConversationMessagesResponse,
+  ConversationRecord,
+  ConversationUpdateRequest,
+  MemoryUsage,
+} from "./types";
 
 export function askQuestion(body: AskRequest): Promise<AnswerResponse> {
   return apiRequest<AnswerResponse>({
     method: "POST",
     url: "/api/v1/chat/ask",
+    data: body,
+  });
+}
+
+export function fetchConversationMessages(
+  conversationId: string,
+  limit = 50,
+): Promise<ConversationMessagesResponse> {
+  return apiRequest<ConversationMessagesResponse>({
+    method: "GET",
+    url: `/api/v1/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
+    params: { limit },
+  });
+}
+
+export function listChatConversations(params: {
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ConversationListResponse> {
+  return apiRequest<ConversationListResponse>({
+    method: "GET",
+    url: "/api/v1/chat/conversations",
+    params: {
+      status: params.status ?? "active",
+      limit: params.limit ?? 50,
+      offset: params.offset ?? 0,
+    },
+  });
+}
+
+export function createChatConversation(
+  body: ConversationCreateRequest = {},
+): Promise<ConversationRecord> {
+  return apiRequest<ConversationRecord>({
+    method: "POST",
+    url: "/api/v1/chat/conversations",
+    data: body,
+  });
+}
+
+export function updateChatConversation(
+  conversationId: string,
+  body: ConversationUpdateRequest,
+): Promise<ConversationRecord> {
+  return apiRequest<ConversationRecord>({
+    method: "PATCH",
+    url: `/api/v1/chat/conversations/${encodeURIComponent(conversationId)}`,
     data: body,
   });
 }
