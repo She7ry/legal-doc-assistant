@@ -115,6 +115,67 @@ class RecordingAgentQAService:
         return QAAnswer(content=f"Answer for {question}.")
 
 
+class ReactEvidenceRepairQAService:
+    tenant_id = "default"
+
+    def __init__(self) -> None:
+        self.ask_calls: list[str] = []
+
+    def ask(self, question: str, **_kwargs) -> QAAnswer:
+        self.ask_calls.append(question)
+        if question.startswith("Identify the document type"):
+            return QAAnswer(
+                content=(
+                    "The document is a SaaS agreement between VendorCo and CustomerCo. "
+                    "New York law governs it [S1]."
+                ),
+                citations=[
+                    Citation(
+                        source_id="S1",
+                        file_name="saas-msa.pdf",
+                        preview=(
+                            "This SaaS agreement is between VendorCo and CustomerCo. "
+                            "New York law governs it."
+                        ),
+                        exact_quote=(
+                            "This SaaS agreement is between VendorCo and CustomerCo. "
+                            "New York law governs it."
+                        ),
+                    )
+                ],
+            )
+        return QAAnswer(
+            content="The customer must give 30 days written notice before termination [S1].",
+            citations=[
+                Citation(
+                    source_id="S1",
+                    file_name="saas-msa.pdf",
+                    preview="The customer must give 30 days written notice before termination.",
+                    exact_quote="The customer must give 30 days written notice before termination.",
+                )
+            ],
+        )
+
+    def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
+        del clause_type, top_k
+        return QAAnswer(
+            content="The customer must give 30 days written notice before termination.",
+            metadata={
+                "clause_type": "termination",
+                "risk_level": "Medium",
+                "risk_reasons": [
+                    {
+                        "reason": "The customer must give 30 days written notice before termination.",
+                        "citation": None,
+                    }
+                ],
+                "questions_for_lawyer": [],
+                "missing_information": [],
+                "needs_human_review": False,
+            },
+        )
+
+
 def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
     vector_store = StaticVectorStore()
     qa_service = DocumentQAService(
@@ -202,7 +263,34 @@ def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
     assert "## Artifacts" in result.report
     assert "## Confirmation gates" in result.report
     assert "[S2]" in result.report
+    assert result.metadata["executor"] == "plan_react_v1"
     assert vector_store.queries
+
+
+def test_legal_agent_react_repairs_uncited_clause_review_with_followup_evidence() -> None:
+    qa_service = ReactEvidenceRepairQAService()
+    agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
+
+    result = agent.run_task(
+        objective="Review termination risk in the SaaS agreement.",
+        focus_areas=["termination"],
+        user_role="lawyer",
+        max_steps=4,
+    )
+
+    review_step = next(step for step in result.steps if step.tool == "review_clause")
+    react_trace = review_step.output["react_trace"]
+
+    assert len(qa_service.ask_calls) == 2
+    assert "Observed evidence gap" in qa_service.ask_calls[1]
+    assert react_trace[0]["action"]["tool"] == "document_qa"
+    assert review_step.citations[0].source_id == "S2"
+    assert not any(
+        item.startswith("No cited document evidence was found")
+        for item in result.missing_information
+    )
+    assert result.findings[0].citations == ["S2"]
+    assert result.findings[0].support_level == "direct"
 
 
 def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) -> None:
@@ -234,7 +322,12 @@ def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) ->
     ]
 
 
-def test_legal_agent_passes_step_history_between_qa_steps() -> None:
+def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_service_module,
+        "settings",
+        SimpleNamespace(agent_react_enabled=False),
+    )
     qa_service = RecordingAgentQAService()
     agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
     plan = [
