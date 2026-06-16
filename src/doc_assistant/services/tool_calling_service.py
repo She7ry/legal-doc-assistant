@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import json
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from hashlib import sha1
-import json
 from typing import Any
 
 from langchain_core.documents import Document
 
 from doc_assistant.config.settings import settings
+from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.evidence import build_evidence_profile
@@ -22,8 +24,11 @@ from doc_assistant.tools.web_search import (
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
 
-def build_tool_system_prompt() -> str:
-    return f"{load_base_legal_prompt()}\n\n{load_prompt('tool_calling_system.txt')}"
+def build_tool_system_prompt(user_memory: str | None = None) -> str:
+    prompt = f"{load_base_legal_prompt()}\n\n{load_prompt('tool_calling_system.txt')}"
+    if user_memory:
+        prompt = f"{prompt}\n\n<user_memory>\n{user_memory}\n</user_memory>"
+    return prompt
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,7 @@ class ToolCallTrace:
 class ToolCallingAnswer:
     content: str
     citations: list[Citation] = field(default_factory=list)
+    memories_used: list[MemoryUsage] = field(default_factory=list)
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
     confidence: str | None = None
@@ -61,6 +67,17 @@ class _ToolExecutionState:
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
     document_source_ids: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class _ToolMemoryContext:
+    user_id: str | None = None
+    conversation_id: str | None = None
+    task_id: str | None = None
+    user_message_recorded: bool = False
+    memory_candidates: list[MemoryCandidate] = field(default_factory=list)
+    memory_context: str = "No relevant user memory."
+    chat_history: list[dict[str, object]] = field(default_factory=list)
 
 
 class ToolCallingChatService:
@@ -83,12 +100,26 @@ class ToolCallingChatService:
         question: str,
         *,
         chat_history: list[dict[str, object]] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
         enable_web_search: bool = False,
         max_tool_iterations: int | None = None,
     ) -> ToolCallingAnswer:
         state = _ToolExecutionState()
+        memory_context = self._prepare_memory_context(
+            question,
+            chat_history=chat_history or [],
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+        )
         tools = self._tool_schemas(enable_web_search=enable_web_search)
-        messages = self._initial_messages(question, chat_history or [])
+        messages = self._initial_messages(
+            question,
+            memory_context.chat_history,
+            user_memory=memory_context.memory_context,
+        )
         iterations = _clamp_int(
             max_tool_iterations or settings.tool_call_max_iterations,
             minimum=1,
@@ -99,7 +130,7 @@ class ToolCallingChatService:
             message = self.invoke_messages(messages, tools=tools, tool_choice="auto")
             tool_calls = _normalise_tool_calls(message)
             if not tool_calls:
-                return self._finalize_answer(str(message.get("content") or ""), state)
+                return self._finalize_answer(str(message.get("content") or ""), state, memory_context, question)
 
             messages.append(
                 {
@@ -120,9 +151,15 @@ class ToolCallingChatService:
                 )
 
         final_message = self.invoke_messages(messages, tools=None, tool_choice=None)
-        return self._finalize_answer(str(final_message.get("content") or ""), state)
+        return self._finalize_answer(str(final_message.get("content") or ""), state, memory_context, question)
 
-    def _finalize_answer(self, content: str, state: _ToolExecutionState) -> ToolCallingAnswer:
+    def _finalize_answer(
+        self,
+        content: str,
+        state: _ToolExecutionState,
+        memory_context: _ToolMemoryContext,
+        question: str,
+    ) -> ToolCallingAnswer:
         guard_citations = state.citations + _web_source_citations(state.web_sources)
         guard_result = validate_answer(
             content,
@@ -137,9 +174,16 @@ class ToolCallingChatService:
                 has_retrieved_documents=bool(guard_citations),
             )
 
+        self._record_memory_result(question, content, state, memory_context)
+        memories_used = (
+            self.qa_service.memory_service.usages_from_candidates(memory_context.memory_candidates)
+            if self.qa_service.memory_service
+            else []
+        )
         return ToolCallingAnswer(
             content=content,
             citations=state.citations,
+            memories_used=memories_used,
             web_sources=state.web_sources,
             tool_calls=state.tool_calls,
             confidence=guard_result.confidence,
@@ -153,16 +197,136 @@ class ToolCallingChatService:
         self,
         question: str,
         chat_history: list[dict[str, object]],
+        *,
+        user_memory: str | None = None,
     ) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": build_tool_system_prompt()}]
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": build_tool_system_prompt(user_memory)}
+        ]
         history_window = _clamp_int(settings.tool_call_history_window, minimum=0, maximum=100)
-        for message in chat_history[-history_window:] if history_window else []:
+        system_history = []
+        chat_messages = []
+        for message in chat_history:
             role = message.get("role")
             content = str(message.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content})
+            if not content:
+                continue
+            if role == "system":
+                if content.casefold().startswith("conversation summary:"):
+                    system_history.append({"role": "system", "content": content})
+                continue
+            if role in {"user", "assistant"}:
+                chat_messages.append({"role": role, "content": content})
+        messages.extend(system_history)
+        for message in chat_messages[-history_window:] if history_window else []:
+            messages.append(message)
         messages.append({"role": "user", "content": question})
         return messages
+
+    def _prepare_memory_context(
+        self,
+        question: str,
+        *,
+        chat_history: list[dict[str, object]],
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str | None,
+    ) -> _ToolMemoryContext:
+        context = _ToolMemoryContext(user_id=user_id)
+        memory_service = self.qa_service.memory_service
+        if not (memory_service and user_id):
+            context.chat_history = chat_history
+            return context
+
+        try:
+            resolved_conversation_id = memory_service.ensure_context(
+                self.qa_service.tenant_id,
+                user_id,
+                conversation_id,
+            )
+            persisted_history = memory_service.load_conversation_history(
+                self.qa_service.tenant_id,
+                user_id,
+                resolved_conversation_id,
+                limit=max(settings.tool_call_history_window, len(chat_history)),
+            )
+            message_id = memory_service.record_user_message(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=user_id,
+                conversation_id=resolved_conversation_id,
+                content=question,
+            )
+            memory_service.write_memories_from_user_message(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=user_id,
+                conversation_id=resolved_conversation_id,
+                message_id=message_id,
+                content=question,
+            )
+            memory_candidates = memory_service.retrieve_relevant_memories(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=user_id,
+                query=question,
+            )
+            context.conversation_id = resolved_conversation_id
+            context.task_id = task_id
+            context.user_message_recorded = True
+            context.memory_candidates = memory_candidates
+            context.memory_context = memory_service.format_for_prompt(memory_candidates)
+            context.chat_history = DocumentQAService._merge_chat_history(
+                persisted_history,
+                chat_history,
+                max_messages=settings.tool_call_history_window,
+            )
+        except Exception:
+            context.chat_history = chat_history
+        return context
+
+    def _record_memory_result(
+        self,
+        question: str,
+        content: str,
+        state: _ToolExecutionState,
+        memory_context: _ToolMemoryContext,
+    ) -> None:
+        memory_service = self.qa_service.memory_service
+        if not (
+            memory_service
+            and memory_context.user_id
+            and memory_context.conversation_id
+            and memory_context.user_message_recorded
+        ):
+            return
+        try:
+            message_id = memory_service.record_assistant_message(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=memory_context.user_id,
+                conversation_id=memory_context.conversation_id,
+                content=content,
+            )
+            memory_service.write_memories_from_assistant_message(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=memory_context.user_id,
+                conversation_id=memory_context.conversation_id,
+                message_id=message_id,
+                content=content,
+                task_id=memory_context.task_id,
+            )
+            memory_service.log_retrieval(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=memory_context.user_id,
+                conversation_id=memory_context.conversation_id,
+                query=question,
+                document_count=len(state.citations),
+                memories=memory_context.memory_candidates,
+            )
+            memory_service.maybe_summarize_conversation(
+                tenant_id=self.qa_service.tenant_id,
+                user_id=memory_context.user_id,
+                conversation_id=memory_context.conversation_id,
+            )
+        except Exception:
+            return
 
     def _tool_schemas(self, *, enable_web_search: bool) -> list[dict[str, Any]]:
         return [schema for schema, _handler in self._enabled_tools(enable_web_search).values()]

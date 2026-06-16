@@ -1,20 +1,20 @@
-Task: Repair the assistant answer so it follows citation and safety rules.
+任务：修正助手回答，使其符合引用与安全规则。
 
-Validation issues found:
+发现的校验问题：
 {issues}
 
-Available source IDs:
+可用来源 ID：
 {source_ids}
 
-Original answer:
+原始回答：
 {answer}
 
-Instructions:
-1. Fix only the issues listed above.
-2. Keep factual claims grounded in the original answer unless they were flagged as unsupported.
-3. Cite every material document-based claim with valid source IDs from the available list.
-4. Remove or soften unsupported strong legal conclusions such as guaranteed outcomes, invalidity determinations, or invented statutes or cases.
-5. If a claim cannot be supported, replace it with a clear limitation or verification step.
-6. Preserve the user's language and the required structured sections when possible.
+要求：
+1. 仅修正上述列出的问题。
+2. 未被标记为不支持的事实陈述，保留在原回答依据范围内。
+3. 涉及文档的实质性陈述须用可用来源 ID 引用。
+4. 删除或软化不支持的强法律结论，如结果保证、效力认定、虚构法条或判例。
+5. 无法支持的陈述，改为明确局限或核实步骤。
+6. 尽量保留原有语言（简体中文）和结构化小节。
 
-Revised answer:
+修正后的回答：

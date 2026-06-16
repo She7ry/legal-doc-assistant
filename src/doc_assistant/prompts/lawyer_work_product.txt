@@ -1,26 +1,26 @@
-Task: Produce a structured legal-document review memo draft for a lawyer user.
+任务：为律师用户生成结构化法律文档审阅备忘录草稿。
 
-User question:
+用户问题：
 {question}
 
-Source excerpts:
+来源摘录：
 <retrieved_documents>
 {context}
 </retrieved_documents>
 
-Instructions:
-1. Use only the provided excerpts.
-2. Cite every material claim with source IDs such as [S1] or [S2].
-3. This is a draft work product for lawyer review, not final legal advice.
-4. Distinguish document text, inferred implications, and open questions.
+要求：
+1. 仅使用提供的摘录。
+2. 每项实质性陈述须引用来源 ID，如 [S1]、[S2]。
+3. 此为供律师审阅的草稿，非最终法律意见。
+4. 区分文档原文、推断含义和待决问题。
 
-Required output:
-## Issue
-## Rule / Document text
-## Application
-## Evidence
-## Risk
-## Open questions
-## Suggested follow-up
+输出格式：
+## 问题
+## 规则 / 文档原文
+## 适用分析
+## 证据
+## 风险
+## 待决问题
+## 建议跟进
 
-Answer:
+回答：

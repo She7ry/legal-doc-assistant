@@ -155,8 +155,29 @@ class Settings:
         )
     )
     agent_llm_planner_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED", True))
+    chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
     memory_top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TOP_K", 5))
     memory_min_confidence: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55))
+    memory_semantic_dedup_min_score: float = field(
+        default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_SEMANTIC_DEDUP_MIN_SCORE", 0.88)
+    )
+    memory_session_ttl_hours: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_SESSION_TTL_HOURS", 24))
+    memory_task_ttl_hours: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TASK_TTL_HOURS", 168))
+    memory_max_active_per_user: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_MAX_ACTIVE_PER_USER", 500))
+    memory_decay_half_life_days: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_DECAY_HALF_LIFE_DAYS", 90.0))
+    memory_maintenance_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_MEMORY_MAINTENANCE_ENABLED", True))
+    memory_maintenance_cooldown_seconds: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_MAINTENANCE_COOLDOWN_SECONDS", 300)
+    )
+    memory_auto_summary_threshold: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD", 12))
+    memory_auto_summary_interval: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_INTERVAL", 5))
+    memory_auto_summary_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_WINDOW", 40))
+    memory_prompt_max_tokens: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS", 800))
+    memory_llm_extraction_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED", True))
+    memory_llm_extraction_max_items: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MAX_ITEMS", 3))
+    memory_llm_extraction_min_confidence: float = field(
+        default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE", 0.6)
+    )
     chunk_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900))
     chunk_overlap: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120))
     tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
@@ -214,6 +235,22 @@ class Settings:
             raise ValueError("agent_step_max_retries must be greater than or equal to 0.")
         if any(value < 0 for value in self.agent_step_retry_backoff_seconds):
             raise ValueError("agent_step_retry_backoff_seconds values must be non-negative.")
+        if self.memory_auto_summary_threshold < 0:
+            raise ValueError("memory_auto_summary_threshold must be greater than or equal to 0.")
+        if self.memory_auto_summary_interval <= 0:
+            raise ValueError("memory_auto_summary_interval must be greater than 0.")
+        if self.memory_auto_summary_window <= 0:
+            raise ValueError("memory_auto_summary_window must be greater than 0.")
+        if self.memory_prompt_max_tokens <= 0:
+            raise ValueError("memory_prompt_max_tokens must be greater than 0.")
+        if not 0 <= self.memory_semantic_dedup_min_score <= 1:
+            raise ValueError("memory_semantic_dedup_min_score must be between 0 and 1.")
+        if self.memory_maintenance_cooldown_seconds < 0:
+            raise ValueError("memory_maintenance_cooldown_seconds must be greater than or equal to 0.")
+        if self.memory_llm_extraction_max_items <= 0:
+            raise ValueError("memory_llm_extraction_max_items must be greater than 0.")
+        if not 0 <= self.memory_llm_extraction_min_confidence <= 1:
+            raise ValueError("memory_llm_extraction_min_confidence must be between 0 and 1.")
 
     def with_overrides(self, **kwargs: Any) -> Settings:
         return replace(self, **kwargs)

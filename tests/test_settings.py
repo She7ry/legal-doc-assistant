@@ -26,3 +26,9 @@ def test_agent_backoff_is_parsed_as_numbers(monkeypatch) -> None:
     monkeypatch.delenv("DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS", raising=False)
 
     assert Settings().agent_step_retry_backoff_seconds == (2.0, 5.0)
+
+
+def test_memory_llm_extraction_is_enabled_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED", raising=False)
+
+    assert Settings().memory_llm_extraction_enabled is True

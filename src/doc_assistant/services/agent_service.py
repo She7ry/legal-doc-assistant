@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+from inspect import Parameter, signature
 from time import sleep
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from doc_assistant.config.settings import settings
@@ -547,6 +549,13 @@ class LegalAgentService:
             or any(gate.required for gate in confirmation_gates)
         )
         status = "needs_human_review" if human_review_required else "completed"
+        memory_service = getattr(self.qa_service, "memory_service", None)
+        if status == "completed" and user_id and memory_service:
+            memory_service.mark_task_memories_stale(
+                self.qa_service.tenant_id,
+                user_id,
+                resolved_task_id,
+            )
 
         return AgentTaskResult(
             task_id=resolved_task_id,
@@ -807,6 +816,7 @@ class LegalAgentService:
         }
 
         def run_sequential(plan_step: AgentPlanStep) -> AgentStepResult:
+            nonlocal step_history
             self._emit_step_started(
                 plan_step,
                 progress_callback=progress_callback,
@@ -820,7 +830,9 @@ class LegalAgentService:
                 conversation_id=conversation_id,
                 task_id=task_id,
                 citation_registry=citation_registry,
+                chat_history=step_history,
             )
+            step_history = _append_agent_step_history(step_history, step)
             self._emit_step_completed(
                 step,
                 progress_callback=progress_callback,
@@ -833,6 +845,9 @@ class LegalAgentService:
             return []
 
         ordered_steps: list[AgentStepResult] = []
+        step_history: list[dict[str, object]] = [
+            {"role": "user", "content": f"Agent objective: {objective}"}
+        ]
         remaining_steps = list(plan)
         if remaining_steps and remaining_steps[0].tool != "synthesize_report":
             ordered_steps.append(run_sequential(remaining_steps.pop(0)))
@@ -847,19 +862,21 @@ class LegalAgentService:
         ]
 
         if len(parallel_steps) > 1 and _agent_max_parallel_steps() > 1:
-            ordered_steps.extend(
-                self._execute_parallel_steps(
-                    parallel_steps,
-                    objective=objective,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    task_id=task_id,
-                    citation_registry=citation_registry,
-                    progress_callback=progress_callback,
-                    executable_index=executable_index,
-                    step_count=step_count,
-                )
+            parallel_results = self._execute_parallel_steps(
+                parallel_steps,
+                objective=objective,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                citation_registry=citation_registry,
+                progress_callback=progress_callback,
+                executable_index=executable_index,
+                step_count=step_count,
+                chat_history=step_history,
             )
+            ordered_steps.extend(parallel_results)
+            for step in parallel_results:
+                step_history = _append_agent_step_history(step_history, step)
         else:
             for plan_step in parallel_steps:
                 ordered_steps.append(run_sequential(plan_step))
@@ -884,6 +901,7 @@ class LegalAgentService:
         progress_callback: ProgressCallback | None,
         executable_index: dict[int, int],
         step_count: int,
+        chat_history: list[dict[str, object]],
     ) -> list[AgentStepResult]:
         for plan_step in plan_steps:
             self._emit_step_started(
@@ -904,6 +922,7 @@ class LegalAgentService:
                     user_id=user_id,
                     conversation_id=conversation_id,
                     task_id=task_id,
+                    chat_history=list(chat_history),
                 ): plan_step
                 for plan_step in plan_steps
             }
@@ -976,6 +995,7 @@ class LegalAgentService:
         conversation_id: str | None,
         task_id: str,
         citation_registry: "_CitationRegistry",
+        chat_history: list[dict[str, object]],
     ) -> AgentStepResult:
         raw_result = self._execute_step_raw_with_retry(
             plan_step,
@@ -983,6 +1003,7 @@ class LegalAgentService:
             user_id=user_id,
             conversation_id=conversation_id,
             task_id=task_id,
+            chat_history=chat_history,
         )
         return self._finalize_step_execution(plan_step, raw_result, citation_registry)
 
@@ -994,6 +1015,7 @@ class LegalAgentService:
         user_id: str | None,
         conversation_id: str | None,
         task_id: str,
+        chat_history: list[dict[str, object]],
     ) -> QAAnswer | AgentStepResult:
         max_retries = max(0, int(getattr(settings, "agent_step_max_retries", 2)))
         backoff_seconds = _agent_retry_backoff_seconds()
@@ -1006,6 +1028,7 @@ class LegalAgentService:
                     user_id=user_id,
                     conversation_id=conversation_id,
                     task_id=task_id,
+                    chat_history=chat_history,
                 )
             except (RuntimeError, TimeoutError, ConnectionError) as exc:
                 last_error = exc
@@ -1032,18 +1055,21 @@ class LegalAgentService:
         user_id: str | None,
         conversation_id: str | None,
         task_id: str,
+        chat_history: list[dict[str, object]],
     ) -> QAAnswer | AgentStepResult:
         if plan_step.tool == "document_qa":
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 str(plan_step.arguments["question"]),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
 
         if plan_step.tool == "extract_parties_dates_jurisdiction":
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 str(plan_step.arguments["question"]),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
@@ -1064,13 +1090,14 @@ class LegalAgentService:
 
         if plan_step.tool == "compare_document_versions":
             query = str(plan_step.arguments.get("query") or objective)
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 (
                     "Compare the available document versions or drafts relevant to this task. "
                     "Identify changed obligations, risk allocation, dates, parties, governing law, "
                     "and negotiation impact. Cite every changed position: "
                     f"{query}"
                 ),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
@@ -1078,13 +1105,14 @@ class LegalAgentService:
 
         if plan_step.tool == "create_obligation_calendar":
             query = str(plan_step.arguments.get("query") or objective)
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 (
                     "Extract a structured obligation calendar from the cited documents. "
                     "For each item include obligation, trigger, deadline, owner if stated, "
                     "status, and source citation. If a field is not stated, say it is missing. "
                     f"Task: {query}"
                 ),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
@@ -1092,38 +1120,41 @@ class LegalAgentService:
 
         if plan_step.tool == "suggest_clause_revision":
             clause_type = str(plan_step.arguments.get("clause_type") or "requested clause")
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 (
                     "Suggest a revised clause position for the requested legal issue. "
                     "Do not invent facts. Tie each drafting suggestion to the current cited clause "
                     "and flag points requiring lawyer approval. "
                     f"Clause type: {clause_type}. Task: {objective}"
                 ),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
 
         if plan_step.tool == "build_evidence_profile":
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 (
                     "Build an evidence profile for the task. List material claims, source "
                     "citations, exact quoted support, support level, and unsupported reasons. "
                     f"Task: {objective}"
                 ),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
             )
 
         if plan_step.tool == "generate_negotiation_checklist":
-            return self.qa_service.ask(
+            return self._ask_agent_question(
                 (
                     "Generate a negotiation checklist from the cited contract excerpts. "
                     "For each issue include the ask, fallback position, priority, owner, and "
                     "source citation. Flag any item requiring lawyer approval. "
                     f"Task: {objective}"
                 ),
+                chat_history=chat_history,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 task_id=task_id,
@@ -1147,6 +1178,25 @@ class LegalAgentService:
             summary=f"Unknown agent tool: {plan_step.tool}",
             output={"error": f"Unknown agent tool: {plan_step.tool}"},
         )
+
+    def _ask_agent_question(
+        self,
+        question: str,
+        *,
+        chat_history: list[dict[str, object]],
+        user_id: str | None,
+        conversation_id: str | None,
+        task_id: str,
+    ) -> QAAnswer:
+        kwargs: dict[str, object] = {
+            "chat_history": chat_history,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "task_id": task_id,
+        }
+        if _call_accepts_keyword(self.qa_service.ask, "merge_persisted_history"):
+            kwargs["merge_persisted_history"] = False
+        return self.qa_service.ask(question, **kwargs)
 
     def _finalize_step_execution(
         self,
@@ -1840,6 +1890,9 @@ def _extract_governing_law(text: str) -> str:
 
 def _clean_law_name(value: str) -> str:
     text = _clean_text(value).strip(" .,:;()[]")
+    sentence_parts = [part.strip(" .,:;()[]") for part in re.split(r"[.。]", text) if part.strip()]
+    if sentence_parts:
+        text = sentence_parts[-1]
     text = re.sub(r"^(?:and|the|state\s+of)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+laws?$", "", text, flags=re.IGNORECASE)
     return text.title() if text.islower() else text
@@ -2567,6 +2620,33 @@ def _dedupe_texts(values: list[str]) -> list[str]:
         seen.add(key)
         result.append(text)
     return result
+
+
+def _append_agent_step_history(
+    history: list[dict[str, object]],
+    step: AgentStepResult,
+) -> list[dict[str, object]]:
+    summary = _clean_text(step.summary)
+    if len(summary) > 1200:
+        summary = f"{summary[:1197]}..."
+    content = (
+        f"Completed agent step '{step.title}' using {step.tool}. "
+        f"Status: {step.status}. Summary: {summary}"
+    )
+    updated = [*history, {"role": "assistant", "content": content}]
+    window = max(1, int(getattr(settings, "chat_history_window", 12)))
+    return updated[-window:]
+
+
+def _call_accepts_keyword(func: Callable[..., Any], keyword: str) -> bool:
+    try:
+        parameters = signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == keyword
+        for parameter in parameters
+    )
 
 
 def _first_text(values: list[str]) -> str:

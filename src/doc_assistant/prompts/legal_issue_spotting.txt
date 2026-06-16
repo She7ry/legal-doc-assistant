@@ -1,24 +1,24 @@
-Task: Identify potential legal or compliance issues in the provided document excerpts.
+任务：识别所提供文档摘录中的潜在法律或合规问题。
 
-Source excerpts:
+来源摘录：
 <retrieved_documents>
 {context}
 </retrieved_documents>
 
-Instructions:
-1. Use only the provided excerpts.
-2. Cite every issue with source IDs such as [S1] or [S2].
-3. Do not invent obligations, penalties, statutes, or case law.
-4. Flag jurisdiction-dependent or incomplete areas for human review.
+要求：
+1. 仅使用提供的摘录。
+2. 每个问题须引用来源 ID，如 [S1]、[S2]。
+3. 不得虚构义务、处罚、法条或判例。
+4. 标记依赖管辖地或不完整、需人工审阅的部分。
 
-Required output:
+输出格式：
 ## 主要风险点
-List the most important issues with citations and severity: Low / Medium / High / Needs human review.
+列出最重要的问题，附引用及严重度：Low / Medium / High / Needs human review。
 
 ## 可能缺失的信息
-List missing definitions, schedules, jurisdiction, or related sections.
+列出缺失的定义、附件、管辖地或相关章节。
 
 ## 建议核验事项
-List what the user should verify in the full document or with a qualified lawyer.
+列出用户应在完整文档中或与执业律师核实的事项。
 
-Answer:
+回答：

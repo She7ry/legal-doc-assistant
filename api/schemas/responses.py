@@ -57,6 +57,10 @@ class MemoryUsageOut(BaseModel):
     confidence: float
     scope: str
     score: float | None = None
+    last_accessed_at: datetime | None = None
+    access_count: int = 0
+    superseded_conflicting: bool = False
+    superseded_from_content: str | None = None
 
     @classmethod
     def from_usage(cls, usage) -> "MemoryUsageOut":
@@ -69,6 +73,10 @@ class MemoryUsageOut(BaseModel):
             confidence=usage.confidence,
             scope=usage.scope,
             score=usage.score,
+            last_accessed_at=getattr(usage, "last_accessed_at", None),
+            access_count=getattr(usage, "access_count", 0),
+            superseded_conflicting=getattr(usage, "superseded_conflicting", False),
+            superseded_from_content=getattr(usage, "superseded_from_content", None),
         )
 
 
@@ -120,11 +128,49 @@ class ToolCallOut(BaseModel):
 class ToolChatResponse(BaseModel):
     content: str
     citations: list[CitationOut]
+    memories_used: list[MemoryUsageOut] = Field(default_factory=list)
     web_sources: list[WebSourceOut] = Field(default_factory=list)
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
     confidence: str | None = None
     guard_warnings: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] | None = None
+
+
+class ConversationOut(BaseModel):
+    conversation_id: str
+    title: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int = 0
+
+    @classmethod
+    def from_conversation(cls, conversation) -> "ConversationOut":
+        return cls(
+            conversation_id=conversation.conversation_id,
+            title=conversation.title,
+            status=conversation.status,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+            message_count=conversation.message_count,
+        )
+
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationOut]
+    total: int
+    offset: int = 0
+    limit: int | None = None
+
+
+class ConversationMessageOut(BaseModel):
+    role: str
+    content: str
+
+
+class ConversationMessagesResponse(BaseModel):
+    conversation_id: str
+    messages: list[ConversationMessageOut] = Field(default_factory=list)
 
 
 class AgentPlanStepOut(BaseModel):
@@ -686,6 +732,10 @@ class MemoryOut(BaseModel):
     source_message_id: str | None
     conversation_id: str | None
     task_id: str | None
+    last_accessed_at: datetime | None = None
+    access_count: int = 0
+    superseded_conflicting: bool = False
+    superseded_from_content: str | None = None
 
     @classmethod
     def from_memory(cls, memory) -> "MemoryOut":
@@ -709,6 +759,10 @@ class MemoryOut(BaseModel):
             source_message_id=memory.source_message_id,
             conversation_id=memory.conversation_id,
             task_id=memory.task_id,
+            last_accessed_at=getattr(memory, "last_accessed_at", None),
+            access_count=getattr(memory, "access_count", 0),
+            superseded_conflicting=getattr(memory, "superseded_conflicting", False),
+            superseded_from_content=getattr(memory, "superseded_from_content", None),
         )
 
 
@@ -723,6 +777,104 @@ class MemoryBatchDeleteResponse(BaseModel):
     deleted: list[MemoryOut]
     not_found: list[str]
     total_deleted: int
+
+
+class MemoryMaintenanceResponse(BaseModel):
+    expired_stale: int = 0
+    limit_stale: int = 0
+    vector_deleted: int = 0
+    vector_upserted: int = 0
+
+
+class MemoryAccessStatsOut(BaseModel):
+    tracked_memories: int = 0
+    never_accessed: int = 0
+    accessed: int = 0
+    accessed_last_7d: int = 0
+    accessed_last_30d: int = 0
+    total_access_count: int = 0
+    average_access_count: float = 0.0
+    max_access_count: int = 0
+
+
+class MemoryRetrievalStatsOut(BaseModel):
+    total: int = 0
+    with_memory: int = 0
+    last_7d: int = 0
+    last_30d: int = 0
+    hit_rate: float = 0.0
+    average_memory_count: float = 0.0
+    average_document_count: float = 0.0
+    last_retrieval_at: datetime | None = None
+    selected_memory_source_counts: dict[str, int] = Field(default_factory=dict)
+    selected_memory_source_ratios: dict[str, float] = Field(default_factory=dict)
+
+
+class MemoryStatsResponse(BaseModel):
+    tenant_id: str
+    user_id: str
+    generated_at: datetime
+    total_memories: int = 0
+    active_memories: int = 0
+    stale_memories: int = 0
+    deleted_memories: int = 0
+    expired_active_memories: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    scope_counts: dict[str, int] = Field(default_factory=dict)
+    type_counts: dict[str, int] = Field(default_factory=dict)
+    average_confidence: float = 0.0
+    average_active_confidence: float = 0.0
+    access: MemoryAccessStatsOut = Field(default_factory=MemoryAccessStatsOut)
+    retrievals: MemoryRetrievalStatsOut = Field(default_factory=MemoryRetrievalStatsOut)
+
+
+class FeedbackMemoryAdjustmentOut(BaseModel):
+    memory_id: str
+    status: str
+    previous_confidence: float | None = None
+    new_confidence: float | None = None
+    memory: MemoryOut | None = None
+
+    @classmethod
+    def from_adjustment(cls, adjustment) -> "FeedbackMemoryAdjustmentOut":
+        return cls(
+            memory_id=adjustment.memory_id,
+            status=adjustment.status,
+            previous_confidence=adjustment.previous_confidence,
+            new_confidence=adjustment.new_confidence,
+            memory=MemoryOut.from_memory(adjustment.memory) if adjustment.memory else None,
+        )
+
+
+class FeedbackResponse(BaseModel):
+    feedback_id: str
+    tenant_id: str
+    user_id: str
+    rating: int
+    created_at: datetime
+    conversation_id: str | None = None
+    message_id: str | None = None
+    memory_ids: list[str] = Field(default_factory=list)
+    comment: str | None = None
+    adjusted_memories: list[FeedbackMemoryAdjustmentOut] = Field(default_factory=list)
+
+    @classmethod
+    def from_feedback(cls, event, adjustments) -> "FeedbackResponse":
+        return cls(
+            feedback_id=event.feedback_id,
+            tenant_id=event.tenant_id,
+            user_id=event.user_id,
+            conversation_id=event.conversation_id,
+            message_id=event.message_id,
+            rating=event.rating,
+            memory_ids=list(event.memory_ids),
+            comment=event.comment,
+            created_at=event.created_at,
+            adjusted_memories=[
+                FeedbackMemoryAdjustmentOut.from_adjustment(adjustment)
+                for adjustment in adjustments
+            ],
+        )
 
 
 class ErrorResponse(BaseModel):

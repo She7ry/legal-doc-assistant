@@ -23,7 +23,7 @@ from api.dependencies import (
     _vector_store,
 )
 from api.middleware.rate_limit import SlidingWindowRateLimiter
-from api.routers import agent, chat, documents, matters, memories, review
+from api.routers import agent, chat, documents, feedback, matters, memories, review
 from api.schemas.responses import HealthCheckOut, HealthResponse
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS
@@ -74,6 +74,7 @@ app.include_router(agent.router, prefix="/api/v1")
 app.include_router(matters.router, prefix="/api/v1")
 app.include_router(review.router, prefix="/api/v1")
 app.include_router(memories.router, prefix="/api/v1")
+app.include_router(feedback.router, prefix="/api/v1")
 
 
 def _recover_background_work() -> None:
