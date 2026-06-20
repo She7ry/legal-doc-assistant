@@ -96,6 +96,16 @@ class PersistentBM25Index:
                 ("total_token_count", 0.0),
             )
 
+    def close(self) -> None:
+        """关闭底层 SQLite 连接。"""
+        self._conn.close()
+
+    def __enter__(self) -> PersistentBM25Index:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def add_document(self, document: BM25Document) -> None:
         self.add_documents([document])
 
@@ -252,29 +262,24 @@ class PersistentBM25Index:
             ),
         )
 
-        for token, term_frequency in token_counts.items():
-            self._conn.execute(
-                """
-                INSERT INTO bm25_terms(token, doc_id, term_freq)
-                VALUES (?, ?, ?)
-                """,
-                (token, document.doc_id, int(term_frequency)),
-            )
+        self._conn.executemany(
+            "INSERT INTO bm25_terms(token, doc_id, term_freq) VALUES (?, ?, ?)",
+            [(token, document.doc_id, int(freq)) for token, freq in token_counts.items()],
+        )
 
         if not document.active:
             return
 
         self._increment_stat_locked("document_count", 1.0)
         self._increment_stat_locked("total_token_count", float(len(tokens)))
-        for token in token_counts:
-            self._conn.execute(
-                """
-                INSERT INTO bm25_df(token, doc_freq)
-                VALUES (?, 1)
-                ON CONFLICT(token) DO UPDATE SET doc_freq = doc_freq + 1
-                """,
-                (token,),
-            )
+        self._conn.executemany(
+            """
+            INSERT INTO bm25_df(token, doc_freq)
+            VALUES (?, 1)
+            ON CONFLICT(token) DO UPDATE SET doc_freq = doc_freq + 1
+            """,
+            [(token,) for token in token_counts],
+        )
 
     def _remove_document_locked(self, doc_id: str) -> None:
         row = self._conn.execute(
@@ -352,7 +357,13 @@ class PersistentBM25Index:
         )
 
     def _increment_stat_locked(self, key: str, delta: float) -> None:
-        self._set_stat_locked(key, self._get_stat_locked(key) + delta)
+        self._conn.execute(
+            """
+            INSERT INTO bm25_stats(key, value) VALUES (?, MAX(0.0, ?))
+            ON CONFLICT(key) DO UPDATE SET value = MAX(0.0, bm25_stats.value + ?)
+            """,
+            (key, delta, delta),
+        )
 
 
 def _bm25_score(

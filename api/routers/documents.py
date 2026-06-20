@@ -11,7 +11,6 @@ from api.schemas.responses import (
     DocumentListResponse,
     DocumentTextResponse,
     IngestJobResponse,
-    IngestResponse,
 )
 from api.task_queue import submit_background_task
 from doc_assistant.config.settings import settings
@@ -39,7 +38,6 @@ def ingest_document(
     job_store: JobStoreDep,
     file: UploadFile = File(...),
 ) -> IngestJobResponse:
-    """Upload a PDF, DOCX, TXT, or Markdown file and queue it for indexing."""
     suffix = f".{file.filename.rsplit('.', 1)[-1].lower()}" if file.filename and "." in file.filename else ""
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
@@ -58,8 +56,7 @@ def ingest_document(
     saved_path = save_uploaded_file(file_name, content, tenant_id=tenant_id)
     job = job_store.create(tenant_id=tenant_id, file_name=file_name, saved_path=saved_path)
     enqueue_ingest_job(job, vector_store, job_store)
-
-    return _job_response(job)
+    return IngestJobResponse.from_record(job)
 
 
 @router.get(
@@ -75,8 +72,7 @@ def get_ingest_job(
     record = job_store.get(job_id, tenant_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingest job not found.")
-
-    return _job_response(record)
+    return IngestJobResponse.from_record(record)
 
 
 @router.get(
@@ -115,7 +111,6 @@ def get_document_text(
     summary="List indexed documents",
 )
 def list_documents(vector_store: VectorStoreDep) -> DocumentListResponse:
-    """Return the distinct files currently indexed in the vector store."""
     try:
         indexed_documents = vector_store.list_documents()
     except Exception as exc:
@@ -140,7 +135,6 @@ def _read_upload_content(file: UploadFile) -> bytes:
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"Uploaded file exceeds {settings.max_upload_bytes} bytes.",
             )
-
     return bytes(content)
 
 
@@ -183,35 +177,4 @@ def enqueue_ingest_job(
         record.file_name,
         vector_store,
         job_store,
-    )
-
-
-def _job_response(record: IngestJobRecord) -> IngestJobResponse:
-    result = None
-    if record.result is not None:
-        result = IngestResponse(
-            file_id=record.result.file_id,
-            file_name=record.result.file_name,
-            document_count=record.result.document_count,
-            chunk_count=record.result.chunk_count,
-            document_key=record.result.document_key,
-            document_version=record.result.document_version,
-            file_extension=record.result.file_extension,
-            page_count=record.result.page_count,
-            skipped=record.result.skipped,
-            warnings=record.result.warnings,
-        )
-
-    return IngestJobResponse(
-        job_id=record.job_id,
-        status=record.status.value,
-        file_name=record.file_name,
-        stage=record.stage,
-        progress=record.progress,
-        submitted_at=record.submitted_at,
-        started_at=record.started_at,
-        completed_at=record.completed_at,
-        result=result,
-        error=record.error,
-        warnings=record.warnings or [],
     )

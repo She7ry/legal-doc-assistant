@@ -48,6 +48,13 @@ async def lifespan(app: FastAPI):
     if not settings.api_keys:
         logger.warning("DOC_ASSISTANT_API_KEYS is not configured; API authentication is disabled.")
     yield
+    # 清理 LLM 客户端持有的 HTTP 连接
+    from doc_assistant.models.language_model import build_chat_model
+    chat_model = build_chat_model()
+    if hasattr(chat_model, "aclose"):
+        await chat_model.aclose()
+    if hasattr(chat_model, "close"):
+        chat_model.close()
 
 
 app = FastAPI(

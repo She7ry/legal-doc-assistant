@@ -125,15 +125,9 @@ class ToolCallOut(BaseModel):
         )
 
 
-class ToolChatResponse(BaseModel):
-    content: str
-    citations: list[CitationOut]
-    memories_used: list[MemoryUsageOut] = Field(default_factory=list)
+class ToolChatResponse(AskResponse):
     web_sources: list[WebSourceOut] = Field(default_factory=list)
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
-    confidence: str | None = None
-    guard_warnings: list[str] = Field(default_factory=list)
-    evidence: dict[str, Any] | None = None
 
 
 class ConversationOut(BaseModel):
@@ -212,14 +206,18 @@ class AgentStepResultOut(BaseModel):
             tool=step.tool,
             status=step.status,
             summary=step.summary,
-            citations=[CitationOut.from_citation(citation) for citation in step.citations],
+            citations=[CitationOut.from_citation(c) for c in step.citations],
             evidence=step.evidence,
             guard_warnings=step.guard_warnings,
             output=step.output,
         )
 
 
-class AgentFindingOut(BaseModel):
+# ------------------------------------------------------------------
+# Shared Finding / Artifact bases to avoid field duplication
+# ------------------------------------------------------------------
+
+class _FindingBase(BaseModel):
     finding_id: str
     category: str
     severity: str
@@ -236,6 +234,9 @@ class AgentFindingOut(BaseModel):
     location_label: str = ""
     human_review_status: str = "pending"
     status: str = "open"
+
+
+class AgentFindingOut(_FindingBase):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
 
     @classmethod
@@ -258,6 +259,40 @@ class AgentFindingOut(BaseModel):
             human_review_status=getattr(finding, "human_review_status", "pending"),
             status=getattr(finding, "status", "open"),
             evidence=getattr(finding, "evidence", []),
+        )
+
+
+class MatterFindingRecordOut(_FindingBase):
+    matter_id: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_task_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, finding) -> "MatterFindingRecordOut":
+        return cls(
+            finding_id=finding.finding_id,
+            matter_id=finding.matter_id,
+            category=finding.category,
+            severity=finding.severity,
+            summary=finding.summary,
+            recommended_action=finding.recommended_action,
+            citations=finding.citations,
+            source_step_id=finding.source_step_id,
+            clause_reference=finding.clause_reference,
+            evidence_coverage=finding.evidence_coverage,
+            support_level=finding.support_level,
+            unsupported_reason=finding.unsupported_reason,
+            source_quote=finding.source_quote,
+            location_label=finding.location_label,
+            needs_human_review=finding.needs_human_review,
+            human_review_status=finding.human_review_status,
+            status=finding.status,
+            metadata=finding.metadata,
+            source_task_id=finding.source_task_id,
+            created_at=finding.created_at,
+            updated_at=finding.updated_at,
         )
 
 
@@ -295,7 +330,7 @@ class MatterProfileOut(BaseModel):
         )
 
 
-class AgentArtifactOut(BaseModel):
+class _ArtifactBase(BaseModel):
     artifact_id: str
     artifact_type: str
     title: str
@@ -305,6 +340,8 @@ class AgentArtifactOut(BaseModel):
     citations: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+
+class AgentArtifactOut(_ArtifactBase):
     @classmethod
     def from_artifact(cls, artifact) -> "AgentArtifactOut":
         return cls(
@@ -316,6 +353,34 @@ class AgentArtifactOut(BaseModel):
             source_finding_ids=artifact.source_finding_ids,
             citations=artifact.citations,
             metadata=artifact.metadata,
+        )
+
+
+class MatterArtifactRecordOut(_ArtifactBase):
+    matter_id: str
+    source_task_id: str
+    version: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, artifact) -> "MatterArtifactRecordOut":
+        return cls(
+            artifact_id=artifact.artifact_id,
+            matter_id=artifact.matter_id,
+            artifact_type=artifact.artifact_type,
+            title=artifact.title,
+            summary=artifact.summary,
+            items=artifact.items,
+            source_finding_ids=artifact.source_finding_ids,
+            citations=artifact.citations,
+            metadata=artifact.metadata,
+            source_task_id=artifact.source_task_id,
+            version=artifact.version,
+            status=artifact.status,
+            created_at=artifact.created_at,
+            updated_at=artifact.updated_at,
         )
 
 
@@ -351,92 +416,6 @@ class AgentConfirmationGateOut(BaseModel):
         )
 
 
-class MatterArtifactRecordOut(BaseModel):
-    artifact_id: str
-    matter_id: str
-    artifact_type: str
-    title: str
-    summary: str
-    items: list[dict[str, Any]] = Field(default_factory=list)
-    source_finding_ids: list[str] = Field(default_factory=list)
-    citations: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    source_task_id: str
-    version: int
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-    @classmethod
-    def from_record(cls, artifact) -> "MatterArtifactRecordOut":
-        return cls(
-            artifact_id=artifact.artifact_id,
-            matter_id=artifact.matter_id,
-            artifact_type=artifact.artifact_type,
-            title=artifact.title,
-            summary=artifact.summary,
-            items=artifact.items,
-            source_finding_ids=artifact.source_finding_ids,
-            citations=artifact.citations,
-            metadata=artifact.metadata,
-            source_task_id=artifact.source_task_id,
-            version=artifact.version,
-            status=artifact.status,
-            created_at=artifact.created_at,
-            updated_at=artifact.updated_at,
-        )
-
-
-class MatterFindingRecordOut(BaseModel):
-    finding_id: str
-    matter_id: str
-    category: str
-    severity: str
-    summary: str
-    recommended_action: str = ""
-    citations: list[str] = Field(default_factory=list)
-    source_step_id: str = ""
-    clause_reference: str = ""
-    evidence_coverage: str = "missing"
-    support_level: str = "missing"
-    unsupported_reason: str = ""
-    source_quote: str = ""
-    location_label: str = ""
-    needs_human_review: bool = True
-    human_review_status: str = "pending"
-    status: str = "open"
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    source_task_id: str
-    created_at: datetime
-    updated_at: datetime
-
-    @classmethod
-    def from_record(cls, finding) -> "MatterFindingRecordOut":
-        return cls(
-            finding_id=finding.finding_id,
-            matter_id=finding.matter_id,
-            category=finding.category,
-            severity=finding.severity,
-            summary=finding.summary,
-            recommended_action=finding.recommended_action,
-            citations=finding.citations,
-            source_step_id=finding.source_step_id,
-            clause_reference=finding.clause_reference,
-            evidence_coverage=finding.evidence_coverage,
-            support_level=finding.support_level,
-            unsupported_reason=finding.unsupported_reason,
-            source_quote=finding.source_quote,
-            location_label=finding.location_label,
-            needs_human_review=finding.needs_human_review,
-            human_review_status=finding.human_review_status,
-            status=finding.status,
-            metadata=finding.metadata,
-            source_task_id=finding.source_task_id,
-            created_at=finding.created_at,
-            updated_at=finding.updated_at,
-        )
-
-
 class MatterRecordOut(BaseModel):
     matter_id: str
     title: str
@@ -461,12 +440,12 @@ class MatterRecordOut(BaseModel):
             created_at=matter.created_at,
             updated_at=matter.updated_at,
             artifacts=[
-                MatterArtifactRecordOut.from_record(artifact)
-                for artifact in matter.artifacts or []
+                MatterArtifactRecordOut.from_record(a)
+                for a in matter.artifacts or []
             ],
             findings=[
-                MatterFindingRecordOut.from_record(finding)
-                for finding in getattr(matter, "findings", None) or []
+                MatterFindingRecordOut.from_record(f)
+                for f in getattr(matter, "findings", None) or []
             ],
         )
 
@@ -532,24 +511,21 @@ class AgentTaskResponse(BaseModel):
             task_id=result.task_id,
             status=result.status,
             objective=result.objective,
-            plan=[AgentPlanStepOut.from_step(step) for step in result.plan],
-            steps=[AgentStepResultOut.from_step(step) for step in result.steps],
-            findings=[AgentFindingOut.from_finding(finding) for finding in result.findings],
+            plan=[AgentPlanStepOut.from_step(s) for s in result.plan],
+            steps=[AgentStepResultOut.from_step(s) for s in result.steps],
+            findings=[AgentFindingOut.from_finding(f) for f in result.findings],
             missing_information=result.missing_information,
             human_review_required=result.human_review_required,
             report=result.report,
-            citations=[CitationOut.from_citation(citation) for citation in result.citations],
+            citations=[CitationOut.from_citation(c) for c in result.citations],
             confidence=result.confidence,
             guard_warnings=result.guard_warnings,
             evidence=result.evidence,
             matter_profile=matter_profile,
-            artifacts=[
-                AgentArtifactOut.from_artifact(artifact)
-                for artifact in result.artifacts
-            ],
+            artifacts=[AgentArtifactOut.from_artifact(a) for a in result.artifacts],
             confirmation_gates=[
-                AgentConfirmationGateOut.from_gate(gate)
-                for gate in getattr(result, "confirmation_gates", [])
+                AgentConfirmationGateOut.from_gate(g)
+                for g in getattr(result, "confirmation_gates", [])
             ],
             metadata=result.metadata,
         )
@@ -618,7 +594,7 @@ class AgentTaskRecordResponse(BaseModel):
             completed_at=record.completed_at,
             result=result,
             error=record.error,
-            events=[AgentTaskEventOut.from_event(event) for event in record.events or []],
+            events=[AgentTaskEventOut.from_event(e) for e in record.events or []],
         )
 
 
@@ -692,6 +668,36 @@ class IngestJobResponse(BaseModel):
     result: IngestResponse | None = None
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_record(cls, record) -> "IngestJobResponse":
+        result = None
+        if record.result is not None:
+            result = IngestResponse(
+                file_id=record.result.file_id,
+                file_name=record.result.file_name,
+                document_count=record.result.document_count,
+                chunk_count=record.result.chunk_count,
+                document_key=record.result.document_key,
+                document_version=record.result.document_version,
+                file_extension=record.result.file_extension,
+                page_count=record.result.page_count,
+                skipped=record.result.skipped,
+                warnings=record.result.warnings,
+            )
+        return cls(
+            job_id=record.job_id,
+            status=record.status.value,
+            file_name=record.file_name,
+            stage=record.stage,
+            progress=record.progress,
+            submitted_at=record.submitted_at,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            result=result,
+            error=record.error,
+            warnings=record.warnings or [],
+        )
 
 
 class DocumentInfo(BaseModel):
@@ -886,8 +892,8 @@ class FeedbackResponse(BaseModel):
             comment=event.comment,
             created_at=event.created_at,
             adjusted_memories=[
-                FeedbackMemoryAdjustmentOut.from_adjustment(adjustment)
-                for adjustment in adjustments
+                FeedbackMemoryAdjustmentOut.from_adjustment(a)
+                for a in adjustments
             ],
         )
 

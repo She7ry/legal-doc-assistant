@@ -10,6 +10,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from doc_assistant.config.settings import settings
 
@@ -37,6 +38,23 @@ class WebSearchClient:
     供 async API 使用。子类只需实现 ``search``。
     """
 
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: int = 10,
+        max_retries: int = 3,
+        default_headers: dict[str, str] | None = None,
+    ) -> None:
+        self.base_url = base_url
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+        self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        if default_headers:
+            self.session.headers.update(default_headers)
+
     def search(
         self,
         query: str,
@@ -63,9 +81,22 @@ class WebSearchClient:
             domains=domains,
         )
 
+    def _get(self, params: dict[str, object]) -> requests.Response:
+        return _get_with_retries(
+            self.session,
+            self.base_url,
+            params=params,
+            headers={},
+            timeout=self.timeout_seconds,
+            max_retries=self.max_retries,
+        )
+
 
 class DisabledWebSearchClient(WebSearchClient):
     """占位客户端：未开启 DOC_ASSISTANT_WEB_SEARCH_ENABLED 时使用，调用即报错。"""
+
+    def __init__(self) -> None:
+        pass
 
     def search(
         self,
@@ -87,10 +118,12 @@ class DuckDuckGoSearchClient(WebSearchClient):
         timeout_seconds: int = 10,
         max_retries: int = 3,
     ) -> None:
-        self.base_url = base_url
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
-        self.session = requests.Session()
+        super().__init__(
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            default_headers={"User-Agent": "legal-doc-assistant/0.1"},
+        )
 
     def search(
         self,
@@ -105,17 +138,9 @@ class DuckDuckGoSearchClient(WebSearchClient):
         freshness = _duckduckgo_recency_filter(recency_days)
         if freshness:
             params["df"] = freshness
-        response = _get_with_retries(
-            self.session,
-            self.base_url,
-            params=params,
-            headers={"User-Agent": "legal-doc-assistant/0.1"},
-            timeout=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
+        response = self._get(params)
         if response.status_code >= 400:
             raise RuntimeError(f"DuckDuckGo search failed: {response.status_code} {response.text}")
-
         parser = _DuckDuckGoHTMLParser()
         parser.feed(response.text)
         return parser.results[:max_results]
@@ -131,11 +156,13 @@ class BraveSearchClient(WebSearchClient):
         timeout_seconds: int = 10,
         max_retries: int = 3,
     ) -> None:
+        super().__init__(
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            default_headers={"X-Subscription-Token": api_key},
+        )
         self.api_key = api_key
-        self.base_url = base_url
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
-        self.session = requests.Session()
 
     def search(
         self,
@@ -150,17 +177,9 @@ class BraveSearchClient(WebSearchClient):
         freshness = _brave_recency_filter(recency_days)
         if freshness:
             params["freshness"] = freshness
-        response = _get_with_retries(
-            self.session,
-            self.base_url,
-            params=params,
-            headers={"X-Subscription-Token": self.api_key},
-            timeout=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
+        response = self._get(params)
         if response.status_code >= 400:
             raise RuntimeError(f"Brave search failed: {response.status_code} {response.text}")
-
         data = response.json()
         results = data.get("web", {}).get("results", [])
         return [
@@ -186,11 +205,13 @@ class BingSearchClient(WebSearchClient):
         timeout_seconds: int = 10,
         max_retries: int = 3,
     ) -> None:
+        super().__init__(
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            default_headers={"Ocp-Apim-Subscription-Key": api_key},
+        )
         self.api_key = api_key
-        self.base_url = base_url
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
-        self.session = requests.Session()
 
     def search(
         self,
@@ -205,17 +226,9 @@ class BingSearchClient(WebSearchClient):
         freshness = _bing_recency_filter(recency_days)
         if freshness:
             params["freshness"] = freshness
-        response = _get_with_retries(
-            self.session,
-            self.base_url,
-            params=params,
-            headers={"Ocp-Apim-Subscription-Key": self.api_key},
-            timeout=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
+        response = self._get(params)
         if response.status_code >= 400:
             raise RuntimeError(f"Bing search failed: {response.status_code} {response.text}")
-
         data = response.json()
         results = data.get("webPages", {}).get("value", [])
         return [

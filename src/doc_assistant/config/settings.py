@@ -79,11 +79,34 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
-@dataclass(frozen=True)
-class Settings:
-    """应用全局配置单例的数据类；字段默认值来自环境变量，启动时做基本校验。"""
+class _SecretStr(str):
+    """在 repr / print 中屏蔽敏感值，防止日志泄露 API Key。"""
 
-    # ── Storage paths ─────────────────────────────────────────────────────
+    def __repr__(self) -> str:
+        if len(self) <= 4:
+            return "'***'"
+        return f"'{self[:2]}***{self[-2:]}'"
+
+    def __str__(self) -> str:
+        return super().__str__()
+
+
+def _secret_env(name: str, default: str = "") -> _SecretStr:
+    value = os.getenv(name, default)
+    return _SecretStr(value.strip() if value else default)
+
+
+def _secret_first_env(*names: str, default: str = "") -> _SecretStr:
+    return _SecretStr(_first_env(*names, default=default))
+
+
+# ── 分组子配置 ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class StorageSettings:
+    """文件路径与数据库位置。"""
+
     project_root: Path = PROJECT_ROOT
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
@@ -117,15 +140,20 @@ class Settings:
             PROJECT_ROOT / "data" / "memory.sqlite3",
         )
     )
-    # ── LLM / Chat model ────────────────────────────────────────────────
-    dashscope_api_key: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", ""))
-    deepseek_api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    """LLM / Chat model 配置。"""
+
+    dashscope_api_key: _SecretStr = field(default_factory=lambda: _secret_env("DASHSCOPE_API_KEY"))
+    deepseek_api_key: _SecretStr = field(default_factory=lambda: _secret_env("DEEPSEEK_API_KEY"))
     collection_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_COLLECTION", "legal_documents"))
     memory_collection_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_MEMORY_COLLECTION", "user_memories"))
     chat_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_CHAT_PROVIDER", "dashscope"))
     chat_model_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_CHAT_MODEL", "qwen3.5-flash"))
     chat_api: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_CHAT_API", "compatible"))
-    chat_api_key: str = field(default_factory=lambda: _first_env("DOC_ASSISTANT_CHAT_API_KEY"))
+    chat_api_key: _SecretStr = field(default_factory=lambda: _secret_first_env("DOC_ASSISTANT_CHAT_API_KEY"))
     chat_base_url: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_CHAT_BASE_URL", ""))
     chat_extra_body: dict[str, Any] = field(
         default_factory=lambda: _json_object_env("DOC_ASSISTANT_CHAT_EXTRA_BODY")
@@ -135,16 +163,27 @@ class Settings:
     llm_circuit_breaker_cooldown_seconds: int = field(
         default_factory=lambda: _int_env("DOC_ASSISTANT_LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30)
     )
-    # ── Embedding model ─────────────────────────────────────────────────
-    embedding_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_PROVIDER", "dashscope"))
-    embedding_api_key: str = field(default_factory=lambda: _first_env("DOC_ASSISTANT_EMBEDDING_API_KEY", "DASHSCOPE_API_KEY"))
-    embedding_base_url: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_BASE_URL", ""))
-    embedding_model_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_MODEL", "text-embedding-v3"))
-    embedding_device: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_DEVICE", "cpu"))
     enable_thinking: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_ENABLE_THINKING", False))
     temperature: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_TEMPERATURE", 0.0))
 
-    # ── Retrieval / RAG ───────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class EmbeddingSettings:
+    """Embedding model 配置。"""
+
+    embedding_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_PROVIDER", "dashscope"))
+    embedding_api_key: _SecretStr = field(default_factory=lambda: _secret_first_env("DOC_ASSISTANT_EMBEDDING_API_KEY", "DASHSCOPE_API_KEY"))
+    embedding_base_url: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_BASE_URL", ""))
+    embedding_model_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_MODEL", "text-embedding-v3"))
+    embedding_device: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_DEVICE", "cpu"))
+    embedding_batch_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_BATCH_SIZE", 20))
+    embedding_max_workers: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_MAX_WORKERS", 4))
+
+
+@dataclass(frozen=True)
+class RetrievalSettings:
+    """检索 / RAG 配置。"""
+
     top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOP_K", 5))
     retrieval_mode: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_RETRIEVAL_MODE", "hybrid"))
     retrieval_fetch_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_FETCH_K", 40))
@@ -158,11 +197,14 @@ class Settings:
     retrieval_cache_ttl_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_TTL_SECONDS", 300))
     retrieval_cache_max_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_MAX_SIZE", 128))
     query_rewrite_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_QUERY_REWRITE_ENABLED", True))
+    chunk_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900))
+    chunk_overlap: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120))
 
-    # ── Ingestion / chunking ──────────────────────────────────────────────
-    embedding_batch_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_BATCH_SIZE", 20))
-    embedding_max_workers: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_MAX_WORKERS", 4))
-    # ── Agent / planner ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class AgentSettings:
+    """Agent / 规划器配置。"""
+
     agent_max_parallel_steps: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS", 3))
     agent_step_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES", 2))
     agent_step_retry_backoff_seconds: tuple[float, ...] = field(
@@ -175,8 +217,15 @@ class Settings:
     agent_react_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_REACT_ENABLED", True))
     agent_react_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS", 2))
     chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
+    tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
+    tool_call_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_HISTORY_WINDOW", 12))
+    tool_call_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_TIMEOUT_SECONDS", 30))
 
-    # ── Memory ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class MemorySettings:
+    """记忆子系统配置。"""
+
     memory_top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TOP_K", 5))
     memory_min_confidence: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55))
     memory_semantic_dedup_min_score: float = field(
@@ -199,18 +248,16 @@ class Settings:
     memory_llm_extraction_min_confidence: float = field(
         default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE", 0.6)
     )
-    # ── Text splitting ─────────────────────────────────────────────────
-    chunk_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900))
-    chunk_overlap: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120))
-    # ── Tool calling ──────────────────────────────────────────────────────
-    tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
-    tool_call_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_HISTORY_WINDOW", 12))
-    tool_call_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_TIMEOUT_SECONDS", 30))
-    # ── Web search ────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class WebSearchSettings:
+    """网页搜索配置。"""
+
     web_search_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_WEB_SEARCH_ENABLED", False))
     web_search_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_WEB_SEARCH_PROVIDER", "duckduckgo"))
-    web_search_api_key: str = field(
-        default_factory=lambda: _first_env(
+    web_search_api_key: _SecretStr = field(
+        default_factory=lambda: _secret_first_env(
             "DOC_ASSISTANT_WEB_SEARCH_API_KEY",
             "BRAVE_SEARCH_API_KEY",
             "BING_SEARCH_API_KEY",
@@ -220,7 +267,12 @@ class Settings:
     web_search_max_results: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS", 5))
     web_search_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS", 10))
     web_search_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_MAX_RETRIES", 3))
-    # ── API security / CORS ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SecuritySettings:
+    """API 安全 / CORS 配置。"""
+
     api_keys: tuple[str, ...] = field(default_factory=lambda: _csv_env("DOC_ASSISTANT_API_KEYS"))
     rate_limit_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_RATE_LIMIT_ENABLED", True))
     rate_limit_max_requests: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RATE_LIMIT_MAX_REQUESTS", 120))
@@ -233,6 +285,27 @@ class Settings:
         )
     )
     cors_allow_credentials: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_CORS_ALLOW_CREDENTIALS", False))
+
+
+# ── 主 Settings 类 ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Settings:
+    """应用全局配置单例。
+
+    分组子配置可通过 ``settings.storage``、``settings.llm`` 等访问；
+    为向后兼容，所有字段也可直接 ``settings.top_k`` 访问（通过 ``__getattr__``）。
+    """
+
+    storage: StorageSettings = field(default_factory=StorageSettings)
+    llm: LLMSettings = field(default_factory=LLMSettings)
+    embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
+    retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
+    agent: AgentSettings = field(default_factory=AgentSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
+    web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
+    security: SecuritySettings = field(default_factory=SecuritySettings)
     # ── Tenant / runtime ────────────────────────────────────────────────
     default_tenant_id: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_DEFAULT_TENANT_ID", "default"))
     max_upload_bytes: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MAX_UPLOAD_BYTES", 20 * 1024 * 1024))
@@ -240,59 +313,108 @@ class Settings:
     pdf_ocr_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_PDF_OCR_ENABLED", False))
     pdf_ocr_lang: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_PDF_OCR_LANG", "eng"))
 
+    def __getattr__(self, name: str) -> Any:
+        """向后兼容：``settings.top_k`` 自动委托到对应子配置。"""
+        for sub in (
+            "storage", "llm", "embedding", "retrieval",
+            "agent", "memory", "web_search", "security",
+        ):
+            sub_obj = object.__getattribute__(self, sub)
+            if hasattr(sub_obj, name):
+                return getattr(sub_obj, name)
+        raise AttributeError(f"Settings has no attribute '{name}'")
+
     def __post_init__(self) -> None:
-        _validate_positive("chunk_size", self.chunk_size)
-        if self.chunk_overlap < 0:
+        r = self.retrieval
+        _validate_positive("chunk_size", r.chunk_size)
+        if r.chunk_overlap < 0:
             raise ValueError("chunk_overlap must be greater than or equal to 0.")
-        if self.chunk_overlap >= self.chunk_size:
+        if r.chunk_overlap >= r.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size.")
-        if self.temperature < 0:
+        if self.llm.temperature < 0:
             raise ValueError("temperature must be greater than or equal to 0.")
-        if self.retrieval_mode.strip().lower() not in {"hybrid", "dense", "vector", "bm25", "sparse"}:
+        if r.retrieval_mode.strip().lower() not in {"hybrid", "dense", "vector", "bm25", "sparse"}:
             raise ValueError("retrieval_mode must be one of: hybrid, dense, vector, bm25, sparse.")
-        _validate_positive("top_k", self.top_k)
-        _validate_positive("retrieval_fetch_k", self.retrieval_fetch_k)
-        _validate_positive("retrieval_rrf_k", self.retrieval_rrf_k)
-        if not 0 <= self.retrieval_mmr_lambda <= 1:
+        _validate_positive("top_k", r.top_k)
+        _validate_positive("retrieval_fetch_k", r.retrieval_fetch_k)
+        _validate_positive("retrieval_rrf_k", r.retrieval_rrf_k)
+        if not 0 <= r.retrieval_mmr_lambda <= 1:
             raise ValueError("retrieval_mmr_lambda must be between 0 and 1.")
-        if self.retrieval_min_relevance < 0:
+        if r.retrieval_min_relevance < 0:
             raise ValueError("retrieval_min_relevance must be greater than or equal to 0.")
-        if self.agent_step_max_retries < 0:
+        a = self.agent
+        if a.agent_step_max_retries < 0:
             raise ValueError("agent_step_max_retries must be greater than or equal to 0.")
-        if any(value < 0 for value in self.agent_step_retry_backoff_seconds):
+        if any(value < 0 for value in a.agent_step_retry_backoff_seconds):
             raise ValueError("agent_step_retry_backoff_seconds values must be non-negative.")
-        if self.agent_react_max_iterations < 0:
+        if a.agent_react_max_iterations < 0:
             raise ValueError("agent_react_max_iterations must be greater than or equal to 0.")
-        if self.memory_auto_summary_threshold < 0:
+        m = self.memory
+        if m.memory_auto_summary_threshold < 0:
             raise ValueError("memory_auto_summary_threshold must be greater than or equal to 0.")
-        if self.memory_auto_summary_interval <= 0:
+        if m.memory_auto_summary_interval <= 0:
             raise ValueError("memory_auto_summary_interval must be greater than 0.")
-        if self.memory_auto_summary_window <= 0:
+        if m.memory_auto_summary_window <= 0:
             raise ValueError("memory_auto_summary_window must be greater than 0.")
-        if self.memory_prompt_max_tokens <= 0:
+        if m.memory_prompt_max_tokens <= 0:
             raise ValueError("memory_prompt_max_tokens must be greater than 0.")
-        if not 0 <= self.memory_semantic_dedup_min_score <= 1:
+        if not 0 <= m.memory_semantic_dedup_min_score <= 1:
             raise ValueError("memory_semantic_dedup_min_score must be between 0 and 1.")
-        if self.memory_maintenance_cooldown_seconds < 0:
+        if m.memory_maintenance_cooldown_seconds < 0:
             raise ValueError("memory_maintenance_cooldown_seconds must be greater than or equal to 0.")
-        if self.memory_llm_extraction_max_items <= 0:
+        if m.memory_llm_extraction_max_items <= 0:
             raise ValueError("memory_llm_extraction_max_items must be greater than 0.")
-        if not 0 <= self.memory_llm_extraction_min_confidence <= 1:
+        if not 0 <= m.memory_llm_extraction_min_confidence <= 1:
             raise ValueError("memory_llm_extraction_min_confidence must be between 0 and 1.")
 
     def with_overrides(self, **kwargs: Any) -> Settings:
-        """返回应用了临时覆盖项的新 Settings 副本（测试或单次请求用）。"""
-        return replace(self, **kwargs)
+        """返回应用了临时覆盖项的新 Settings 副本（测试或单次请求用）。
+
+        支持直接传子配置字段名（如 ``top_k=3``），自动路由到对应子对象。
+        """
+        sub_mapping: dict[str, str] = {}
+        sub_fields: dict[str, dict[str, Any]] = {}
+        for sub_name in (
+            "storage", "llm", "embedding", "retrieval",
+            "agent", "memory", "web_search", "security",
+        ):
+            sub_obj = getattr(self, sub_name)
+            for f_name in sub_obj.__dataclass_fields__:
+                sub_mapping[f_name] = sub_name
+
+        top_level_kwargs: dict[str, Any] = {}
+        for key, value in kwargs.items():
+            if key in self.__dataclass_fields__:
+                top_level_kwargs[key] = value
+            elif key in sub_mapping:
+                group = sub_mapping[key]
+                sub_fields.setdefault(group, {})[key] = value
+            else:
+                raise TypeError(f"Settings has no field '{key}'")
+
+        for group, overrides in sub_fields.items():
+            top_level_kwargs[group] = replace(getattr(self, group), **overrides)
+
+        return replace(self, **top_level_kwargs)
 
     def ensure_directories(self) -> None:
         """创建 data/ 下 uploads、vector_store、各 SQLite 库所在目录（应用启动时调用）。"""
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
-        self.vector_store_dir.mkdir(parents=True, exist_ok=True)
-        self.memory_vector_store_dir.mkdir(parents=True, exist_ok=True)
-        self.ingest_jobs_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.agent_tasks_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.matter_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        s = self.storage
+        s.upload_dir.mkdir(parents=True, exist_ok=True)
+        s.vector_store_dir.mkdir(parents=True, exist_ok=True)
+        s.memory_vector_store_dir.mkdir(parents=True, exist_ok=True)
+        s.ingest_jobs_db_path.parent.mkdir(parents=True, exist_ok=True)
+        s.agent_tasks_db_path.parent.mkdir(parents=True, exist_ok=True)
+        s.matter_db_path.parent.mkdir(parents=True, exist_ok=True)
+        s.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"Settings(default_tenant_id={self.default_tenant_id!r}, "
+            f"llm=LLMSettings(chat_provider={self.llm.chat_provider!r}, "
+            f"chat_model_name={self.llm.chat_model_name!r}, ...))"
+        )
+
 
 def _validate_positive(name: str, value: int) -> None:
     if value <= 0:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from doc_assistant.config.settings import Settings
+from doc_assistant.config.settings import RetrievalSettings, Settings
 
 
 def test_settings_reads_environment_per_instance(monkeypatch) -> None:
@@ -19,7 +19,7 @@ def test_settings_with_overrides_returns_validated_copy() -> None:
 
 def test_settings_rejects_invalid_chunk_overlap() -> None:
     with pytest.raises(ValueError, match="chunk_overlap"):
-        Settings(chunk_size=100, chunk_overlap=100)
+        Settings(retrieval=RetrievalSettings(chunk_size=100, chunk_overlap=100))
 
 
 def test_agent_backoff_is_parsed_as_numbers(monkeypatch) -> None:

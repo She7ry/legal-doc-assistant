@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -22,6 +23,8 @@ from doc_assistant.services.agent._constants import (
 )
 from doc_assistant.services.agent._planning import _parse_llm_plan, _trim_plan
 from doc_assistant.services.agent.schemas import AgentPlanStep
+
+logger = logging.getLogger(__name__)
 
 
 def plan_task(
@@ -238,5 +241,10 @@ def plan_task_with_llm(
         response_message = llm.invoke(messages)
         response = str(getattr(response_message, "content", response_message) or "")
     except Exception:
+        logger.warning(
+            "LLM planner failed; falling back to heuristic plan.",
+            extra={"objective": objective},
+            exc_info=True,
+        )
         return []
     return _parse_llm_plan(response, max_steps)

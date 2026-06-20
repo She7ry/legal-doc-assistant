@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from doc_assistant.graphs.agent import build_agent_graph
+from doc_assistant.graphs.agent import AgentWorkflowState, build_agent_graph
 from doc_assistant.services.agent._artifacts import _build_agent_artifacts
 from doc_assistant.services.agent._confirmation_gates import (
     _build_confirmation_gates,
@@ -68,7 +68,7 @@ def run_agent_workflow(
     resolved_matter_id = matter_id or resolved_task_id
     resolved_focus_areas = focus_areas or []
 
-    def plan_node(_state: dict[str, Any]) -> dict[str, Any]:
+    def plan_node(_state: AgentWorkflowState) -> dict[str, Any]:
         plan = service.plan_task(
             objective=objective,
             focus_areas=resolved_focus_areas,
@@ -85,7 +85,7 @@ def run_agent_workflow(
         )
         return {"plan": plan, "citation_registry": _CitationRegistry()}
 
-    def execute_steps_node(state: dict[str, Any]) -> dict[str, Any]:
+    def execute_steps_node(state: AgentWorkflowState) -> dict[str, Any]:
         steps = service._execute_plan_steps(
             state["plan"],
             objective=objective,
@@ -97,7 +97,7 @@ def run_agent_workflow(
         )
         return {"steps": steps}
 
-    def collect_findings_node(state: dict[str, Any]) -> dict[str, Any]:
+    def collect_findings_node(state: AgentWorkflowState) -> dict[str, Any]:
         citation_registry = state["citation_registry"]
         findings: list[AgentFinding] = []
         missing_information: list[str] = []
@@ -114,7 +114,7 @@ def run_agent_workflow(
             "missing_information": _dedupe_texts(missing_information),
         }
 
-    def build_deliverables_node(state: dict[str, Any]) -> dict[str, Any]:
+    def build_deliverables_node(state: AgentWorkflowState) -> dict[str, Any]:
         missing_information = state["missing_information"]
         matter_profile = _build_matter_profile(
             matter_id=resolved_matter_id,
@@ -156,7 +156,7 @@ def run_agent_workflow(
             "confirmation_gates": confirmation_gates,
         }
 
-    def synthesize_report_node(state: dict[str, Any]) -> dict[str, Any]:
+    def synthesize_report_node(state: AgentWorkflowState) -> dict[str, Any]:
         citation_registry = state["citation_registry"]
         _emit_progress(
             progress_callback,
@@ -216,7 +216,7 @@ def run_agent_workflow(
             "confirmation_gates": confirmation_gates,
         }
 
-    def finalize_result_node(state: dict[str, Any]) -> dict[str, Any]:
+    def finalize_result_node(state: AgentWorkflowState) -> dict[str, Any]:
         citation_registry = state["citation_registry"]
         guard_result = state["guard_result"]
         human_review_required = (

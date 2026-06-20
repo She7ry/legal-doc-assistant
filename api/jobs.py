@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 from enum import Enum
 import json
 from pathlib import Path
@@ -9,6 +8,12 @@ import sqlite3
 from threading import Lock
 from uuid import uuid4
 
+from api.store_helpers import (
+    clamp_progress,
+    datetime_from_db,
+    datetime_to_db,
+    utc_now,
+)
 from doc_assistant.schemas.citation import IngestResult
 
 
@@ -26,11 +31,11 @@ class IngestJobRecord:
     file_name: str
     saved_path: Path
     status: IngestJobStatus
-    submitted_at: datetime
+    submitted_at: "datetime"
     stage: str = "uploaded"
     progress: int = 5
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
+    started_at: "datetime | None" = None
+    completed_at: "datetime | None" = None
     result: IngestResult | None = None
     error: str | None = None
     warnings: list[str] | None = None
@@ -52,7 +57,7 @@ class IngestJobStore:
             file_name=file_name,
             saved_path=saved_path,
             status=IngestJobStatus.QUEUED,
-            submitted_at=_utc_now(),
+            submitted_at=utc_now(),
             warnings=[],
         )
         with self._lock:
@@ -99,8 +104,8 @@ class IngestJobStore:
             record = self._require_record(job_id)
             record.status = IngestJobStatus.RUNNING
             record.stage = stage
-            record.progress = _clamp_progress(progress)
-            record.started_at = _utc_now()
+            record.progress = clamp_progress(progress)
+            record.started_at = utc_now()
             self._save_record(record)
 
     def update_progress(
@@ -113,7 +118,7 @@ class IngestJobStore:
         with self._lock:
             record = self._require_record(job_id)
             record.stage = stage
-            record.progress = _clamp_progress(progress)
+            record.progress = clamp_progress(progress)
             if warning:
                 warnings = list(record.warnings or [])
                 if warning not in warnings:
@@ -127,7 +132,7 @@ class IngestJobStore:
             record.status = IngestJobStatus.SUCCEEDED
             record.stage = "completed"
             record.progress = 100
-            record.completed_at = _utc_now()
+            record.completed_at = utc_now()
             record.result = result
             record.error = None
             warnings = list(record.warnings or [])
@@ -143,7 +148,7 @@ class IngestJobStore:
             record.status = IngestJobStatus.FAILED
             record.stage = "failed"
             record.progress = 100
-            record.completed_at = _utc_now()
+            record.completed_at = utc_now()
             record.error = error
             self._save_record(record)
 
@@ -218,9 +223,9 @@ class IngestJobStore:
                     record.status.value,
                     record.stage,
                     record.progress,
-                    _datetime_to_db(record.submitted_at),
-                    _datetime_to_db(record.started_at),
-                    _datetime_to_db(record.completed_at),
+                    datetime_to_db(record.submitted_at),
+                    datetime_to_db(record.started_at),
+                    datetime_to_db(record.completed_at),
                     _result_to_json(record.result),
                     record.error,
                     json.dumps(record.warnings or [], ensure_ascii=False),
@@ -237,14 +242,6 @@ class IngestJobStore:
         return _row_to_record(row) if row else None
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _clamp_progress(value: int) -> int:
-    return max(0, min(int(value), 100))
-
-
 def _record_to_row(record: IngestJobRecord) -> tuple[object, ...]:
     return (
         record.job_id,
@@ -254,9 +251,9 @@ def _record_to_row(record: IngestJobRecord) -> tuple[object, ...]:
         record.status.value,
         record.stage,
         record.progress,
-        _datetime_to_db(record.submitted_at),
-        _datetime_to_db(record.started_at),
-        _datetime_to_db(record.completed_at),
+        datetime_to_db(record.submitted_at),
+        datetime_to_db(record.started_at),
+        datetime_to_db(record.completed_at),
         _result_to_json(record.result),
         record.error,
         json.dumps(record.warnings or [], ensure_ascii=False),
@@ -278,19 +275,6 @@ def _result_from_json(value: str | None) -> IngestResult | None:
     return IngestResult(**data)
 
 
-def _datetime_to_db(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _datetime_from_db(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def _row_to_record(row: sqlite3.Row) -> IngestJobRecord:
     return IngestJobRecord(
         job_id=row["job_id"],
@@ -300,9 +284,9 @@ def _row_to_record(row: sqlite3.Row) -> IngestJobRecord:
         status=IngestJobStatus(row["status"]),
         stage=row["stage"],
         progress=row["progress"],
-        submitted_at=_datetime_from_db(row["submitted_at"]) or _utc_now(),
-        started_at=_datetime_from_db(row["started_at"]),
-        completed_at=_datetime_from_db(row["completed_at"]),
+        submitted_at=datetime_from_db(row["submitted_at"]) or utc_now(),
+        started_at=datetime_from_db(row["started_at"]),
+        completed_at=datetime_from_db(row["completed_at"]),
         result=_result_from_json(row["result_json"]),
         error=row["error"],
         warnings=json.loads(row["warnings_json"] or "[]"),

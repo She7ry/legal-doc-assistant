@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep, require_api_key
+from api.routers.helpers import get_fields_set
 from api.schemas.requests import (
     MemoryBatchCreateRequest,
     MemoryBatchDeleteRequest,
@@ -26,6 +27,22 @@ router = APIRouter(
 )
 
 
+def _create_memory_kwargs(body: MemoryCreateRequest, tenant_id: str, user_id: str) -> dict:
+    return dict(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        scope=body.scope,
+        type=body.type,
+        key=body.key,
+        content=body.content,
+        value_json=body.value,
+        source=body.source,
+        confidence=body.confidence,
+        expires_at=body.expires_at,
+        visibility=body.visibility,
+    )
+
+
 @router.get("", response_model=MemoryListResponse, summary="List user memories")
 def list_memories(
     memory_service: MemoryServiceDep,
@@ -37,21 +54,19 @@ def list_memories(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> MemoryListResponse:
     memories = memory_service.list_memories(
-        tenant_id,
-        user_id,
+        tenant_id, user_id,
         status=status_filter,
         include_expired=include_expired,
         limit=limit,
         offset=offset,
     )
     total = memory_service.count_memories(
-        tenant_id,
-        user_id,
+        tenant_id, user_id,
         status=status_filter,
         include_expired=include_expired,
     )
     return MemoryListResponse(
-        memories=[MemoryOut.from_memory(memory) for memory in memories],
+        memories=[MemoryOut.from_memory(m) for m in memories],
         total=total,
         offset=offset,
         limit=limit,
@@ -74,23 +89,7 @@ def create_memory(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> MemoryOut:
-    try:
-        memory = memory_service.create_memory(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            scope=body.scope,
-            type=body.type,
-            key=body.key,
-            content=body.content,
-            value_json=body.value,
-            source=body.source,
-            confidence=body.confidence,
-            expires_at=body.expires_at,
-            visibility=body.visibility,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
+    memory = memory_service.create_memory(**_create_memory_kwargs(body, tenant_id, user_id))
     return MemoryOut.from_memory(memory)
 
 
@@ -101,26 +100,11 @@ def create_memories(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> list[MemoryOut]:
-    try:
-        memories = [
-            memory_service.create_memory(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                scope=item.scope,
-                type=item.type,
-                key=item.key,
-                content=item.content,
-                value_json=item.value,
-                source=item.source,
-                confidence=item.confidence,
-                expires_at=item.expires_at,
-                visibility=item.visibility,
-            )
-            for item in body.memories
-        ]
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return [MemoryOut.from_memory(memory) for memory in memories]
+    memories = [
+        memory_service.create_memory(**_create_memory_kwargs(item, tenant_id, user_id))
+        for item in body.memories
+    ]
+    return [MemoryOut.from_memory(m) for m in memories]
 
 
 @router.patch("/{memory_id}", response_model=MemoryOut, summary="Update memory")
@@ -131,16 +115,9 @@ def update_memory(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> MemoryOut:
-    try:
-        memory = memory_service.update_memory(
-            tenant_id,
-            user_id,
-            memory_id,
-            _memory_update_from_body(body),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
+    memory = memory_service.update_memory(
+        tenant_id, user_id, memory_id, _memory_update_from_body(body),
+    )
     if memory is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found.")
     return MemoryOut.from_memory(memory)
@@ -226,7 +203,7 @@ def delete_memory(
 
 
 def _memory_update_from_body(body: MemoryUpdateRequest) -> MemoryUpdate:
-    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    fields_set = get_fields_set(body)
     return MemoryUpdate(
         key=body.key,
         content=body.content,

@@ -1,78 +1,174 @@
 # Legal Document Assistant
 
-A citation-first legal document analysis and legal information assistant for contracts, policies, leases, privacy policies, school rules, and compliance documents.
+基于 RAG（Retrieval-Augmented Generation）的法律文档分析与法律信息辅助系统。支持合同、政策、租约、隐私协议、校规及合规文档的智能问答、风险审查与冲突检测。
 
-It helps users understand document content, spot risks, organize questions, and prepare checklists for discussion with a qualified lawyer. It does not replace a lawyer, provide final legal advice, litigation strategy, or case-specific determinations.
+系统以**引用优先（citation-first）**为核心设计原则——所有回答必须基于文档原文，标注来源引用。它帮助用户理解文档内容、识别风险、组织问题清单，为与律师沟通做好准备。本系统不替代律师，不提供最终法律意见、诉讼策略或个案判定。
 
-## Features
+---
 
-- Upload PDF, DOCX, TXT, or Markdown documents via REST API.
-- Index documents into a local Chroma vector store with legal-section-aware chunking
-  and hybrid vector + BM25 retrieval.
-- Ask questions grounded in retrieved excerpts with source citations.
-- Maintain a separate user memory system for preferences, conversation state,
-  task context, and feedback without mixing it into the document RAG index.
-- Run persistent task-oriented agent reviews that plan document work, stream
-  progress events, call controlled review tools, track evidence, identify
-  missing information, and produce a human-review-ready report.
-- Persist review findings as first-class matter records with severity, status,
-  evidence coverage, support level, source quote/location, and human review
-  state.
-- Generate matter artifacts including risk matrices, lawyer questions,
-  negotiation checklists, obligation calendars, and gated formal report records.
-- Clause review: assess risk level for specific clause types.
-- Conflict detection: compare contract and policy excerpts for conflicts.
-- API key authentication, configurable CORS, upload size limits, and tenant-isolated indexes.
-- Persistent background document ingestion with stage progress, warnings, and job status polling.
-- Same-name re-uploads create a new active document version; older versions are retained but excluded from retrieval.
+## 技术栈
 
-## Project Layout
+| 层级 | 技术 |
+|------|------|
+| 后端框架 | FastAPI + Uvicorn |
+| LLM 编排 | LangChain + LangGraph |
+| 向量存储 | ChromaDB |
+| 检索策略 | Hybrid（Dense + BM25 + RRF 融合 + MMR 去重） |
+| 默认 LLM | DashScope（Qwen3.5）/ DeepSeek / 任意 OpenAI-compatible |
+| Embedding | DashScope text-embedding-v3 |
+| 中文分词 | jieba |
+| 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
+| 数据持久化 | SQLite（任务/记忆/Matter） |
+| 测试 | pytest + pytest-asyncio + coverage |
+| 代码规范 | Ruff |
+
+---
+
+## 核心功能
+
+### 文档管理与检索
+
+- 支持上传 PDF、DOCX、TXT、Markdown 格式文档
+- 法律章节感知的智能分块（legal-section-aware chunking）
+- Hybrid 检索：向量语义搜索 + BM25 关键词匹配 + RRF 融合排序
+- 轻量级 lexical rerank + MMR 多样性选择，减少近似重复
+- 后台异步文档摄入，支持进度查询与阶段性警告
+- 同名重复上传自动创建新版本，旧版本保留但不参与检索
+
+### 智能问答
+
+- 基于检索结果的引用式回答，每条回答标注 `[S1]`、`[S2]` 等来源编号
+- 支持多轮对话历史
+- Tool Calling 模式：模型自主决定调用 `search_documents` 或 `web_search`
+- Answer Guard 机制：二次校验引用有效性、过强法律结论和证据缺失
+
+### Agent 工作流
+
+基于 LangGraph 的六阶段法律审查 Agent：
+
+```
+Plan → Execute → Collect Findings → Build Deliverables → Synthesize Report → Finalize
+```
+
+- **LLM Planner**：根据用户目标与文档内容自动规划审查步骤
+- **并行执行**：支持多步骤并行执行，含指数退避重试
+- **ReAct 循环**：执行阶段可启用受控 ReAct 循环，自动补充弱证据
+- **Confirmation Gates**：关键事实需用户确认后才写入正式报告
+- **Matter 管理**：审查结果持久化为 Matter 记录，含 findings、artifacts、risk matrix
+- **SSE 实时推送**：任务进度通过 Server-Sent Events 流式推送
+
+生成的交付物包括：
+- 风险矩阵（Risk Matrix）
+- 律师问题清单（Lawyer Questions）
+- 谈判 Checklist
+- 义务日历（Obligation Calendar）
+- 正式审查报告（Formal Report）
+
+### 条款审查与冲突检测
+
+- 条款审查：对特定条款类型进行风险等级评估
+- 冲突检测：比对合同条款与政策条款，识别冲突与矛盾
+
+### 用户记忆系统
+
+独立于文档 RAG 的记忆系统：
+
+- 存储用户偏好、对话上下文、任务状态和反馈
+- 支持语义去重、置信度衰减、过期清理
+- LLM 驱动的自动记忆提取
+- 对话摘要压缩为 session memory
+- 记忆注入 prompt 时作为数据处理，不作为文档证据引用
+
+### 安全与多租户
+
+- API Key 认证（`X-API-Key` 或 `Authorization: Bearer`）
+- 多租户隔离（`X-Tenant-Id` 路由到独立存储）
+- 可配置 CORS 策略
+- 上传大小限制
+- Sliding-window API 限流
+
+---
+
+## 项目结构
 
 ```text
 legal_doc_assistant/
-  api/
-    main.py            # FastAPI application entry point
-    dependencies.py    # Singleton DI (vector store, QA service)
-    jobs.py            # Persistent ingest job store
-    agent_tasks.py     # Persistent agent task store
-    task_queue.py      # Background task submission
-    routers/
-      documents.py     # POST /api/v1/documents/ingest, GET /api/v1/documents
-      chat.py          # POST /api/v1/chat/ask
-      agent.py         # Agent task lifecycle APIs
-      matters.py       # Matter CRUD and exports
-      memories.py      # CRUD for user memories
-      review.py        # POST /api/v1/review/clause, POST /api/v1/review/conflict
-    middleware/
-      rate_limit.py    # Sliding-window API rate limiting
-    schemas/
-      requests.py      # Pydantic request models
-      responses.py     # Pydantic response models
-
-  src/doc_assistant/
-    config/settings.py
-    evaluation/        # RAG metric helpers and CLI entry points
-    ingestion/         # File loading, hashing, upload persistence
-    matter/            # Matter storage and exports
-    memory/            # User memory policy, storage, retrieval
-    models/            # Chat and embedding provider adapters
-    retrieval/         # Chroma/BM25 hybrid retrieval and chunking
-    services/          # QA, review, evidence, tool calling, agent workflows
-    services/agent/    # Planner/executor schemas and helpers
-    tools/             # Optional external tools such as web search
-    prompts/           # Layered prompt templates
-    schemas/           # Shared API/domain schemas
-    utils/
-
-  data/
-    uploads/
-    vector_store/
-    eval/
-
-  tests/
+├── api/                          # FastAPI 后端
+│   ├── main.py                   # 应用入口
+│   ├── dependencies.py           # 单例依赖注入
+│   ├── jobs.py                   # 文档摄入任务存储
+│   ├── agent_tasks.py            # Agent 任务存储
+│   ├── task_queue.py             # 后台任务队列
+│   ├── sse.py                    # SSE 事件流
+│   ├── routers/
+│   │   ├── documents.py          # 文档上传与查询
+│   │   ├── chat.py               # 问答与 Tool Calling
+│   │   ├── agent.py              # Agent 任务生命周期
+│   │   ├── matters.py            # Matter CRUD 与导出
+│   │   ├── memories.py           # 用户记忆管理
+│   │   ├── review.py             # 条款审查与冲突检测
+│   │   └── feedback.py           # 反馈收集
+│   ├── middleware/
+│   │   └── rate_limit.py         # 限流中间件
+│   └── schemas/                  # Pydantic 请求/响应模型
+│
+├── src/doc_assistant/            # 核心业务逻辑
+│   ├── config/settings.py        # 全局配置（环境变量驱动）
+│   ├── models/                   # LLM 与 Embedding 适配器
+│   ├── ingestion/                # 文档加载、哈希、持久化
+│   ├── retrieval/                # Chroma + BM25 混合检索
+│   ├── services/
+│   │   ├── qa_service.py         # 问答核心逻辑
+│   │   ├── tool_calling_service.py  # Tool Calling 编排
+│   │   ├── agent_service.py      # Agent 业务逻辑入口
+│   │   ├── clause_review.py      # 条款风险评估
+│   │   ├── conflict_check.py     # 冲突检测
+│   │   ├── answer_guard.py       # 回答质量守卫
+│   │   ├── evidence.py           # 证据分析
+│   │   ├── review_taxonomy.py    # 审查分类体系
+│   │   └── agent/                # Agent 工作流子模块
+│   │       ├── planner.py        # LLM 规划器
+│   │       ├── executor.py       # 步骤执行器
+│   │       ├── workflow.py       # LangGraph 编排入口
+│   │       └── schemas.py        # Agent 领域模型
+│   ├── graphs/                   # LangGraph 状态图定义
+│   ├── memory/                   # 记忆策略、存储、检索
+│   ├── matter/                   # Matter 持久化与导出
+│   ├── tools/                    # 外部工具（Web Search 等）
+│   ├── prompts/                  # 分层 Prompt 模板
+│   ├── evaluation/               # RAG 评估指标与 CLI
+│   ├── schemas/                  # 共享领域模型
+│   └── utils/                    # 工具函数
+│
+├── frontend/                     # Vue 3 前端
+│   ├── src/
+│   │   ├── pages/                # 页面组件
+│   │   ├── components/           # 通用组件
+│   │   ├── api/                  # HTTP 客户端
+│   │   ├── stores/               # Pinia 状态管理
+│   │   └── layouts/              # 布局组件
+│   └── package.json
+│
+├── data/                         # 运行时数据（不入版本控制）
+│   ├── uploads/                  # 上传文件
+│   ├── vector_store/             # ChromaDB 持久化
+│   └── eval/                     # 评估数据集与报告
+│
+├── tests/                        # 单元/集成测试
+├── pyproject.toml                # Python 项目配置
+└── .env.example                  # 环境变量模板
 ```
 
-## Setup
+---
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10 ~ 3.12
+- Node.js 18+（前端开发）
+
+### 后端安装
 
 ```powershell
 cd E:\project\legal_doc_assistant
@@ -82,11 +178,40 @@ python -m pip install -e .
 Copy-Item .env.example .env
 ```
 
-Then edit `.env` and set the chat and embedding provider keys.
+编辑 `.env`，配置 LLM 和 Embedding 的 API Key。
 
-By default, chat uses DashScope's OpenAI-compatible endpoint. The generic
-`DOC_ASSISTANT_CHAT_API_KEY` is preferred, while `DASHSCOPE_API_KEY` is still
-accepted for backward compatibility:
+### 前端安装
+
+```powershell
+cd frontend
+npm.cmd install
+```
+
+> 如果 PowerShell 执行策略阻止了 `npm`，使用 `npm.cmd` 代替。
+
+### 启动服务
+
+```powershell
+# 启动后端 API（默认 http://localhost:8000）
+uvicorn api.main:app --reload
+
+# 启动前端开发服务器（默认 http://127.0.0.1:5173）
+cd frontend
+npm.cmd run dev
+```
+
+- 后端 API 文档：http://localhost:8000/docs
+- 前端界面：http://127.0.0.1:5173
+
+---
+
+## 配置说明
+
+所有配置通过环境变量管理，写在 `.env` 文件中。
+
+### LLM 配置
+
+默认使用 DashScope（Qwen3.5）作为 Chat 模型：
 
 ```env
 DOC_ASSISTANT_CHAT_PROVIDER=dashscope
@@ -101,16 +226,7 @@ DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
 DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
 ```
 
-This keeps Qwen3.5 models on the supported `chat/completions` path instead of
-DashScope's older text-generation endpoint, which returns `url error` for
-Qwen3.5 models. Set `DOC_ASSISTANT_ENABLE_THINKING=true` if you want to use
-thinking mode and are comfortable with the extra token usage.
-
-To switch chat generation to DeepSeek, change only the chat provider, key, and
-model. DeepSeek's official OpenAI-compatible base URL is
-`https://api.deepseek.com`; leaving `DOC_ASSISTANT_CHAT_BASE_URL` empty uses
-that provider default. Check the
-[DeepSeek API docs](https://api-docs.deepseek.com/) for current model names.
+切换到 DeepSeek：
 
 ```env
 DOC_ASSISTANT_CHAT_PROVIDER=deepseek
@@ -118,15 +234,9 @@ DOC_ASSISTANT_CHAT_API_KEY=<your-deepseek-key>
 DOC_ASSISTANT_CHAT_MODEL=deepseek-v4-flash
 DOC_ASSISTANT_CHAT_API=compatible
 DOC_ASSISTANT_CHAT_BASE_URL=
-
-# Keep retrieval embeddings separate. DeepSeek chat can run while embeddings
-# remain on DashScope.
-DOC_ASSISTANT_EMBEDDING_PROVIDER=dashscope
-DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
-DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
 ```
 
-For another OpenAI-compatible provider, use:
+使用其他 OpenAI-compatible 服务：
 
 ```env
 DOC_ASSISTANT_CHAT_PROVIDER=openai-compatible
@@ -135,49 +245,17 @@ DOC_ASSISTANT_CHAT_MODEL=<provider-model>
 DOC_ASSISTANT_CHAT_BASE_URL=https://provider.example/v1
 ```
 
-Provider-specific request fields can be passed as JSON with
-`DOC_ASSISTANT_CHAT_EXTRA_BODY`, for example:
+可通过 `DOC_ASSISTANT_CHAT_EXTRA_BODY` 传递 provider 特定参数：
 
 ```env
 DOC_ASSISTANT_CHAT_EXTRA_BODY={"reasoning_effort":"high"}
 ```
 
-Tool calling settings:
-
-```env
-DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS=6
-
-# Disabled by default so sensitive document text is not sent to public search.
-DOC_ASSISTANT_WEB_SEARCH_ENABLED=false
-DOC_ASSISTANT_WEB_SEARCH_PROVIDER=duckduckgo
-DOC_ASSISTANT_WEB_SEARCH_API_KEY=
-DOC_ASSISTANT_WEB_SEARCH_BASE_URL=
-DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
-DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
-```
-
-Agent execution settings:
-
-```env
-DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS=3
-DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES=2
-DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS=2,5
-DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED=true
-DOC_ASSISTANT_AGENT_REACT_ENABLED=true
-DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS=2
-```
-
-When `DOC_ASSISTANT_AGENT_REACT_ENABLED=true`, eligible Agent review and
-deliverable steps run a small controlled ReAct evidence loop after the planned
-tool call. The loop observes missing citations, guard warnings, and weak
-evidence, then uses whitelisted document-only actions such as `document_qa` or
-`build_evidence_profile` to repair evidence before the final report is compiled.
-
-Retrieval settings:
+### 检索配置
 
 ```env
 DOC_ASSISTANT_TOP_K=5
-DOC_ASSISTANT_RETRIEVAL_MODE=hybrid
+DOC_ASSISTANT_RETRIEVAL_MODE=hybrid       # hybrid | dense | bm25
 DOC_ASSISTANT_RETRIEVAL_FETCH_K=40
 DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE=0
 DOC_ASSISTANT_RETRIEVAL_RRF_K=60
@@ -190,37 +268,35 @@ DOC_ASSISTANT_CHUNK_SIZE=900
 DOC_ASSISTANT_CHUNK_OVERLAP=120
 ```
 
-`DOC_ASSISTANT_RETRIEVAL_MODE` supports `hybrid`, `dense`, and `bm25`.
-Hybrid mode combines Chroma vector results with in-process BM25 using reciprocal
-rank fusion, applies a lightweight local lexical rerank, then uses MMR selection
-to reduce near-duplicate chunks. `DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE`
-defaults to `0` to preserve recall until you have enough evaluation coverage to
-tune a stricter cutoff.
+`hybrid` 模式将 Chroma 向量检索与进程内 BM25 通过 Reciprocal Rank Fusion 融合，经 lexical rerank 后使用 MMR 选择减少近似重复片段。
 
-`POST /api/v1/chat/tools` lets the model call controlled tools while answering:
+### Tool Calling 配置
 
-- `search_documents`: searches uploaded/indexed documents and returns `[D#]` sources.
-- `web_search`: searches public web pages and returns `[W#]` sources.
+```env
+DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS=6
 
-Web search requires both `DOC_ASSISTANT_WEB_SEARCH_ENABLED=true` and
-`enable_web_search=true` in the request body. Supported web providers are
-`duckduckgo`, `brave`, and `bing`; Brave and Bing require
-`DOC_ASSISTANT_WEB_SEARCH_API_KEY`.
-
-Example tool-calling request:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8000/api/v1/chat/tools" `
-  -ContentType "application/json" `
-  -Body '{
-    "question": "结合最近公开新闻和已上传合同，分析供应商履约风险。",
-    "enable_web_search": true,
-    "max_tool_iterations": 6
-  }'
+# 默认禁用，避免敏感文档文本发送到公共搜索引擎
+DOC_ASSISTANT_WEB_SEARCH_ENABLED=false
+DOC_ASSISTANT_WEB_SEARCH_PROVIDER=duckduckgo   # duckduckgo | brave | bing
+DOC_ASSISTANT_WEB_SEARCH_API_KEY=
+DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
+DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
 ```
 
-Memory settings:
+### Agent 配置
+
+```env
+DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS=3
+DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES=2
+DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS=2,5
+DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED=true
+DOC_ASSISTANT_AGENT_REACT_ENABLED=true
+DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS=2
+```
+
+当 `REACT_ENABLED=true` 时，Agent 执行阶段会在计划 tool call 后运行受控 ReAct 循环：观测缺失引用、guard 警告和弱证据，然后使用白名单内的文档操作（如 `document_qa`、`build_evidence_profile`）修补证据。
+
+### 记忆配置
 
 ```env
 DOC_ASSISTANT_MEMORY_DB_PATH=
@@ -233,152 +309,116 @@ DOC_ASSISTANT_MEMORY_SESSION_TTL_HOURS=24
 DOC_ASSISTANT_MEMORY_TASK_TTL_HOURS=168
 DOC_ASSISTANT_MEMORY_MAX_ACTIVE_PER_USER=500
 DOC_ASSISTANT_MEMORY_DECAY_HALF_LIFE_DAYS=90
-DOC_ASSISTANT_MEMORY_MAINTENANCE_ENABLED=true
-DOC_ASSISTANT_MEMORY_MAINTENANCE_COOLDOWN_SECONDS=300
-DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD=12
-DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_INTERVAL=5
-DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_WINDOW=40
-DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS=800
 DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED=true
-DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MAX_ITEMS=3
-DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE=0.6
+DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD=12
+DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS=800
 ```
 
-Security and isolation settings:
+### 安全与隔离配置
 
 ```env
-# If this is empty, local API authentication is disabled.
-DOC_ASSISTANT_API_KEYS=
+DOC_ASSISTANT_API_KEYS=                         # 为空则禁用认证
 DOC_ASSISTANT_CORS_ORIGINS=http://localhost:3000,http://localhost:5173
-DOC_ASSISTANT_CORS_ALLOW_CREDENTIALS=false
 DOC_ASSISTANT_DEFAULT_TENANT_ID=default
-DOC_ASSISTANT_MAX_UPLOAD_BYTES=20971520
+DOC_ASSISTANT_MAX_UPLOAD_BYTES=20971520         # 20MB
 ```
 
-Document ingestion settings:
+### 文档摄入配置
 
 ```env
-DOC_ASSISTANT_INGEST_JOBS_DB_PATH=
-DOC_ASSISTANT_AGENT_TASKS_DB_PATH=
-DOC_ASSISTANT_MATTER_DB_PATH=
+DOC_ASSISTANT_INGEST_JOBS_DB_PATH=              # 默认 data/ingest_jobs.sqlite3
+DOC_ASSISTANT_AGENT_TASKS_DB_PATH=              # 默认 data/agent_tasks.sqlite3
+DOC_ASSISTANT_MATTER_DB_PATH=                   # 默认 data/matters.sqlite3
 DOC_ASSISTANT_PDF_OCR_ENABLED=false
 DOC_ASSISTANT_PDF_OCR_LANG=eng
 ```
 
-If `DOC_ASSISTANT_INGEST_JOBS_DB_PATH` is empty, ingest jobs are persisted at
-`data/ingest_jobs.sqlite3`. PDF OCR is optional and disabled by default. When it
-is enabled, install and configure `pdf2image`, `pytesseract`, and the local OCR
-runtime; otherwise scanned PDF pages are reported as ingest warnings instead of
-being silently indexed as empty text.
+PDF OCR 默认禁用。启用时需安装 `pdf2image`、`pytesseract` 及本地 OCR 运行时。
 
-If `DOC_ASSISTANT_AGENT_TASKS_DB_PATH` is empty, persistent agent task records
-and event streams are stored at `data/agent_tasks.sqlite3`.
-Agent task status can be `queued`, `running`, `needs_input`, `succeeded`, or
-`failed`; `needs_input` means the task was not executed because required
-context such as objective, deadline, jurisdiction, or party role is missing.
+---
 
-If `DOC_ASSISTANT_MATTER_DB_PATH` is empty, persistent matter profiles and
-generated review artifacts/findings are stored at `data/matters.sqlite3`.
-Completed Agent tasks write their `matter_profile`, generated artifacts, and
-evidence-audited `findings` into this matter store, keyed by the task's
-`matter_id`. Confirmation gates can write approved matter facts such as
-`user_side` or `governing_law` back into the Matter Profile and record them in
-`confirmed_facts`.
+## API 接口
 
-When `DOC_ASSISTANT_API_KEYS` is set, call protected endpoints with either
-`X-API-Key: <key>` or `Authorization: Bearer <key>`. Use `X-Tenant-Id` to route
-requests to a tenant-specific upload directory and Chroma collection. If the
-header is omitted, the API uses `DOC_ASSISTANT_DEFAULT_TENANT_ID`.
+### 健康检查
 
-Use `X-User-Id` to scope user memories and conversations. If it is omitted, the
-API uses `local-user`.
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| GET | `/health` | 服务健康检查 |
 
-## Memory System
+### 文档管理
 
-The memory system is intentionally separate from the document RAG index:
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/v1/documents/ingest` | 上传文档并排队摄入 |
+| GET | `/api/v1/documents/jobs/{job_id}` | 查询摄入任务状态 |
+| GET | `/api/v1/documents` | 列出已索引文档 |
 
-- Document RAG stores uploaded document chunks and returns cited source excerpts.
-- Memory stores user preferences, stable context, conversation messages, task
-  state, retrieval logs, and feedback metadata.
-- Long-term memory is written conservatively. By default, only explicit requests
-  such as "remember this" or "以后..." are promoted into active user memory.
-- Each memory includes scope, type, source, confidence, status, timestamps,
-  visibility, permissions, optional expiry, and `supersedes_id` for conflict
-  handling.
-- Retrieved memories are compressed into a `<user_memory>` prompt section and
-  are treated as data, not instructions. They never count as document evidence
-  and are not cited as `[S1]` document sources.
+### 智能问答
 
-Structured memory data is stored in SQLite at `data/memory.sqlite3` by default.
-Memory embeddings use a separate Chroma collection named by
-`DOC_ASSISTANT_MEMORY_COLLECTION`.
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/v1/chat/ask` | 基础问答（支持对话历史） |
+| POST | `/api/v1/chat/ask/stream` | SSE 流式问答 |
+| POST | `/api/v1/chat/tools` | Tool Calling 模式问答 |
+| GET | `/api/v1/chat/conversations` | 列出对话 |
+| POST | `/api/v1/chat/conversations` | 创建对话 |
+| PATCH | `/api/v1/chat/conversations/{id}` | 更新对话 |
+| GET | `/api/v1/chat/conversations/{id}/messages` | 获取对话历史消息 |
 
-## Run
+### Agent 任务
 
-```powershell
-uvicorn api.main:app --reload
-```
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/v1/agent/tasks` | 创建 Agent 审查任务 |
+| GET | `/api/v1/agent/tasks/{task_id}` | 查询任务状态与结果 |
+| POST | `/api/v1/agent/tasks/{task_id}/resume` | 补充上下文后恢复任务 |
+| GET | `/api/v1/agent/tasks/{task_id}/events` | SSE 实时进度流 |
 
-Interactive API docs: http://localhost:8000/docs
+Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `needs_input`
 
-## Frontend
+### Matter 管理
 
-The Vue frontend lives in `frontend/` and uses Vite, Vue 3, TypeScript,
-Element Plus, Vue Router, and Pinia.
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| GET | `/api/v1/matters` | 列出 Matter 记录 |
+| GET | `/api/v1/matters/{matter_id}` | 获取 Matter 详情 |
+| GET | `/api/v1/matters/{matter_id}/artifacts` | 列出生成的交付物 |
+| GET | `/api/v1/matters/{matter_id}/findings` | 列出审查发现 |
+| PATCH | `/api/v1/matters/{matter_id}/findings/{finding_id}` | 更新 finding 人工审核状态 |
+| PATCH | `/api/v1/matters/{matter_id}/confirmation-gates/{gate_id}` | 确认/放弃/请求补充 |
+| POST | `/api/v1/matters/{matter_id}/formal-report` | 生成正式报告 |
+| PATCH | `/api/v1/matters/{matter_id}/artifacts/{artifact_id}` | 更新交付物（版本化） |
+| GET | `/api/v1/matters/{matter_id}/events` | 获取审计事件 |
+| GET | `/api/v1/matters/{matter_id}/artifacts/export` | 批量导出 ZIP |
+| GET | `/api/v1/matters/{matter_id}/artifacts/{id}/export` | 单 artifact 导出 |
 
-```powershell
-cd E:\project\legal_doc_assistant\frontend
-npm.cmd install
-npm.cmd run dev
-```
+### 用户记忆
 
-Open http://127.0.0.1:5173 after the API is running. If your PowerShell
-execution policy blocks `npm`, use `npm.cmd` as shown above.
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| GET | `/api/v1/memories` | 列出活跃记忆 |
+| GET | `/api/v1/memories/stats` | 记忆健康统计 |
+| POST | `/api/v1/memories` | 创建记忆条目 |
+| POST | `/api/v1/memories/batch` | 批量创建记忆 |
+| POST | `/api/v1/memories/maintenance` | 执行维护（过期清理等） |
+| POST | `/api/v1/memories/summarize-conversation` | 对话摘要压缩 |
+| PATCH | `/api/v1/memories/{memory_id}` | 更新记忆 |
+| DELETE | `/api/v1/memories/{memory_id}` | 软删除记忆 |
+| POST | `/api/v1/memories/batch-delete` | 批量删除记忆 |
 
-Optional frontend environment file:
+### 审查与反馈
 
-```powershell
-Copy-Item .env.example .env.local
-```
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/v1/review/clause` | 条款风险评估 |
+| POST | `/api/v1/review/conflict` | 合同与政策冲突检测 |
+| POST | `/api/v1/feedback` | 提交回答反馈 |
 
-```env
-VITE_API_BASE_URL=http://localhost:8000
-```
+---
 
-## API Endpoints
+## 使用示例
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/v1/documents/ingest` | Upload a document and queue an ingest job (PDF/DOCX/TXT/MD/Markdown) |
-| GET | `/api/v1/documents/jobs/{job_id}` | Get document ingest job status |
-| GET | `/api/v1/documents` | List indexed documents |
-| POST | `/api/v1/chat/ask` | Ask a question with optional chat history |
-| POST | `/api/v1/chat/tools` | Ask with model-driven `search_documents` and optional `web_search` tools |
-| GET | `/api/v1/chat/conversations/{conversation_id}/messages` | Restore persisted chat messages for a conversation |
-| POST | `/api/v1/agent/tasks` | Create a persistent Agent task and queue background execution |
-| GET | `/api/v1/agent/tasks/{task_id}` | Get Agent task status, events, and final result |
-| POST | `/api/v1/agent/tasks/{task_id}/resume` | Resume a `needs_input` Agent task with supplemental context |
-| GET | `/api/v1/agent/tasks/{task_id}/events` | Stream Agent task progress as server-sent events |
-| GET | `/api/v1/matters` | List persisted matter profiles |
-| GET | `/api/v1/matters/{matter_id}` | Get a matter profile with generated artifacts and findings |
-| GET | `/api/v1/matters/{matter_id}/artifacts` | List generated artifacts for a matter |
-| GET | `/api/v1/matters/{matter_id}/findings` | List persisted review findings for a matter |
-| PATCH | `/api/v1/matters/{matter_id}/findings/{finding_id}` | Update a finding's human review status |
-| PATCH | `/api/v1/matters/{matter_id}/confirmation-gates/{gate_id}` | Approve, waive, or request information for a confirmation gate |
-| POST | `/api/v1/matters/{matter_id}/formal-report` | Create a gated formal report artifact |
-| GET | `/api/v1/memories` | List active user memories |
-| GET | `/api/v1/memories/stats` | Get memory health and retrieval statistics |
-| POST | `/api/v1/memories` | Create a user memory |
-| POST | `/api/v1/memories/maintenance` | Run expiry, pruning, and vector index maintenance |
-| POST | `/api/v1/memories/summarize-conversation` | Compress a conversation into session memory |
-| PATCH | `/api/v1/memories/{memory_id}` | Update a user memory |
-| DELETE | `/api/v1/memories/{memory_id}` | Soft-delete a user memory |
-| POST | `/api/v1/feedback` | Record answer feedback and adjust linked memory confidence |
-| POST | `/api/v1/review/clause` | Review a specific clause type with risk assessment |
-| POST | `/api/v1/review/conflict` | Detect conflicts between contract and policy excerpts |
-
-Example upload flow:
+### 上传文档
 
 ```powershell
 $headers = @{ "X-Tenant-Id" = "acme" }
@@ -387,27 +427,76 @@ $job = Invoke-RestMethod -Method Post `
   -Headers $headers `
   -Form @{ file = Get-Item ".\contract.pdf" }
 
+# 查询摄入进度
 Invoke-RestMethod -Method Get `
   -Uri "http://localhost:8000/api/v1/documents/jobs/$($job.job_id)" `
   -Headers $headers
 ```
 
-## Starter Evaluation
+### Tool Calling 问答
 
-Generate the starter legal PDF fixture and eval dataset:
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/api/v1/chat/tools" `
+  -ContentType "application/json" `
+  -Body '{
+    "question": "结合最近公开新闻和已上传合同，分析供应商履约风险。",
+    "enable_web_search": true,
+    "max_tool_iterations": 6
+  }'
+```
+
+### 认证请求
+
+设置 `DOC_ASSISTANT_API_KEYS` 后，请求需附带认证头：
+
+```powershell
+$headers = @{
+  "X-API-Key" = "your-api-key"
+  "X-Tenant-Id" = "acme"
+  "X-User-Id" = "user-001"
+}
+```
+
+---
+
+## Prompt 体系
+
+系统采用分层 Prompt 架构，模板位于 `src/doc_assistant/prompts/`：
+
+| 模板文件 | 用途 |
+|----------|------|
+| `base_legal_assistant.txt` | 全局身份、安全边界、证据规则、司法管辖意识 |
+| `document_qa.txt` | 结构化文档问答输出 |
+| `clause_review.txt` | 条款审查与风险评级 |
+| `conflict_check.txt` | 合同/政策冲突检测 |
+| `tool_calling_system.txt` | Tool 使用策略 |
+| `agent_planner.txt` | Agent 规划器指令 |
+| `answer_repair.txt` | 引用不合格时的二次修复 |
+| `legal_issue_spotting.txt` | 法律争点识别 |
+| `lawyer_work_product.txt` | 律师工作底稿生成 |
+| `plain_language_explain.txt` | 通俗语言解释 |
+| `general_chat.txt` | 通用对话 |
+
+---
+
+## 评估系统
+
+### 生成测试数据
 
 ```powershell
 generate-eval-fixtures
 ```
 
-Run the RAG evaluation after the configured chat and embedding provider keys
-are set:
+### 运行 RAG 评估
 
 ```powershell
 run-rag-eval --clean --concurrency 4
 ```
 
-The script writes `data/eval/latest_report.json`. Common CI usage:
+评估报告输出到 `data/eval/latest_report.json`。
+
+### CI 集成用法
 
 ```powershell
 run-rag-eval --skip-ingest `
@@ -417,59 +506,111 @@ run-rag-eval --skip-ingest `
   --min-score generation.citation_accuracy=0.9
 ```
 
-The starter dataset lives at `data/eval/eval_dataset.json`. It includes answerable,
-unanswerable, Chinese-query, and cross-document cases. `default_refusal_terms`
-defines shared refusal language, while per-case `required_refusal_terms` is only
-needed for overrides. The dataset also records a chunking config hash so eval runs
-can detect stale `chunk_id` expectations after chunking changes.
+### 检索指标
 
-Retrieval metrics:
+| 指标 | 含义 |
+|------|------|
+| `recall` | 在 top-k 中找到的 gold source 比例 |
+| `hit` | top-k 中至少命中一个 gold source 则为 1 |
+| `precision` | top-k 中属于 gold source 的比例 |
+| `mrr` | 第一个匹配 source 的倒数排名 |
+| `ndcg` | 排序质量，靠前匹配权重更高 |
 
-- `recall`: fraction of gold sources found in the top-k retrieved chunks.
-- `hit`: `1` when at least one gold source is found in top-k.
-- `precision`: fraction of the top-k retrieved chunks that match a gold source.
-- `mrr`: reciprocal rank of the first matching source.
-- `ndcg`: ranking quality with earlier matching sources weighted more heavily.
+### 生成指标
 
-Generation metrics:
+| 指标 | 含义 |
+|------|------|
+| `answer_correctness` | 必需词汇出现且禁止词汇缺席 |
+| `faithfulness` | 回答中的数字和关键词有引用上下文支撑 |
+| `citation_accuracy` | 引用的 source ID 对应 gold source |
+| `refusal_accuracy` | 不可回答问题包含预期的拒答表述 |
 
-- `answer_correctness`: required terms are present and forbidden terms are absent.
-- `faithfulness`: answer numbers and required answer terms are supported by cited context.
-- `citation_accuracy`: cited source ids map back to gold sources.
-- `refusal_accuracy`: unanswerable questions include expected refusal language.
+评估数据集 `data/eval/eval_dataset.json` 包含可回答、不可回答、中文查询和跨文档场景，并记录 chunking config hash 以检测分块变更后的陈旧预期。
 
-Interpret the report by checking `summary` first, then opening any `records[*]`
-with `status: "error"` or a low metric. Per-case failures are recorded without
-stopping the full evaluation run.
+---
 
-## Layered Prompts
+## 开发
 
-Prompts live in `src/doc_assistant/prompts/` and are composed as layered system + task messages:
+### 运行测试
 
-- `base_legal_assistant.txt`: global identity, safety boundaries, evidence rules, jurisdiction awareness, and user-mode guidance
-- `document_qa.txt`: structured document Q&A output
-- `clause_review.txt`: clause review with explicit risk rubric
-- `conflict_check.txt`: contract/policy conflict detection with conflict types
-- `tool_calling_system.txt`: tool-use policy for document search vs web search
-- `answer_repair.txt`: second-pass repair when citation guard checks fail
+```powershell
+pytest
+```
 
-Generated answers also pass through `answer_guard.py`, which checks citation validity, unsupported strong legal conclusions, and missing-evidence refusal behavior before returning low-confidence warnings to the API.
+### 代码检查
 
-## Roadmap
+```powershell
+ruff check src/ api/ tests/
+ruff format --check src/ api/ tests/
+```
 
-Near term:
+### 安装开发依赖
 
-1. Document original-text side-by-side review and editable artifact lifecycle.
-2. CI-published RAG baseline reports with regression gates.
-3. Memory evaluation dashboard for precision, staleness, conflicts, and leakage.
+```powershell
+python -m pip install -e ".[dev,eval]"
+```
 
-Mid term:
+---
 
-1. Deeper workflow policies for contract review, version comparison, dispute fact
-   organization, compliance checks, and negotiation preparation.
-2. External reranker (cross-encoder or provider rerank API) for two-stage retrieval.
+## 架构设计要点
 
-Long term:
+### 记忆系统与文档 RAG 的隔离
 
-1. JWT-based authentication and tenant administration.
-2. Expanded evaluation labels by document type, language, and workflow category.
+- **文档 RAG**：存储上传文档的分块，返回带引用标注的原文摘录
+- **用户记忆**：存储偏好、上下文、对话历史、任务状态和反馈元数据
+- 记忆仅作为 `<user_memory>` 数据注入 prompt，不参与文档证据引用
+
+### Agent 工作流设计
+
+Agent 基于 LangGraph 状态图编排，六个线性节点：
+
+1. **Plan**：LLM Planner 分析目标与文档，生成审查计划
+2. **Execute Steps**：并行执行计划步骤，每步调用 tool registry 中的工具
+3. **Collect Findings**：汇总发现，审计证据完整性
+4. **Build Deliverables**：生成 Matter Profile、artifacts 和 confirmation gates
+5. **Synthesize Report**：综合报告并通过 Answer Guard 校验
+6. **Finalize Result**：确定最终状态（`completed` / `needs_human_review`）
+
+ReAct 循环在 Execute Steps 内部运行，不改变图的拓扑结构。
+
+### 引用与证据链
+
+- 全局 `_CitationRegistry` 管理 `[S1]`、`[S2]` 编号
+- 每条 finding 关联 evidence coverage、support level 和原文位置
+- Answer Guard 校验引用有效性，不合格时触发 `answer_repair` 二次修复
+
+---
+
+## 路线图
+
+### 近期
+
+1. 文档原文并排审阅与可编辑 artifact 生命周期
+2. CI 发布 RAG baseline 报告并设置回归门控
+3. 记忆评估面板：precision、staleness、conflicts、leakage 指标
+
+### 中期
+
+1. 深化工作流策略：合同审查、版本比对、争议事实整理、合规检查、谈判准备
+2. 接入外部 reranker（cross-encoder 或 provider rerank API）实现两阶段检索
+
+### 远期
+
+1. JWT 认证与租户管理后台
+2. 按文档类型、语言和工作流类别扩展评估标签体系
+
+---
+
+## CI/CD
+
+项目使用 GitHub Actions（`.github/workflows/ci.yml`）：
+
+- **后端**：Python 3.11 + pytest 单元测试
+- **前端**：Node 20 + TypeScript 编译 + Vite 构建
+- **RAG 评估门控**：可选，需配置 LLM API secrets 后启用
+
+---
+
+## License
+
+Private project — 未开源。

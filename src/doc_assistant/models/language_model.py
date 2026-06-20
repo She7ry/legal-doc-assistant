@@ -70,6 +70,41 @@ PROVIDER_ALIASES = {
 }
 
 
+class CircuitBreaker:
+    """线程安全的熔断器：连续失败超过阈值后拒绝新请求，冷却后自动恢复。"""
+
+    def __init__(
+        self,
+        threshold: int | None = None,
+        cooldown_seconds: int | None = None,
+    ) -> None:
+        if threshold is None:
+            threshold = getattr(settings, "llm_circuit_breaker_threshold", 5)
+        if cooldown_seconds is None:
+            cooldown_seconds = getattr(settings, "llm_circuit_breaker_cooldown_seconds", 30)
+        self._threshold = threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._lock = __import__("threading").Lock()
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+
+    def ensure_allows_request(self) -> None:
+        with self._lock:
+            if self._circuit_open_until > monotonic():
+                raise RuntimeError("Circuit breaker is open after repeated failures.")
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._circuit_open_until = 0.0
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._threshold:
+                self._circuit_open_until = monotonic() + self._cooldown_seconds
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleChatModel:
     """直连 OpenAI Chat Completions API 的 HTTP 客户端（项目默认 LLM 实现）。
@@ -95,11 +130,11 @@ class OpenAICompatibleChatModel:
         repr=False,
         compare=False,
     )
-    _consecutive_failures: int = field(default=0, init=False, repr=False, compare=False)
-    _circuit_open_until: float = field(default=0.0, init=False, repr=False, compare=False)
+    _circuit_breaker: CircuitBreaker = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_session", requests.Session())
+        object.__setattr__(self, "_circuit_breaker", CircuitBreaker())
 
     def invoke(self, prompt: str | list[dict[str, Any]] | None = None, *, messages: list[dict[str, Any]] | None = None) -> str:
         if messages is not None:
@@ -366,22 +401,16 @@ class OpenAICompatibleChatModel:
         await asyncio.sleep(seconds)
 
     def _ensure_circuit_allows_request(self) -> None:
-        if self._circuit_open_until > monotonic():
+        try:
+            self._circuit_breaker.ensure_allows_request()
+        except RuntimeError:
             raise RuntimeError(f"{self.provider} circuit breaker is open after repeated failures.")
 
     def _record_request_success(self) -> None:
-        object.__setattr__(self, "_consecutive_failures", 0)
-        object.__setattr__(self, "_circuit_open_until", 0.0)
+        self._circuit_breaker.record_success()
 
     def _record_request_failure(self) -> None:
-        failures = self._consecutive_failures + 1
-        object.__setattr__(self, "_consecutive_failures", failures)
-        if failures >= settings.llm_circuit_breaker_threshold:
-            object.__setattr__(
-                self,
-                "_circuit_open_until",
-                monotonic() + settings.llm_circuit_breaker_cooldown_seconds,
-            )
+        self._circuit_breaker.record_failure()
 
     def close(self) -> None:
         self._session.close()

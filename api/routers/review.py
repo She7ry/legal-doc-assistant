@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 
 from api.dependencies import QAServiceDep, require_api_key
 from api.schemas.requests import ClauseReviewRequest, ConflictCheckRequest
@@ -15,17 +15,7 @@ router = APIRouter(prefix="/review", tags=["review"], dependencies=[Depends(requ
     summary="Review a specific clause type across indexed documents",
 )
 def review_clause(body: ClauseReviewRequest, qa_service: QAServiceDep) -> ClauseReviewResponse:
-    """
-    Search indexed documents for a clause type (e.g. "termination clause",
-    "non-compete") and return a risk assessment with source citations.
-    """
-    try:
-        answer = qa_service.review_clause(clause_type=body.clause_type, top_k=body.top_k)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
+    answer = qa_service.review_clause(clause_type=body.clause_type, top_k=body.top_k)
     return ClauseReviewResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
@@ -40,21 +30,11 @@ def review_clause(body: ClauseReviewRequest, qa_service: QAServiceDep) -> Clause
     summary="Check for conflicts between contract and policy excerpts",
 )
 def check_conflict(body: ConflictCheckRequest, qa_service: QAServiceDep) -> ConflictCheckResponse:
-    """
-    Retrieve contract excerpts (via contract_query) and policy excerpts
-    (via policy_query) from the vector store, then identify potential conflicts.
-    """
-    try:
-        answer = qa_service.check_conflict(
-            contract_query=body.contract_query,
-            policy_query=body.policy_query,
-            top_k=body.top_k,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
+    answer = qa_service.check_conflict(
+        contract_query=body.contract_query,
+        policy_query=body.policy_query,
+        top_k=body.top_k,
+    )
     return ConflictCheckResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
