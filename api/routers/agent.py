@@ -21,10 +21,8 @@ from api.dependencies import (
 from api.schemas.requests import AgentTaskRequest, AgentTaskResumeRequest
 from api.schemas.responses import AgentTaskRecordResponse, AgentTaskResponse
 from api.task_queue import submit_background_task
-from doc_assistant.services.agent_service import (
-    LegalAgentService,
-    clarification_questions_for_task,
-)
+from doc_assistant.services.agent._constants import clarification_questions_for_task
+from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.matter.store import MatterStore
 
 logger = logging.getLogger(__name__)
