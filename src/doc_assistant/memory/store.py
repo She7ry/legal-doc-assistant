@@ -1,3 +1,9 @@
+"""记忆模块 SQLite 持久层：对话、消息、记忆条目、反馈事件。
+
+``MemoryStore`` 负责 CRUD 与 schema 迁移；``MemoryService`` 在其上封装
+业务逻辑（检索、抽取、衰减）。向量语义检索见 ``memory/vector_store.py``。
+"""
+
 from __future__ import annotations
 
 import json
@@ -37,7 +43,11 @@ SCHEMA_VERSION = 2
 
 
 class MemoryStore:
-    """SQLite-backed repository for conversations and structured memories."""
+    """记忆的 SQLite 底层仓库（不含业务策略）。
+
+    表结构：users、conversations、messages、memories、feedback 等；
+    MemoryService 调用本类做 CRUD，向量检索由 MemoryVectorStore 负责。
+    """
 
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = Path(db_path or settings.memory_db_path)

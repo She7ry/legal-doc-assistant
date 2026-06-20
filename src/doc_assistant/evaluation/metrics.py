@@ -1,3 +1,5 @@
+"""RAG 评测指标：引用命中率、拒答率、MRR、nDCG 等。"""
+
 from __future__ import annotations
 
 import re
@@ -12,6 +14,8 @@ from doc_assistant.evaluation.constants import DEFAULT_REFUSAL_TERMS
 
 @dataclass(frozen=True)
 class SourceCandidate:
+    """评测脚本中的「期望引用来源」表示，用于计算 citation hit rate / MRR。"""
+
     file_name: str | None = None
     page: int | None = None
     chunk_id: int | None = None

@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
 from api.dependencies import JobStoreDep, TenantIdDep, VectorStoreDep, require_api_key
 from api.jobs import IngestJobRecord, IngestJobStore
-from api.schemas.responses import DocumentInfo, DocumentListResponse, IngestJobResponse, IngestResponse
+from api.schemas.responses import (
+    DocumentInfo,
+    DocumentListResponse,
+    DocumentTextResponse,
+    IngestJobResponse,
+    IngestResponse,
+)
 from api.task_queue import submit_background_task
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS, save_uploaded_file
@@ -71,6 +77,36 @@ def get_ingest_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingest job not found.")
 
     return _job_response(record)
+
+
+@router.get(
+    "/text",
+    response_model=DocumentTextResponse,
+    summary="Get indexed document text chunks for preview",
+)
+def get_document_text(
+    vector_store: VectorStoreDep,
+    document_key: str | None = Query(default=None, min_length=1, max_length=128),
+    file_id: str | None = Query(default=None, min_length=1, max_length=128),
+    document_version: int | None = Query(default=None, ge=1),
+) -> DocumentTextResponse:
+    try:
+        preview = vector_store.get_document_text(
+            document_key=document_key,
+            file_id=file_id,
+            document_version=document_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to load document text: {exc}",
+        ) from exc
+
+    if preview is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document text not found.")
+    return DocumentTextResponse(**preview)
 
 
 @router.get(

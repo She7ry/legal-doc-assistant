@@ -332,6 +332,14 @@ export interface MatterFormalReportCreateRequest {
   note?: string | null;
 }
 
+export interface MatterArtifactUpdateRequest {
+  title?: string | null;
+  summary?: string | null;
+  items?: Record<string, unknown>[] | null;
+  status?: "draft" | "active" | "needs_review" | "approved" | "archived" | string | null;
+  note?: string | null;
+}
+
 export interface MatterFindingUpdateRequest {
   human_review_status: "pending" | "approved" | "waived" | "needs_info" | "resolved";
   note?: string | null;
@@ -449,6 +457,21 @@ export interface DocumentInfo {
 export interface DocumentListResponse {
   documents: DocumentInfo[];
   total: number;
+}
+
+export interface DocumentTextChunk {
+  chunk_id: number | null;
+  text: string;
+  page: number | null;
+  page_label: string | null;
+  section_heading: string | null;
+  location_label: string;
+}
+
+export interface DocumentTextResponse {
+  document: DocumentInfo;
+  chunks: DocumentTextChunk[];
+  total_chunks: number;
 }
 
 export interface MemoryRecord {

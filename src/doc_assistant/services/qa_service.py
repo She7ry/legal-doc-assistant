@@ -1,3 +1,14 @@
+"""文档问答（RAG）服务：检索 → 组 prompt → 调 LLM → guard 校验。
+
+主要能力：
+- ``ask`` / ``aask``           通用问答（有文档则 RAG，无文档则 general chat）
+- ``review_clause``            按条款类型做结构化风险审查
+- ``check_conflict``           合同与政策文本冲突比对
+- ``prepare_answer``           可单独调用：只做检索与 prompt 组装，便于流式或 Agent 复用
+
+引用格式：[S1]、[S2]… 对应 ``Citation.source_id``，由 answer_guard 校验是否滥用。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -59,6 +70,12 @@ _VAGUE_QUERY_TERMS = (
 
 @dataclass(frozen=True)
 class PreparedQAAnswer:
+    """``prepare_answer()`` 的中间结果，尚未调用 LLM。
+
+    用途：把检索、记忆、prompt 组装与 ``finalize_prepared_answer()`` 拆开，
+    便于流式输出或 Agent 复用同一套检索逻辑；``messages`` 可直接发给 chat_model。
+    """
+
     messages: list[dict[str, str]]
     citations: list[Citation]
     memories_used: list[MemoryUsage]
@@ -70,6 +87,17 @@ class PreparedQAAnswer:
 
 
 class DocumentQAService:
+    """文档问答（RAG）核心服务。
+
+    职责：
+    1. 向量检索 uploaded 文档，组装带引用的 prompt
+    2. 调用 LLM 生成答案，经 answer_guard 校验并可自动修复
+    3. 提供 review_clause / check_conflict 等结构化法律审查能力
+    4. 可选接入 MemoryService，注入用户长期记忆与对话历史
+
+    Agent 与 ToolCalling 都依赖本类的 vector_store 与 chat_model。
+    """
+
     def __init__(
         self,
         vector_store: DocumentVectorStore | None = None,
@@ -97,6 +125,7 @@ class DocumentQAService:
         task_id: str | None = None,
         merge_persisted_history: bool = True,
     ) -> QAAnswer:
+        """同步问答：检索 → 组 prompt → 调 LLM → guard 校验（可自动 repair）。"""
         prepared = self.prepare_answer(
             question,
             chat_history=chat_history,
@@ -117,6 +146,7 @@ class DocumentQAService:
         task_id: str | None = None,
         merge_persisted_history: bool = True,
     ) -> QAAnswer:
+        """异步版 ``ask``，适合 FastAPI 等 async 路由。"""
         prepared = await asyncio.to_thread(
             self.prepare_answer,
             question,
@@ -136,6 +166,7 @@ class DocumentQAService:
         *,
         repair: bool = True,
     ) -> QAAnswer:
+        """答案后处理：guard 校验 → 必要时自动修复 → 记录对话 → 构建证据画像。"""
         guard_result = validate_answer(
             content,
             prepared.citations,
@@ -173,6 +204,11 @@ class DocumentQAService:
         task_id: str | None = None,
         merge_persisted_history: bool = True,
     ) -> PreparedQAAnswer:
+        """问答准备阶段：加载记忆与历史 → 改写检索 query → 向量检索 → 组装 prompt。
+
+        无检索结果时切换 general_prompt，避免模型假装有文档依据。
+        记忆服务失败时静默降级，不阻断主流程。
+        """
         resolved_conversation_id = conversation_id
         memory_candidates: list[MemoryCandidate] = []
         memory_context = "No relevant user memory."
@@ -215,12 +251,12 @@ class DocumentQAService:
                 )
                 memory_context = self.memory_service.format_for_prompt(memory_candidates)
             except Exception:
-                logger.debug(
+                # 记忆读写失败不阻断问答，仅记录告警并继续无记忆上下文。
+                logger.warning(
                     "Memory enrichment failed; continuing without memory context.",
-                    extra={"tenant_id": self.tenant_id, "user_id": user_id},
+                    extra={"tenant_id": self.tenant_id, "user_id": user_id, "memory_available": False},
                     exc_info=True,
                 )
-                # Memory failure should not prevent citation-first document QA.
                 memory_candidates = []
                 memory_context = "No relevant user memory."
 
@@ -248,6 +284,7 @@ class DocumentQAService:
             else []
         )
         if not documents:
+            # 向量库无命中：明确告知模型无文档上下文，走通用对话 prompt。
             task_prompt = self.general_prompt.format(
                 question=question,
                 chat_history=chat_history_text,
@@ -306,7 +343,7 @@ class DocumentQAService:
         )
 
     def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
-        """Search indexed documents for a specific clause type and assess risk level."""
+        """按条款类型检索文档并输出结构化风险审查（高/中/低 + 理由 + 引用）。"""
         profile = resolve_clause_profile(clause_type)
         documents = self.vector_store.search(profile.expanded_query(clause_type), k=top_k)
         if not documents:
@@ -346,7 +383,7 @@ class DocumentQAService:
         )
 
     def check_conflict(self, contract_query: str, policy_query: str, top_k: int | None = None) -> QAAnswer:
-        """Retrieve contract and policy excerpts separately, then check for conflicts."""
+        """分别检索合同与政策片段，比对义务/定义是否冲突并输出结构化结论。"""
         contract_docs = self.vector_store.search(contract_query, k=top_k)
         policy_docs = self.vector_store.search(policy_query, k=top_k)
 
@@ -942,6 +979,7 @@ class DocumentQAService:
         return " " + " ".join(f"[{source_id}]" for source_id in refs) if refs else ""
 
     def _format_context(self, documents: list[Document]) -> tuple[str, list[Citation]]:
+        """把检索到的 Document 列表格式化为 prompt 上下文 + Citation 列表（编号 S1,S2…）。"""
         return self._format_context_prefixed(documents, prefix="S")
 
     def _format_context_prefixed(
@@ -1098,7 +1136,7 @@ class DocumentQAService:
                 conversation_id=conversation_id,
             )
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Assistant message persistence failed.",
                 extra={"tenant_id": self.tenant_id, "user_id": user_id},
                 exc_info=True,
@@ -1126,7 +1164,7 @@ class DocumentQAService:
                 memories=memory_candidates,
             )
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Retrieval logging failed.",
                 extra={"tenant_id": self.tenant_id, "user_id": user_id},
                 exc_info=True,

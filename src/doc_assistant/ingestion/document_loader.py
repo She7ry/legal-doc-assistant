@@ -1,3 +1,9 @@
+"""文档解析与上传：PDF / DOCX / TXT → LangChain Document 列表。
+
+``load_documents`` 按扩展名选 loader；PDF 可选 OCR（settings.pdf_ocr_enabled）。
+``save_uploaded_file`` 将 API 上传的字节写入 ``data/uploads/``。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -20,6 +26,7 @@ _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main
 
 
 def file_sha256(path: Path) -> str:
+    """计算文件 SHA-256，用作 file_id 与去重依据。"""
     digest = hashlib.sha256()
     with path.open("rb") as file:
         for block in iter(lambda: file.read(1024 * 1024), b""):
@@ -38,7 +45,7 @@ def _safe_file_name(name: str) -> str:
 
 
 def save_uploaded_file(file_name: str, content: bytes, tenant_id: str | None = None) -> Path:
-    """Save raw bytes to the uploads directory and return the saved path."""
+    """将 API 上传的原始字节写入 ``data/uploads/``（可按 tenant 分子目录）。"""
     safe_name = _safe_file_name(file_name)
     upload_dir = settings.upload_dir
     if tenant_id:
@@ -51,6 +58,7 @@ def save_uploaded_file(file_name: str, content: bytes, tenant_id: str | None = N
 
 
 def load_documents(path: Path) -> list[Document]:
+    """按扩展名解析 PDF/DOCX/TXT，返回带 file_name、source metadata 的 Document 列表。"""
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {suffix}")
@@ -71,6 +79,7 @@ def load_documents(path: Path) -> list[Document]:
 
 
 def _load_pdf_documents(path: Path) -> list[Document]:
+    """PyPDF 逐页解析；空页记录警告，可选 OCR 回填（settings.pdf_ocr_enabled）。"""
     documents = PyPDFLoader(str(path)).load()
     empty_pages = []
 

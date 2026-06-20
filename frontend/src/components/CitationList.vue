@@ -11,6 +11,17 @@
           <el-tag size="small" type="primary" effect="dark">{{ citation.source_id }}</el-tag>
           <el-tag size="small" effect="plain">{{ citation.source_type || "document" }}</el-tag>
           <strong>{{ citation.file_name }}</strong>
+          <span v-if="canOpenCitation(citation)" class="citation-item__actions">
+            <el-tooltip content="查看原文" placement="top">
+              <el-button
+                :icon="View"
+                size="small"
+                circle
+                plain
+                @click="openCitation(citation)"
+              />
+            </el-tooltip>
+          </span>
         </div>
         <div class="citation-item__meta">
           <span v-if="citation.page_label">{{ citation.page_label }}</span>
@@ -29,9 +40,39 @@
 </template>
 
 <script setup lang="ts">
+import { View } from "@element-plus/icons-vue";
+import { useRouter } from "vue-router";
+
 import type { Citation } from "../api/types";
 
 defineProps<{
   citations: Citation[];
 }>();
+
+const router = useRouter();
+
+function canOpenCitation(citation: Citation) {
+  const sourceType = (citation.source_type || "document").toLowerCase();
+  return sourceType === "document" && Boolean(citation.document_key || citation.file_id);
+}
+
+function openCitation(citation: Citation) {
+  const query: Record<string, string> = {};
+  if (citation.document_key) {
+    query.document_key = citation.document_key;
+  }
+  if (citation.file_id) {
+    query.file_id = citation.file_id;
+  }
+  if (citation.document_version) {
+    query.document_version = String(citation.document_version);
+  }
+  if (citation.chunk_id !== null && citation.chunk_id !== undefined) {
+    query.chunk_id = String(citation.chunk_id);
+  }
+  if (citation.source_id) {
+    query.source_id = citation.source_id;
+  }
+  void router.push({ path: "/documents", query });
+}
 </script>

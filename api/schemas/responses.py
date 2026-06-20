@@ -712,6 +712,21 @@ class DocumentListResponse(BaseModel):
     total: int
 
 
+class DocumentTextChunkOut(BaseModel):
+    chunk_id: int | None = None
+    text: str
+    page: int | None = None
+    page_label: str | None = None
+    section_heading: str | None = None
+    location_label: str = ""
+
+
+class DocumentTextResponse(BaseModel):
+    document: DocumentInfo
+    chunks: list[DocumentTextChunkOut]
+    total_chunks: int
+
+
 class MemoryOut(BaseModel):
     memory_id: str
     scope: str

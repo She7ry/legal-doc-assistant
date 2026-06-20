@@ -279,3 +279,115 @@ def test_search_cache_avoids_repeating_dense_and_bm25_work(monkeypatch) -> None:
 
     assert first[0].page_content == second[0].page_content
     assert calls == {"dense": 1, "bm25": 1}
+
+
+def test_get_document_text_returns_latest_active_chunks_in_order() -> None:
+    class PreviewChroma:
+        def get(self, include=None):
+            assert include == ["metadatas", "documents"]
+            return {
+                "ids": ["v1-0", "v2-1", "v2-0", "other"],
+                "metadatas": [
+                    {
+                        "active": False,
+                        "document_key": "contract",
+                        "file_id": "old-file",
+                        "file_name": "contract.pdf",
+                        "document_version": 1,
+                        "chunk_id": 0,
+                    },
+                    {
+                        "active": True,
+                        "document_key": "contract",
+                        "file_id": "new-file",
+                        "file_name": "contract.pdf",
+                        "document_version": 2,
+                        "file_extension": ".pdf",
+                        "indexed_at": "2026-06-17T00:00:00+00:00",
+                        "document_count": 2,
+                        "page_count": 2,
+                        "warning_count": 1,
+                        "page": 1,
+                        "chunk_id": 1,
+                        "section_heading": "2. Payment",
+                    },
+                    {
+                        "active": True,
+                        "document_key": "contract",
+                        "file_id": "new-file",
+                        "file_name": "contract.pdf",
+                        "document_version": 2,
+                        "file_extension": ".pdf",
+                        "indexed_at": "2026-06-17T00:00:00+00:00",
+                        "document_count": 2,
+                        "page_count": 2,
+                        "page": 0,
+                        "chunk_id": 0,
+                    },
+                    {
+                        "active": True,
+                        "document_key": "policy",
+                        "file_id": "policy-file",
+                        "file_name": "policy.pdf",
+                        "document_version": 1,
+                        "chunk_id": 0,
+                    },
+                ],
+                "documents": [
+                    "Old text.",
+                    "Payment is due in 30 days.",
+                    "Intro text.",
+                    "Policy text.",
+                ],
+            }
+
+    store = object.__new__(DocumentVectorStore)
+    store.vector_store = PreviewChroma()
+
+    preview = store.get_document_text(document_key="contract")
+
+    assert preview is not None
+    assert preview["document"]["file_id"] == "new-file"
+    assert preview["document"]["document_version"] == 2
+    assert preview["document"]["chunk_count"] == 2
+    assert [chunk["chunk_id"] for chunk in preview["chunks"]] == [0, 1]
+    assert preview["chunks"][0]["text"] == "Intro text."
+    assert preview["chunks"][1]["location_label"] == "page 2, chunk 1, 2. Payment"
+
+
+def test_get_document_text_can_load_requested_inactive_version() -> None:
+    class PreviewChroma:
+        def get(self, include=None):
+            assert include == ["metadatas", "documents"]
+            return {
+                "ids": ["v1-0", "v2-0"],
+                "metadatas": [
+                    {
+                        "active": False,
+                        "document_key": "contract",
+                        "file_id": "old-file",
+                        "file_name": "contract.pdf",
+                        "document_version": 1,
+                        "chunk_id": 0,
+                    },
+                    {
+                        "active": True,
+                        "document_key": "contract",
+                        "file_id": "new-file",
+                        "file_name": "contract.pdf",
+                        "document_version": 2,
+                        "chunk_id": 0,
+                    },
+                ],
+                "documents": ["Old text.", "New text."],
+            }
+
+    store = object.__new__(DocumentVectorStore)
+    store.vector_store = PreviewChroma()
+
+    preview = store.get_document_text(document_key="contract", document_version=1)
+
+    assert preview is not None
+    assert preview["document"]["file_id"] == "old-file"
+    assert preview["document"]["document_version"] == 1
+    assert preview["chunks"][0]["text"] == "Old text."

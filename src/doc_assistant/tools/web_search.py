@@ -1,3 +1,5 @@
+"""网页搜索工具：DuckDuckGo / Brave / Bing，供 ToolCallingChatService 可选启用。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +21,8 @@ _DOMAIN_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
 
 @dataclass(frozen=True)
 class WebSearchResult:
+    """搜索引擎返回的单条结果（尚未分配 [Wx] 编号，由 ToolCalling 层转换）。"""
+
     title: str
     url: str
     snippet: str = ""
@@ -27,6 +31,12 @@ class WebSearchResult:
 
 
 class WebSearchClient:
+    """网页搜索抽象基类；子类实现 DuckDuckGo / Brave / Bing。
+
+    ``search`` 为同步入口；``async_search`` 默认在线程池里调用 search，
+    供 async API 使用。子类只需实现 ``search``。
+    """
+
     def search(
         self,
         query: str,
@@ -55,6 +65,8 @@ class WebSearchClient:
 
 
 class DisabledWebSearchClient(WebSearchClient):
+    """占位客户端：未开启 DOC_ASSISTANT_WEB_SEARCH_ENABLED 时使用，调用即报错。"""
+
     def search(
         self,
         query: str,
@@ -67,6 +79,8 @@ class DisabledWebSearchClient(WebSearchClient):
 
 
 class DuckDuckGoSearchClient(WebSearchClient):
+    """通过 DuckDuckGo HTML 接口抓取搜索结果，无需 API Key，适合本地开发。"""
+
     def __init__(
         self,
         base_url: str = DUCKDUCKGO_HTML_URL,
@@ -108,6 +122,8 @@ class DuckDuckGoSearchClient(WebSearchClient):
 
 
 class BraveSearchClient(WebSearchClient):
+    """Brave Search API 客户端，需配置 BRAVE_SEARCH_API_KEY，支持时效与域名过滤。"""
+
     def __init__(
         self,
         api_key: str,
@@ -161,6 +177,8 @@ class BraveSearchClient(WebSearchClient):
 
 
 class BingSearchClient(WebSearchClient):
+    """Microsoft Bing Web Search API v7 客户端，需配置 BING_SEARCH_API_KEY。"""
+
     def __init__(
         self,
         api_key: str,
@@ -213,7 +231,13 @@ class BingSearchClient(WebSearchClient):
         ]
 
 
+# ---------------------------------------------------------------------------
+# 工厂与辅助函数
+# ---------------------------------------------------------------------------
+
+
 def build_web_search_client() -> WebSearchClient:
+    """根据 settings.web_search_provider 返回对应客户端；未启用时返回 DisabledWebSearchClient。"""
     if not settings.web_search_enabled:
         return DisabledWebSearchClient()
 
@@ -237,6 +261,8 @@ def build_web_search_client() -> WebSearchClient:
 
 
 class _DuckDuckGoHTMLParser(HTMLParser):
+    """解析 DuckDuckGo HTML 搜索结果页，提取 title / url / snippet。"""
+
     def __init__(self) -> None:
         super().__init__()
         self._items: list[dict[str, str]] = []
@@ -292,6 +318,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
 
 
 def _with_domain_filters(query: str, domains: list[str] | None) -> str:
+    """把 site:domain 过滤附加到搜索 query（Bing/Brave 原生支持，DuckDuckGo 靠 query 语法）。"""
     clean_domains = [_clean_domain(domain) for domain in domains or [] if domain.strip()]
     if not clean_domains:
         return query
@@ -302,6 +329,7 @@ def _with_domain_filters(query: str, domains: list[str] | None) -> str:
 
 
 def _clean_domain(domain: str) -> str:
+    """规范化并校验域名过滤器，防止注入非法 host。"""
     candidate = domain.strip().lower()
     parsed = urlparse(candidate if "://" in candidate else f"//{candidate}")
     if parsed.netloc:
@@ -321,6 +349,7 @@ def _get_with_retries(
     timeout: int,
     max_retries: int,
 ) -> requests.Response:
+    """带指数退避的 GET 重试，429/5xx 会重试直到 max_retries。"""
     attempts = max(1, max_retries)
     last_error: requests.RequestException | None = None
     for attempt in range(attempts):
@@ -375,6 +404,7 @@ def _bing_recency_filter(recency_days: int | None) -> str | None:
 
 
 def _decode_duckduckgo_url(value: str) -> str:
+    """DuckDuckGo 结果链接常是 /l/?uddg= 跳转，解析出真实目标 URL。"""
     url = value.strip()
     if url.startswith("//"):
         url = "https:" + url

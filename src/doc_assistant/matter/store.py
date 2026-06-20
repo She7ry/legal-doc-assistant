@@ -1,3 +1,5 @@
+"""案件（matter）SQLite 持久化：档案、finding、artifact 与审计事件。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -14,6 +16,8 @@ from doc_assistant.config.settings import settings
 
 @dataclass(frozen=True)
 class MatterArtifactRecord:
+    """持久化到 MatterStore 的单条交付物（风险矩阵、谈判清单等）。"""
+
     artifact_id: str
     matter_id: str
     tenant_id: str
@@ -34,6 +38,8 @@ class MatterArtifactRecord:
 
 @dataclass(frozen=True)
 class MatterFindingRecord:
+    """持久化到 MatterStore 的单条风险 finding，可跟踪人工复核状态。"""
+
     finding_id: str
     matter_id: str
     tenant_id: str
@@ -61,6 +67,8 @@ class MatterFindingRecord:
 
 @dataclass(frozen=True)
 class MatterEventRecord:
+    """案件审计日志：finding/artifact 状态变更、人工确认等操作的 before/after 快照。"""
+
     event_id: str
     matter_id: str
     tenant_id: str
@@ -76,6 +84,8 @@ class MatterEventRecord:
 
 @dataclass(frozen=True)
 class MatterRecord:
+    """一个法律「案件」的主记录：关联 profile、最新 task、可选嵌套 findings/artifacts。"""
+
     matter_id: str
     tenant_id: str
     user_id: str
@@ -91,7 +101,11 @@ class MatterRecord:
 
 
 class MatterStore:
-    """SQLite-backed repository for matter profiles and generated artifacts."""
+    """案件数据的 SQLite 仓库。
+
+    职责：创建/更新 matter、同步 Agent 产出的 finding 与 artifact、
+    记录审计事件、支持按 tenant/user 查询与版本化 artifact。
+    """
 
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = Path(db_path or settings.matter_db_path)
@@ -107,6 +121,12 @@ class MatterStore:
         matter_id: str,
         result: dict[str, Any],
     ) -> MatterRecord:
+        """将 Agent 任务结果写入/更新 matter。
+
+        source_task_id 记录首次创建该 matter 的任务；
+        latest_task_id 随每次 upsert 更新，表示最近一次写入来源。
+        finding/artifact 按 ID 去重合并，并记录变更事件供审计追溯。
+        """
         profile = result.get("matter_profile")
         if not isinstance(profile, dict):
             profile = {"matter_id": matter_id, "open_questions": ["Matter profile was not produced."]}
@@ -209,6 +229,7 @@ class MatterStore:
         include_artifacts: bool = False,
         include_findings: bool = False,
     ) -> MatterRecord | None:
+        """按 matter_id 读取案件；可选一并加载 artifacts / findings 列表。"""
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -312,6 +333,119 @@ class MatterStore:
                 (matter_id, tenant_id, user_id, max(1, min(limit, 500))),
             ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def update_artifact(
+        self,
+        *,
+        matter_id: str,
+        tenant_id: str,
+        user_id: str,
+        artifact_id: str,
+        title: str | None = None,
+        summary: str | None = None,
+        items: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+        note: str | None = None,
+        updated_by: str | None = None,
+    ) -> MatterRecord | None:
+        now = _utc_now()
+        normalized_artifact_id = _clean_text(artifact_id)
+        actor = _clean_text(updated_by) or user_id
+
+        with self._connect() as connection, self._lock:
+            if self.get(matter_id, tenant_id, user_id) is None:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM matter_artifacts
+                WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
+                """,
+                (matter_id, tenant_id, user_id, normalized_artifact_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(normalized_artifact_id)
+
+            old_artifact = _row_to_artifact(row)
+            next_title = _clean_text(title) if title is not None else old_artifact.title
+            next_summary = _clean_text(summary) if summary is not None else old_artifact.summary
+            next_items = items if items is not None else old_artifact.items
+            next_status = _clean_text(status) or old_artifact.status
+            next_version = old_artifact.version + 1
+            metadata = dict(old_artifact.metadata)
+            edit = {
+                "status": next_status,
+                "note": _clean_text(note),
+                "updated_by": actor,
+                "updated_at": _datetime_to_db(now),
+                "version": next_version,
+            }
+            edits = _as_dict_list(metadata.get("edits"))
+            metadata["edits"] = [*edits[-19:], edit]
+            metadata["last_edit"] = edit
+
+            connection.execute(
+                """
+                UPDATE matter_artifacts
+                SET title = ?, summary = ?, items_json = ?, metadata_json = ?,
+                    version = ?, status = ?, updated_at = ?
+                WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
+                """,
+                (
+                    next_title or old_artifact.title,
+                    next_summary,
+                    json.dumps(_as_dict_list(next_items), ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False),
+                    next_version,
+                    next_status,
+                    _datetime_to_db(now),
+                    matter_id,
+                    tenant_id,
+                    user_id,
+                    normalized_artifact_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE matters
+                SET updated_at = ?
+                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
+                """,
+                (_datetime_to_db(now), matter_id, tenant_id, user_id),
+            )
+            self._emit_event(
+                connection,
+                matter_id=matter_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="artifact_updated",
+                entity_type="artifact",
+                entity_id=normalized_artifact_id,
+                old_value={
+                    "title": old_artifact.title,
+                    "summary": old_artifact.summary,
+                    "items": old_artifact.items,
+                    "status": old_artifact.status,
+                    "version": old_artifact.version,
+                },
+                new_value={
+                    "title": next_title or old_artifact.title,
+                    "summary": next_summary,
+                    "items": _as_dict_list(next_items),
+                    "status": next_status,
+                    "version": next_version,
+                    "note": _clean_text(note),
+                },
+                actor=actor,
+                created_at=now,
+            )
+
+        return self.get(
+            matter_id,
+            tenant_id,
+            user_id,
+            include_artifacts=True,
+            include_findings=True,
+        )
 
     def update_confirmation_gate(
         self,

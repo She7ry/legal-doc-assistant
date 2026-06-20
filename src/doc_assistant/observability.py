@@ -1,3 +1,5 @@
+"""轻量可观测性：为检索/入库等操作记录耗时与错误日志。"""
+
 from __future__ import annotations
 
 import logging
@@ -11,6 +13,7 @@ logger = logging.getLogger("doc_assistant")
 
 @contextmanager
 def traced_operation(operation: str, **context: Any) -> Iterator[None]:
+    """上下文管理器：记录 operation 名称、耗时(ms) 与可选 context 字段到日志。"""
     start = time.perf_counter()
     try:
         yield

@@ -508,10 +508,17 @@ textarea {
 }
 
 .citation-item__title strong {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+.citation-item__actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .citation-item__meta {
@@ -1152,6 +1159,10 @@ textarea {
   gap: 10px;
 }
 
+.artifact-edit-form .el-select {
+  width: 100%;
+}
+
 .raw-answer {
   border-top: 1px solid #edf1f7;
 }
@@ -1182,6 +1193,82 @@ textarea {
 
 .document-table {
   width: 100%;
+}
+
+.document-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.document-preview__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid #edf1f7;
+  padding-bottom: 14px;
+}
+
+.document-preview__header h3 {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.document-preview__header p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #6a7689;
+  font-size: 12px;
+}
+
+.document-preview__tags {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.document-preview__chunks {
+  display: grid;
+  gap: 10px;
+}
+
+.document-preview-chunk {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.document-preview-chunk--highlighted {
+  border-color: #1f5fbf;
+  background: #f3f8ff;
+  box-shadow: inset 3px 0 0 #1f5fbf;
+}
+
+.document-preview-chunk__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #6a7689;
+  font-size: 12px;
+}
+
+.document-preview-chunk p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: #172033;
+  font-size: 13px;
+  line-height: 1.65;
 }
 
 .settings-page {

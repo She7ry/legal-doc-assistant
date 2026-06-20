@@ -1,3 +1,5 @@
+"""Agent 可调用的外部工具（网页搜索等）及 tool 元数据注册表。"""
+
 from doc_assistant.tools.web_search import (
     DisabledWebSearchClient,
     WebSearchClient,

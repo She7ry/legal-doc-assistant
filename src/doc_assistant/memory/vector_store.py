@@ -1,3 +1,5 @@
+"""记忆向量索引：与文档 RAG 索引分离，避免用户偏好被当作合同证据检索。"""
+
 from __future__ import annotations
 
 import json
@@ -16,11 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryVectorStore:
-    """Dedicated vector index for memory records.
-
-    This must stay separate from the document RAG index so preferences and task
-    state are never retrieved as document evidence.
-    """
+    """专用 Chroma 集合，仅存 MemoryRecord 的 embedding，供语义去重与检索。"""
 
     def __init__(
         self,

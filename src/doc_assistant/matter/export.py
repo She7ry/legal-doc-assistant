@@ -1,3 +1,5 @@
+"""案件（matter）导出：将 artifact / finding 转为 Markdown、DOCX、PDF 字节流。"""
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -39,6 +41,7 @@ def render_artifact_markdown(
     matter: MatterRecord,
     artifact: MatterArtifactRecord,
 ) -> str:
+    """把单个 artifact 渲染为可下载的 Markdown 报告（含 matter profile 与 items）。"""
     profile = matter.matter_profile
     lines = [
         f"# {artifact.title}",

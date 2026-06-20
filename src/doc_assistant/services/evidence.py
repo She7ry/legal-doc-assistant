@@ -1,3 +1,9 @@
+"""证据画像：把答案拆成主张（claims）并评估每条是否有引用支持。
+
+供 QA、ToolCalling、Agent 在 metadata / finding 审计中使用；
+support_level 分为 direct（直接支持）、partial（部分支持）、missing（缺失）。
+"""
+
 from __future__ import annotations
 
 import re
@@ -56,6 +62,7 @@ STOPWORDS = {
     "within",
     "would",
 }
+# 主张与引用片段的 token 重叠率阈值：≥0.45 为直接支持，≥0.20 为部分支持。
 DIRECT_SUPPORT_THRESHOLD = 0.45
 PARTIAL_SUPPORT_THRESHOLD = 0.20
 
@@ -65,6 +72,11 @@ def build_evidence_profile(
     citations: Sequence[Citation],
     guard_issues: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    """将答案拆分为可审计主张（claims），逐条评估引用支持度。
+
+    返回 support_level（direct / partial / missing）、证据摘录、
+    不支持的主张列表，供 Agent finding 审计与报告闸门使用。
+    """
     citations_by_id = {citation.source_id.upper(): citation for citation in citations}
     claims = []
     unsupported_claims = []
@@ -111,7 +123,13 @@ def build_evidence_profile(
     }
 
 
+# ---------------------------------------------------------------------------
+# 内部辅助：主张拆分、token 重叠打分、事实术语匹配
+# ---------------------------------------------------------------------------
+
+
 def _candidate_claims(answer: str) -> list[str]:
+    """从答案逐行提取可审计主张，过滤标题、元信息和过短行。"""
     claims = []
     for raw_line in (answer or "").splitlines():
         line = raw_line.strip()
@@ -150,6 +168,7 @@ def _support_level(
     support_score: float,
     unsupported_facts: list[str],
 ) -> str:
+    """判定主张的支持等级：missing（无引用）/ partial（部分匹配）/ direct（充分支持）。"""
     if not cited_ids:
         return "missing"
     if not valid_ids:
@@ -166,6 +185,7 @@ def _support_level(
 
 
 def _support_score(claim: str, cited_text: str) -> float:
+    """用主张与引用片段的 token 重叠率估算支持度（Jaccard 式比率）。"""
     claim_tokens = _material_tokens(_strip_source_refs(claim))
     if not claim_tokens:
         return 1.0 if cited_text.strip() else 0.0
