@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-import json
 import logging
 from time import sleep
 
@@ -20,6 +19,7 @@ from api.dependencies import (
 )
 from api.schemas.requests import AgentTaskRequest, AgentTaskResumeRequest
 from api.schemas.responses import AgentTaskRecordResponse, AgentTaskResponse
+from api.sse import SSE_HEADERS, format_sse
 from api.task_queue import submit_background_task
 from doc_assistant.services.agent._constants import clarification_questions_for_task
 from doc_assistant.services.agent_service import LegalAgentService
@@ -44,12 +44,6 @@ def create_agent_task(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> AgentTaskRecordResponse:
-    """
-    Create a persistent Agent task and run it in the background.
-
-    Use GET /agent/tasks/{task_id} to retrieve the latest status and
-    GET /agent/tasks/{task_id}/events for server-sent progress events.
-    """
     record = task_store.create(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -60,14 +54,9 @@ def create_agent_task(
         conversation_id=body.conversation_id,
         matter_id=body.matter_id,
     )
-    clarification_questions = clarification_questions_for_task(body.objective, body.focus_areas)
-    if clarification_questions:
-        task_store.mark_needs_input(record.task_id, clarification_questions)
-        updated = task_store.get(record.task_id, tenant_id, user_id) or record
-        return AgentTaskRecordResponse.from_record(updated)
-
-    enqueue_agent_task(record, agent_service, task_store, matter_store)
-    return AgentTaskRecordResponse.from_record(record)
+    return _check_clarification_and_enqueue(
+        record, agent_service, task_store, matter_store, tenant_id, user_id,
+    )
 
 
 @router.post(
@@ -102,36 +91,23 @@ def resume_agent_task(
             detail="Provide an updated objective or at least one clarification answer.",
         )
 
-    objective = _compose_resumed_objective(
-        original_objective=record.objective,
-        objective_override=objective_override,
-        clarification_answers=clarification_answers,
-    )
-    focus_areas = body.focus_areas if body.focus_areas is not None else record.focus_areas
-    user_role = body.user_role or record.user_role
-    max_steps = body.max_steps or record.max_steps
-    conversation_id = body.conversation_id or record.conversation_id
-    matter_id = body.matter_id or record.matter_id
-
     resumed = task_store.resume_with_input(
         task_id,
-        objective=objective,
-        focus_areas=focus_areas,
-        user_role=user_role,
-        max_steps=max_steps,
-        conversation_id=conversation_id,
-        matter_id=matter_id,
+        objective=_compose_resumed_objective(
+            original_objective=record.objective,
+            objective_override=objective_override,
+            clarification_answers=clarification_answers,
+        ),
+        focus_areas=body.focus_areas if body.focus_areas is not None else record.focus_areas,
+        user_role=body.user_role or record.user_role,
+        max_steps=body.max_steps or record.max_steps,
+        conversation_id=body.conversation_id or record.conversation_id,
+        matter_id=body.matter_id or record.matter_id,
         clarification_answers=clarification_answers,
     )
-
-    clarification_questions = clarification_questions_for_task(resumed.objective, resumed.focus_areas)
-    if clarification_questions:
-        task_store.mark_needs_input(task_id, clarification_questions)
-        updated = task_store.get(task_id, tenant_id, user_id) or resumed
-        return AgentTaskRecordResponse.from_record(updated)
-
-    enqueue_agent_task(resumed, agent_service, task_store, matter_store)
-    return AgentTaskRecordResponse.from_record(resumed)
+    return _check_clarification_and_enqueue(
+        resumed, agent_service, task_store, matter_store, tenant_id, user_id,
+    )
 
 
 @router.get(
@@ -169,12 +145,13 @@ def stream_agent_task_events(
     return StreamingResponse(
         _agent_task_event_stream(task_store, task_id, tenant_id, user_id, after_event_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
+
+
+# ------------------------------------------------------------------
+# Background execution
+# ------------------------------------------------------------------
 
 
 def _run_agent_task(
@@ -240,6 +217,28 @@ def enqueue_agent_task(
     )
 
 
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+
+def _check_clarification_and_enqueue(
+    record: AgentTaskRecord,
+    agent_service: LegalAgentService,
+    task_store: AgentTaskStore,
+    matter_store: MatterStore,
+    tenant_id: str,
+    user_id: str,
+) -> AgentTaskRecordResponse:
+    questions = clarification_questions_for_task(record.objective, record.focus_areas)
+    if questions:
+        task_store.mark_needs_input(record.task_id, questions)
+        updated = task_store.get(record.task_id, tenant_id, user_id) or record
+        return AgentTaskRecordResponse.from_record(updated)
+    enqueue_agent_task(record, agent_service, task_store, matter_store)
+    return AgentTaskRecordResponse.from_record(record)
+
+
 def _agent_task_event_stream(
     task_store: AgentTaskStore,
     task_id: str,
@@ -253,14 +252,14 @@ def _agent_task_event_stream(
     while True:
         events = task_store.events_after(task_id, tenant_id, user_id, last_event_id)
         if events is None:
-            yield _sse("error", {"detail": "Agent task not found."})
+            yield format_sse("error", {"detail": "Agent task not found."})
             return
 
         if events:
             idle_ticks = 0
         for event in events:
             last_event_id = event.event_id
-            yield _sse(
+            yield format_sse(
                 event.event_type,
                 {
                     "event_id": event.event_id,
@@ -286,7 +285,7 @@ def _agent_task_event_stream(
 
         idle_ticks += 1
         if idle_ticks % 15 == 0:
-            yield _sse(
+            yield format_sse(
                 "heartbeat",
                 {
                     "task_id": task_id,
@@ -296,12 +295,6 @@ def _agent_task_event_stream(
                 },
             )
         sleep(0.8)
-
-
-def _sse(event: str, data: object, *, event_id: int | None = None) -> str:
-    encoded = json.dumps(jsonable_encoder(data), ensure_ascii=False)
-    prefix = f"id: {event_id}\n" if event_id is not None else ""
-    return f"{prefix}event: {event}\ndata: {encoded}\n\n"
 
 
 def _compose_resumed_objective(
@@ -320,7 +313,7 @@ def _compose_resumed_objective(
 
 def _clean_text_list(values: list[str]) -> list[str]:
     result = []
-    seen = set()
+    seen: set[str] = set()
     for value in values:
         text = _clean_text(value)
         if not text:

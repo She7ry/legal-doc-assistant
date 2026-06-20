@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from enum import Enum
 import json
 from pathlib import Path
@@ -9,6 +8,15 @@ import sqlite3
 from threading import Lock
 from typing import Any
 from uuid import uuid4
+
+from api.store_helpers import (
+    clamp_progress,
+    datetime_from_db,
+    datetime_to_db,
+    ensure_column,
+    json_or_none,
+    utc_now,
+)
 
 
 class AgentTaskStatus(str, Enum):
@@ -27,7 +35,7 @@ class AgentTaskEventRecord:
     stage: str
     progress: int
     message: str
-    created_at: datetime
+    created_at: "datetime"
     step_id: str | None = None
     payload: dict[str, Any] | None = None
 
@@ -46,9 +54,9 @@ class AgentTaskRecord:
     status: AgentTaskStatus
     stage: str
     progress: int
-    submitted_at: datetime
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
+    submitted_at: "datetime"
+    started_at: "datetime | None" = None
+    completed_at: "datetime | None" = None
     result: dict[str, Any] | None = None
     error: str | None = None
     events: list[AgentTaskEventRecord] | None = None
@@ -91,7 +99,7 @@ class AgentTaskStore:
             status=AgentTaskStatus.QUEUED,
             stage="queued",
             progress=0,
-            submitted_at=_utc_now(),
+            submitted_at=utc_now(),
             events=[],
         )
         with self._lock:
@@ -162,7 +170,7 @@ class AgentTaskStore:
             record.status = AgentTaskStatus.RUNNING
             record.stage = "planning"
             record.progress = 5
-            record.started_at = _utc_now()
+            record.started_at = utc_now()
             self._save_record(record)
             self._append_event(
                 task_id,
@@ -186,7 +194,7 @@ class AgentTaskStore:
         with self._lock:
             record = self._require_record(task_id)
             record.stage = stage
-            record.progress = _clamp_progress(progress)
+            record.progress = clamp_progress(progress)
             self._save_record(record)
             self._append_event(
                 task_id,
@@ -204,7 +212,7 @@ class AgentTaskStore:
             record.status = AgentTaskStatus.SUCCEEDED
             record.stage = "completed"
             record.progress = 100
-            record.completed_at = _utc_now()
+            record.completed_at = utc_now()
             record.result = result
             record.error = None
             self._save_record(record)
@@ -287,7 +295,7 @@ class AgentTaskStore:
             record.status = AgentTaskStatus.FAILED
             record.stage = "failed"
             record.progress = 100
-            record.completed_at = _utc_now()
+            record.completed_at = utc_now()
             record.error = error
             self._save_record(record)
             self._append_event(
@@ -297,6 +305,10 @@ class AgentTaskStore:
                 progress=100,
                 message=error,
             )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _require_record(self, task_id: str) -> AgentTaskRecord:
         record = self._get_record(task_id) if self.db_path else self._tasks[task_id]
@@ -338,11 +350,11 @@ class AgentTaskStore:
             task_id=task_id,
             event_type=event_type,
             stage=stage,
-            progress=_clamp_progress(progress),
+            progress=clamp_progress(progress),
             message=message,
             step_id=step_id,
             payload=payload or {},
-            created_at=_utc_now(),
+            created_at=utc_now(),
         )
         self._events.setdefault(task_id, []).append(event)
         return replace(event)
@@ -379,7 +391,7 @@ class AgentTaskStore:
                 )
                 """
             )
-            _ensure_column(connection, "agent_tasks", "matter_id", "TEXT")
+            ensure_column(connection, "agent_tasks", "matter_id", "TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_task_events (
@@ -440,10 +452,10 @@ class AgentTaskStore:
                     record.status.value,
                     record.stage,
                     record.progress,
-                    _datetime_to_db(record.submitted_at),
-                    _datetime_to_db(record.started_at),
-                    _datetime_to_db(record.completed_at),
-                    _json_or_none(record.result),
+                    datetime_to_db(record.submitted_at),
+                    datetime_to_db(record.started_at),
+                    datetime_to_db(record.completed_at),
+                    json_or_none(record.result),
                     record.error,
                     record.task_id,
                 ),
@@ -468,7 +480,7 @@ class AgentTaskStore:
         step_id: str | None,
         payload: dict[str, Any] | None,
     ) -> AgentTaskEventRecord:
-        created_at = _utc_now()
+        created_at = utc_now()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -482,11 +494,11 @@ class AgentTaskStore:
                     task_id,
                     event_type,
                     stage,
-                    _clamp_progress(progress),
+                    clamp_progress(progress),
                     message,
                     step_id,
                     json.dumps(payload or {}, ensure_ascii=False),
-                    _datetime_to_db(created_at),
+                    datetime_to_db(created_at),
                 ),
             )
             event_id = int(cursor.lastrowid)
@@ -495,7 +507,7 @@ class AgentTaskStore:
             task_id=task_id,
             event_type=event_type,
             stage=stage,
-            progress=_clamp_progress(progress),
+            progress=clamp_progress(progress),
             message=message,
             step_id=step_id,
             payload=payload or {},
@@ -531,14 +543,6 @@ class AgentTaskStore:
         )
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _clamp_progress(value: int) -> int:
-    return max(0, min(int(value), 100))
-
-
 def _record_to_row(record: AgentTaskRecord) -> tuple[object, ...]:
     return (
         record.task_id,
@@ -553,10 +557,10 @@ def _record_to_row(record: AgentTaskRecord) -> tuple[object, ...]:
         record.status.value,
         record.stage,
         record.progress,
-        _datetime_to_db(record.submitted_at),
-        _datetime_to_db(record.started_at),
-        _datetime_to_db(record.completed_at),
-        _json_or_none(record.result),
+        datetime_to_db(record.submitted_at),
+        datetime_to_db(record.started_at),
+        datetime_to_db(record.completed_at),
+        json_or_none(record.result),
         record.error,
     )
 
@@ -575,9 +579,9 @@ def _row_to_record(row: sqlite3.Row) -> AgentTaskRecord:
         status=AgentTaskStatus(row["status"]),
         stage=row["stage"],
         progress=row["progress"],
-        submitted_at=_datetime_from_db(row["submitted_at"]) or _utc_now(),
-        started_at=_datetime_from_db(row["started_at"]),
-        completed_at=_datetime_from_db(row["completed_at"]),
+        submitted_at=datetime_from_db(row["submitted_at"]) or utc_now(),
+        started_at=datetime_from_db(row["started_at"]),
+        completed_at=datetime_from_db(row["completed_at"]),
         result=json.loads(row["result_json"]) if row["result_json"] else None,
         error=row["error"],
         events=[],
@@ -594,38 +598,5 @@ def _event_row_to_record(row: sqlite3.Row) -> AgentTaskEventRecord:
         message=row["message"],
         step_id=row["step_id"],
         payload=json.loads(row["payload_json"] or "{}"),
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
+        created_at=datetime_from_db(row["created_at"]) or utc_now(),
     )
-
-
-def _ensure_column(
-    connection: sqlite3.Connection,
-    table_name: str,
-    column_name: str,
-    column_definition: str,
-) -> None:
-    columns = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
-    if column_name not in columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-
-
-def _datetime_to_db(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _datetime_from_db(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _json_or_none(value: dict[str, Any] | None) -> str | None:
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False)

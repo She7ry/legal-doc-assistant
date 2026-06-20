@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from api.dependencies import MatterStoreDep, TenantIdDep, UserIdDep, require_api_key
+from api.routers.helpers import get_fields_set, require_found
 from api.schemas.requests import (
     MatterArtifactUpdateRequest,
     MatterConfirmationGateUpdateRequest,
@@ -29,6 +30,15 @@ from doc_assistant.matter.export import (
 
 router = APIRouter(prefix="/matters", tags=["matters"], dependencies=[Depends(require_api_key)])
 
+_MATTER_404 = "Matter not found."
+
+
+def _get_matter(matter_store, matter_id, tenant_id, user_id, **kwargs):
+    return require_found(
+        matter_store.get(matter_id, tenant_id, user_id, **kwargs),
+        _MATTER_404,
+    )
+
 
 @router.get(
     "",
@@ -43,7 +53,7 @@ def list_matters(
 ) -> MatterListResponse:
     matters = matter_store.list(tenant_id, user_id, limit=limit)
     return MatterListResponse(
-        matters=[MatterRecordOut.from_record(matter) for matter in matters],
+        matters=[MatterRecordOut.from_record(m) for m in matters],
         total=len(matters),
     )
 
@@ -59,15 +69,8 @@ def get_matter(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> MatterRecordOut:
-    matter = matter_store.get(
-        matter_id,
-        tenant_id,
-        user_id,
-        include_artifacts=True,
-        include_findings=True,
-    )
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
+    matter = _get_matter(matter_store, matter_id, tenant_id, user_id,
+                         include_artifacts=True, include_findings=True)
     return MatterRecordOut.from_record(matter)
 
 
@@ -101,9 +104,7 @@ def update_matter_confirmation_gate(
             detail="Confirmation gate not found.",
         ) from exc
 
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return MatterRecordOut.from_record(matter)
+    return MatterRecordOut.from_record(require_found(matter, _MATTER_404))
 
 
 @router.post(
@@ -127,14 +128,9 @@ def create_matter_formal_report(
             note=body.note,
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return MatterRecordOut.from_record(matter)
+    return MatterRecordOut.from_record(require_found(matter, _MATTER_404))
 
 
 @router.get(
@@ -148,10 +144,10 @@ def list_matter_artifacts(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> list[MatterArtifactRecordOut]:
-    artifacts = matter_store.list_artifacts(matter_id, tenant_id, user_id)
-    if artifacts is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return [MatterArtifactRecordOut.from_record(artifact) for artifact in artifacts]
+    artifacts = require_found(
+        matter_store.list_artifacts(matter_id, tenant_id, user_id), _MATTER_404,
+    )
+    return [MatterArtifactRecordOut.from_record(a) for a in artifacts]
 
 
 @router.patch(
@@ -167,7 +163,7 @@ def update_matter_artifact(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> MatterRecordOut:
-    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    fields_set = get_fields_set(body)
     if not fields_set:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -192,9 +188,7 @@ def update_matter_artifact(
             detail="Artifact not found.",
         ) from exc
 
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return MatterRecordOut.from_record(matter)
+    return MatterRecordOut.from_record(require_found(matter, _MATTER_404))
 
 
 @router.get(
@@ -208,10 +202,10 @@ def list_matter_findings(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> list[MatterFindingRecordOut]:
-    findings = matter_store.list_findings(matter_id, tenant_id, user_id)
-    if findings is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return [MatterFindingRecordOut.from_record(finding) for finding in findings]
+    findings = require_found(
+        matter_store.list_findings(matter_id, tenant_id, user_id), _MATTER_404,
+    )
+    return [MatterFindingRecordOut.from_record(f) for f in findings]
 
 
 @router.get(
@@ -226,10 +220,10 @@ def list_matter_events(
     user_id: UserIdDep,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[MatterEventOut]:
-    events = matter_store.list_events(matter_id, tenant_id, user_id, limit=limit)
-    if events is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return [MatterEventOut.from_record(event) for event in events]
+    events = require_found(
+        matter_store.list_events(matter_id, tenant_id, user_id, limit=limit), _MATTER_404,
+    )
+    return [MatterEventOut.from_record(e) for e in events]
 
 
 @router.patch(
@@ -261,9 +255,7 @@ def update_matter_finding(
             detail="Finding not found.",
         ) from exc
 
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
-    return MatterRecordOut.from_record(matter)
+    return MatterRecordOut.from_record(require_found(matter, _MATTER_404))
 
 
 @router.get(
@@ -277,15 +269,8 @@ def export_matter_artifacts(
     user_id: UserIdDep,
     format: str = Query(default="docx", pattern="^(markdown|docx|pdf|both)$"),
 ) -> Response:
-    matter = matter_store.get(
-        matter_id,
-        tenant_id,
-        user_id,
-        include_artifacts=True,
-        include_findings=True,
-    )
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
+    matter = _get_matter(matter_store, matter_id, tenant_id, user_id,
+                         include_artifacts=True, include_findings=True)
 
     artifacts = matter.artifacts or []
     if not artifacts:
@@ -294,11 +279,7 @@ def export_matter_artifacts(
             detail="Matter has no generated artifacts to export.",
         )
 
-    content = render_artifacts_zip(
-        matter=matter,
-        artifacts=artifacts,
-        export_format=format,
-    )
+    content = render_artifacts_zip(matter=matter, artifacts=artifacts, export_format=format)
     filename = artifact_bundle_filename(matter_id, format)
     return Response(
         content=content,
@@ -319,22 +300,11 @@ def export_matter_artifact(
     user_id: UserIdDep,
     format: str = Query(default="markdown", pattern="^(markdown|docx|pdf)$"),
 ) -> Response:
-    matter = matter_store.get(
-        matter_id,
-        tenant_id,
-        user_id,
-        include_artifacts=True,
-        include_findings=True,
-    )
-    if matter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
+    matter = _get_matter(matter_store, matter_id, tenant_id, user_id,
+                         include_artifacts=True, include_findings=True)
 
     artifact = next(
-        (
-            item
-            for item in matter.artifacts or []
-            if item.artifact_id == artifact_id
-        ),
+        (item for item in matter.artifacts or [] if item.artifact_id == artifact_id),
         None,
     )
     if artifact is None:
@@ -345,9 +315,7 @@ def export_matter_artifact(
         filename = artifact_docx_filename(matter_id, artifact_id, artifact.version)
         return Response(
             content=content,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 

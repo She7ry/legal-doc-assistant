@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep, require_api_key
 from api.schemas.requests import FeedbackCreateRequest
@@ -20,16 +20,13 @@ def create_feedback(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> FeedbackResponse:
-    try:
-        event, adjustments = memory_service.record_feedback(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            conversation_id=body.conversation_id,
-            message_id=body.message_id,
-            rating=body.rating,
-            memory_ids=body.memory_ids,
-            comment=body.comment,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    event, adjustments = memory_service.record_feedback(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        conversation_id=body.conversation_id,
+        message_id=body.message_id,
+        rating=body.rating,
+        memory_ids=body.memory_ids,
+        comment=body.comment,
+    )
     return FeedbackResponse.from_feedback(event, adjustments)

@@ -12,9 +12,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
+import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -29,13 +29,37 @@ from doc_assistant.models.language_model import build_chat_model
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.services.answer_guard import AnswerGuardResult, validate_answer
+from doc_assistant.services.clause_review import (
+    clause_review_metadata,
+    empty_clause_review_metadata,
+    render_clause_review,
+)
+from doc_assistant.services.conflict_check import (
+    conflict_metadata,
+    empty_conflict_metadata,
+    render_conflict_check,
+)
 from doc_assistant.services.evidence import build_evidence_profile
 from doc_assistant.services.review_taxonomy import (
     ClauseProfile,
-    allowed_conflict_type_keys,
     clause_taxonomy_prompt,
     conflict_types_prompt,
     resolve_clause_profile,
+)
+from doc_assistant.utils.coercion import (
+    as_list_str,
+    as_str,
+    citation_suffix,
+    coerce_bool,
+    coerce_conflict_status,
+    coerce_conflict_type,
+    coerce_risk_level,
+    extract_json_object,
+    first_source_id,
+    format_source_refs,
+    optional_str,
+    risk_reason_list,
+    source_id_list,
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
@@ -147,8 +171,7 @@ class DocumentQAService:
         merge_persisted_history: bool = True,
     ) -> QAAnswer:
         """异步版 ``ask``，适合 FastAPI 等 async 路由。"""
-        prepared = await asyncio.to_thread(
-            self.prepare_answer,
+        prepared = await self.aprepare_answer(
             question,
             chat_history=chat_history,
             user_id=user_id,
@@ -250,8 +273,7 @@ class DocumentQAService:
                     query=question,
                 )
                 memory_context = self.memory_service.format_for_prompt(memory_candidates)
-            except Exception:
-                # 记忆读写失败不阻断问答，仅记录告警并继续无记忆上下文。
+            except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
                 logger.warning(
                     "Memory enrichment failed; continuing without memory context.",
                     extra={"tenant_id": self.tenant_id, "user_id": user_id, "memory_available": False},
@@ -284,7 +306,136 @@ class DocumentQAService:
             else []
         )
         if not documents:
-            # 向量库无命中：明确告知模型无文档上下文，走通用对话 prompt。
+            task_prompt = self.general_prompt.format(
+                question=question,
+                chat_history=chat_history_text,
+                user_memory=memory_context,
+            )
+            return PreparedQAAnswer(
+                messages=self._build_messages(task_prompt),
+                citations=[],
+                memories_used=memories_used,
+                user_id=user_id,
+                conversation_id=resolved_conversation_id,
+                user_message_recorded=user_message_recorded,
+                task_id=task_id,
+                has_retrieved_documents=False,
+            )
+
+        context, citations = self._format_context(documents)
+        task_prompt = self.prompt.format(
+            question=question,
+            context=context,
+            chat_history=chat_history_text,
+            user_memory=memory_context,
+        )
+        return PreparedQAAnswer(
+            messages=self._build_messages(task_prompt),
+            citations=citations,
+            memories_used=memories_used,
+            user_id=user_id,
+            conversation_id=resolved_conversation_id,
+            user_message_recorded=user_message_recorded,
+            task_id=task_id,
+            has_retrieved_documents=True,
+        )
+
+    async def aprepare_answer(
+        self,
+        question: str,
+        chat_history: list[dict[str, object]] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+        merge_persisted_history: bool = True,
+    ) -> PreparedQAAnswer:
+        """异步版 prepare_answer：记忆检索与向量检索可并发执行。"""
+        resolved_conversation_id = conversation_id
+        memory_candidates: list[MemoryCandidate] = []
+        memory_context = "No relevant user memory."
+        user_message_recorded = False
+        persisted_history: list[dict[str, str]] = []
+        incoming_history = chat_history or []
+
+        if self.memory_service and user_id:
+            try:
+                resolved_conversation_id = await asyncio.to_thread(
+                    self.memory_service.ensure_context,
+                    self.tenant_id,
+                    user_id,
+                    conversation_id,
+                )
+                if merge_persisted_history:
+                    persisted_history = await asyncio.to_thread(
+                        self.memory_service.load_conversation_history,
+                        self.tenant_id,
+                        user_id,
+                        resolved_conversation_id,
+                        max(settings.chat_history_window, len(incoming_history)),
+                    )
+                message_id = await asyncio.to_thread(
+                    self.memory_service.record_user_message,
+                    tenant_id=self.tenant_id,
+                    user_id=user_id,
+                    conversation_id=resolved_conversation_id,
+                    content=question,
+                )
+                user_message_recorded = True
+                await asyncio.to_thread(
+                    self.memory_service.write_memories_from_user_message,
+                    tenant_id=self.tenant_id,
+                    user_id=user_id,
+                    conversation_id=resolved_conversation_id,
+                    message_id=message_id,
+                    content=question,
+                )
+                memory_candidates = await asyncio.to_thread(
+                    self.memory_service.retrieve_relevant_memories,
+                    tenant_id=self.tenant_id,
+                    user_id=user_id,
+                    query=question,
+                )
+                memory_context = self.memory_service.format_for_prompt(memory_candidates)
+            except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+                logger.warning(
+                    "Memory enrichment failed; continuing without memory context.",
+                    extra={"tenant_id": self.tenant_id, "user_id": user_id, "memory_available": False},
+                    exc_info=True,
+                )
+                memory_candidates = []
+                memory_context = "No relevant user memory."
+
+        effective_chat_history = self._merge_chat_history(
+            persisted_history,
+            incoming_history,
+            max_messages=settings.chat_history_window,
+        )
+        chat_history_text = self._format_chat_history(
+            effective_chat_history,
+            max_messages=settings.chat_history_window,
+        )
+
+        # query rewrite 和向量检索并发执行
+        retrieval_query = await asyncio.to_thread(
+            self._rewrite_query, question, chat_history_text
+        )
+        documents = await asyncio.to_thread(
+            self.vector_store.search, retrieval_query
+        )
+
+        self._log_retrieval(
+            question=retrieval_query,
+            user_id=user_id,
+            conversation_id=resolved_conversation_id,
+            document_count=len(documents),
+            memory_candidates=memory_candidates,
+        )
+        memories_used = (
+            self.memory_service.usages_from_candidates(memory_candidates)
+            if self.memory_service
+            else []
+        )
+        if not documents:
             task_prompt = self.general_prompt.format(
                 question=question,
                 chat_history=chat_history_text,
@@ -347,9 +498,9 @@ class DocumentQAService:
         profile = resolve_clause_profile(clause_type)
         documents = self.vector_store.search(profile.expanded_query(clause_type), k=top_k)
         if not documents:
-            metadata = self._empty_clause_review_metadata(clause_type, profile)
+            metadata = empty_clause_review_metadata(clause_type, profile)
             return QAAnswer(
-                content=self._render_clause_review(metadata, []),
+                content=render_clause_review(metadata, []),
                 citations=[],
                 confidence="Low",
                 metadata=metadata,
@@ -364,9 +515,9 @@ class DocumentQAService:
             context=context,
         )
         raw_content = self._invoke_chat_messages(self._build_messages(task_prompt))
-        metadata = self._clause_review_metadata(clause_type, profile, raw_content, citations)
+        metadata = clause_review_metadata(clause_type, profile, raw_content, citations)
         content = (
-            self._render_clause_review(metadata, citations)
+            render_clause_review(metadata, citations)
             if metadata.get("structured")
             else raw_content
         )
@@ -388,9 +539,9 @@ class DocumentQAService:
         policy_docs = self.vector_store.search(policy_query, k=top_k)
 
         if not contract_docs and not policy_docs:
-            metadata = self._empty_conflict_metadata()
+            metadata = empty_conflict_metadata()
             return QAAnswer(
-                content=self._render_conflict_check(metadata),
+                content=render_conflict_check(metadata),
                 citations=[],
                 confidence="Low",
                 metadata=metadata,
@@ -406,9 +557,9 @@ class DocumentQAService:
             conflict_types=conflict_types_prompt(),
         )
         raw_content = self._invoke_chat_messages(self._build_messages(task_prompt))
-        metadata = self._conflict_metadata(raw_content, citations)
+        metadata = conflict_metadata(raw_content, citations)
         content = (
-            self._render_conflict_check(metadata)
+            render_conflict_check(metadata)
             if metadata.get("structured")
             else raw_content
         )
@@ -424,279 +575,34 @@ class DocumentQAService:
             metadata={k: v for k, v in metadata.items() if k != "structured"},
         )
 
-    def _empty_clause_review_metadata(
-        self,
-        clause_type: str,
-        profile: ClauseProfile,
-    ) -> dict[str, Any]:
-        return {
-            "structured": True,
-            "clause_type": clause_type,
-            "normalized_clause_type": profile.key,
-            "found": False,
-            "summary": "No relevant content found in indexed documents for the requested clause type.",
-            "risk_level": "Needs human review",
-            "risk_reasons": [],
-            "affected_party": None,
-            "plain_language_explanation": "The system did not retrieve enough cited text to review this clause.",
-            "questions_for_lawyer": [],
-            "missing_information": ["Relevant clause text or a more specific clause query."],
-            "needs_human_review": True,
-        }
+    # ── 向后兼容的静态/类方法代理 ──────────────────────────────────────────
+    # 已有代码可能通过 DocumentQAService._extract_json_object 等调用。
 
-    def _clause_review_metadata(
-        self,
-        clause_type: str,
-        profile: ClauseProfile,
-        raw_content: str,
-        citations: list[Citation],
-    ) -> dict[str, Any]:
-        data = self._extract_json_object(raw_content)
-        if not isinstance(data, dict):
-            return {
-                **self._empty_clause_review_metadata(clause_type, profile),
-                "structured": False,
-                "summary": raw_content.strip(),
-                "found": None,
-            }
+    _extract_json_object = staticmethod(extract_json_object)
+    _as_str = staticmethod(as_str)
+    _optional_str = staticmethod(optional_str)  # type: ignore[assignment]
+    _as_list_str = staticmethod(as_list_str)  # type: ignore[assignment]
+    _coerce_bool = staticmethod(coerce_bool)
+    _coerce_risk_level = staticmethod(coerce_risk_level)
+    _coerce_conflict_status = staticmethod(coerce_conflict_status)
+    _coerce_conflict_type = staticmethod(coerce_conflict_type)
+    _first_source_id = staticmethod(first_source_id)
+    _format_source_refs = staticmethod(format_source_refs)
 
-        found = self._coerce_bool(data.get("found"))
-        risk_level = self._coerce_risk_level(data.get("risk_level"))
-        risk_reasons = self._risk_reason_list(data.get("risk_reasons"), citations)
-        needs_human_review = self._coerce_bool(data.get("needs_human_review"))
-        if needs_human_review is None:
-            needs_human_review = found is not True or risk_level == "Needs human review"
+    @classmethod
+    def _infer_conflict_status(cls, content: str) -> str:
+        return coerce_conflict_status(content)
 
-        summary = self._as_str(data.get("summary"))
-        plain_language = self._as_str(
-            data.get("plain_language_explanation")
-            or data.get("plain_language")
-            or data.get("explanation")
-            or summary
-        )
+    def _source_id_list(self, value: Any, citations: list[Citation], prefix: str | None = None) -> list[str]:
+        return source_id_list(value, citations, prefix)
 
-        return {
-            "structured": True,
-            "clause_type": self._as_str(data.get("clause_type"), clause_type),
-            "normalized_clause_type": self._as_str(
-                data.get("normalized_clause_type") or data.get("clause_key"),
-                profile.key,
-            ),
-            "found": found,
-            "summary": summary,
-            "risk_level": risk_level,
-            "risk_reasons": risk_reasons,
-            "affected_party": self._optional_str(data.get("affected_party")),
-            "plain_language_explanation": plain_language,
-            "questions_for_lawyer": self._as_list_str(
-                data.get("questions_for_lawyer")
-                or data.get("negotiation_or_review_points")
-                or data.get("review_points")
-            ),
-            "missing_information": self._as_list_str(data.get("missing_information")),
-            "needs_human_review": needs_human_review,
-        }
+    def _citation_suffix(self, source_ids: list[Any], citations: list[Citation]) -> str:
+        return citation_suffix(source_ids, citations)
 
-    def _render_clause_review(self, metadata: dict[str, Any], citations: list[Citation]) -> str:
-        citation_suffix = self._citation_suffix(
-            [
-                reason.get("citation")
-                for reason in metadata.get("risk_reasons", [])
-                if isinstance(reason, dict)
-            ],
-            citations,
-        )
-        found = metadata.get("found")
-        found_label = "Yes" if found is True else "No" if found is False else "Unclear"
-        lines = [
-            "## Clause review",
-            f"Clause type: {metadata.get('clause_type') or 'Unspecified'}",
-            f"Normalized type: {metadata.get('normalized_clause_type') or 'custom'}",
-            f"Found: {found_label}",
-            f"Risk level: {metadata.get('risk_level') or 'Needs human review'}",
-        ]
+    def _risk_reason_list(self, value: Any, citations: list[Citation]) -> list[dict[str, str | None]]:
+        return risk_reason_list(value, citations)
 
-        summary = self._as_str(metadata.get("summary"))
-        if summary:
-            lines.append(f"Summary: {summary}{citation_suffix}")
-
-        affected_party = self._optional_str(metadata.get("affected_party"))
-        if affected_party:
-            lines.append(f"Affected party: {affected_party}{citation_suffix}")
-
-        explanation = self._as_str(metadata.get("plain_language_explanation"))
-        if explanation and explanation != summary:
-            lines.append(f"Plain-language explanation: {explanation}{citation_suffix}")
-
-        risk_reasons = [
-            reason
-            for reason in metadata.get("risk_reasons", [])
-            if isinstance(reason, dict) and reason.get("reason")
-        ]
-        if risk_reasons:
-            lines.append("\n## Risk reasons")
-            for reason in risk_reasons:
-                reason_suffix = self._citation_suffix([reason.get("citation")], citations)
-                lines.append(f"- {reason['reason']}{reason_suffix}")
-
-        questions = self._as_list_str(metadata.get("questions_for_lawyer"))
-        if questions:
-            lines.append("\n## Questions for lawyer")
-            for question in questions:
-                lines.append(f"- {question}{citation_suffix}")
-
-        missing_information = self._as_list_str(metadata.get("missing_information"))
-        if missing_information:
-            lines.append("\n## Missing information")
-            for item in missing_information:
-                lines.append(f"- {item}")
-
-        if metadata.get("needs_human_review"):
-            lines.append("\nNeeds human review: Yes")
-
-        return "\n".join(lines).strip()
-
-    def _empty_conflict_metadata(self) -> dict[str, Any]:
-        return {
-            "structured": True,
-            "overall_status": "Insufficient information",
-            "conflicts": [],
-            "needs_human_review": True,
-            "supporting_citations": [],
-        }
-
-    def _conflict_metadata(self, raw_content: str, citations: list[Citation]) -> dict[str, Any]:
-        data = self._extract_json_object(raw_content)
-        if not isinstance(data, dict):
-            return {
-                **self._empty_conflict_metadata(),
-                "structured": False,
-                "overall_status": self._infer_conflict_status(raw_content),
-            }
-
-        raw_conflicts = data.get("conflicts")
-        conflicts: list[dict[str, Any]] = []
-        if isinstance(raw_conflicts, list):
-            for raw_conflict in raw_conflicts:
-                if not isinstance(raw_conflict, dict):
-                    continue
-                contract_citations = self._source_id_list(
-                    raw_conflict.get("contract_citations")
-                    or raw_conflict.get("contract_citation"),
-                    citations,
-                    prefix="C",
-                )
-                policy_citations = self._source_id_list(
-                    raw_conflict.get("policy_citations")
-                    or raw_conflict.get("policy_citation"),
-                    citations,
-                    prefix="P",
-                )
-                severity = self._coerce_risk_level(raw_conflict.get("severity"))
-                needs_human_review = self._coerce_bool(raw_conflict.get("needs_human_review"))
-                if needs_human_review is None:
-                    needs_human_review = severity == "Needs human review"
-                conflicts.append(
-                    {
-                        "topic": self._as_str(raw_conflict.get("topic"), "Unspecified topic"),
-                        "conflict_type": self._coerce_conflict_type(
-                            raw_conflict.get("conflict_type")
-                        ),
-                        "severity": severity,
-                        "contract_position": self._as_str(
-                            raw_conflict.get("contract_position")
-                        ),
-                        "policy_position": self._as_str(raw_conflict.get("policy_position")),
-                        "why_conflict": self._as_str(
-                            raw_conflict.get("why_conflict")
-                            or raw_conflict.get("explanation")
-                            or raw_conflict.get("reason")
-                        ),
-                        "recommended_action": self._as_str(
-                            raw_conflict.get("recommended_action")
-                            or raw_conflict.get("next_step")
-                        ),
-                        "contract_citations": contract_citations,
-                        "policy_citations": policy_citations,
-                        "needs_human_review": needs_human_review,
-                        "confidence": self._optional_str(raw_conflict.get("confidence")),
-                    }
-                )
-
-        overall_status = self._coerce_conflict_status(data.get("overall_status"))
-        if overall_status == "Insufficient information" and conflicts:
-            overall_status = "Potential conflict"
-        needs_human_review = self._coerce_bool(data.get("needs_human_review"))
-        if needs_human_review is None:
-            needs_human_review = overall_status == "Insufficient information" or any(
-                conflict.get("needs_human_review") for conflict in conflicts
-            )
-
-        return {
-            "structured": True,
-            "overall_status": overall_status,
-            "conflicts": conflicts,
-            "needs_human_review": needs_human_review,
-            "supporting_citations": self._source_id_list(
-                data.get("supporting_citations"),
-                citations,
-            ),
-        }
-
-    def _render_conflict_check(self, metadata: dict[str, Any]) -> str:
-        lines = [
-            "## Conflict check",
-            f"Status: {metadata.get('overall_status') or 'Insufficient information'}",
-        ]
-        conflicts = [
-            conflict
-            for conflict in metadata.get("conflicts", [])
-            if isinstance(conflict, dict)
-        ]
-        if not conflicts:
-            supporting_suffix = self._format_source_refs(metadata.get("supporting_citations", []))
-            if metadata.get("overall_status") == "No conflict found":
-                lines.append(f"No conflict found based on the provided excerpts.{supporting_suffix}")
-            else:
-                lines.append(
-                    "Insufficient cited information was found to produce a structured conflict item."
-                )
-            if metadata.get("needs_human_review"):
-                lines.append("Needs human review: Yes")
-            return "\n".join(lines).strip()
-
-        for index, conflict in enumerate(conflicts, start=1):
-            contract_refs = conflict.get("contract_citations", [])
-            policy_refs = conflict.get("policy_citations", [])
-            evidence_suffix = self._format_source_refs([*contract_refs, *policy_refs])
-            lines.extend(
-                [
-                    f"\n## Conflict {index}: {conflict.get('topic') or 'Unspecified topic'}",
-                    f"Type: {conflict.get('conflict_type')}",
-                    f"Severity: {conflict.get('severity')}",
-                ]
-            )
-            contract_position = self._as_str(conflict.get("contract_position"))
-            if contract_position:
-                lines.append(
-                    f"Contract position: {contract_position}"
-                    f"{self._format_source_refs(contract_refs)}"
-                )
-            policy_position = self._as_str(conflict.get("policy_position"))
-            if policy_position:
-                lines.append(
-                    f"Policy position: {policy_position}{self._format_source_refs(policy_refs)}"
-                )
-            why_conflict = self._as_str(conflict.get("why_conflict"))
-            if why_conflict:
-                lines.append(f"Why this may conflict: {why_conflict}{evidence_suffix}")
-            recommended_action = self._as_str(conflict.get("recommended_action"))
-            if recommended_action:
-                lines.append(f"Recommended next step: {recommended_action}{evidence_suffix}")
-            if conflict.get("needs_human_review"):
-                lines.append("Needs human review: Yes")
-
-        return "\n".join(lines).strip()
+    # ── 内部方法 ──────────────────────────────────────────────────────────
 
     def _build_messages(self, task_prompt: str) -> list[dict[str, str]]:
         return [
@@ -733,7 +639,7 @@ class DocumentQAService:
         if fixed_all:
             return repaired
 
-        source_ids = ", ".join(citation.source_id for citation in citations) or "None"
+        source_ids = ", ".join(c.source_id for c in citations) or "None"
         repair_prompt = self.answer_repair_prompt.format(
             issues="\n".join(f"- {issue}" for issue in guard_result.issues),
             source_ids=source_ids,
@@ -775,209 +681,6 @@ class DocumentQAService:
             return question
         return rewritten
 
-    @staticmethod
-    def _extract_json_object(content: str) -> dict[str, Any] | None:
-        text = (content or "").strip()
-        if not text:
-            return None
-
-        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-        candidates = [fenced_match.group(1)] if fenced_match else []
-        candidates.append(text)
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if 0 <= first_brace < last_brace:
-            candidates.append(text[first_brace : last_brace + 1])
-
-        for candidate in candidates:
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-        return None
-
-    @staticmethod
-    def _as_str(value: Any, default: str = "") -> str:
-        if value is None:
-            return default
-        if isinstance(value, str):
-            return value.strip() or default
-        if isinstance(value, (int, float, bool)):
-            return str(value)
-        return default
-
-    @classmethod
-    def _optional_str(cls, value: Any) -> str | None:
-        text = cls._as_str(value)
-        return text or None
-
-    @classmethod
-    def _as_list_str(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        if isinstance(value, list):
-            result = []
-            for item in value:
-                text = cls._as_str(item)
-                if text:
-                    result.append(text)
-            return result
-        return []
-
-    @staticmethod
-    def _coerce_bool(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().casefold()
-            if normalized in {"true", "yes", "y", "found"}:
-                return True
-            if normalized in {"false", "no", "n", "not found"}:
-                return False
-        return None
-
-    @staticmethod
-    def _coerce_risk_level(value: Any) -> str:
-        if not isinstance(value, str):
-            return "Needs human review"
-        normalized = value.strip().casefold().replace("_", " ")
-        if "human" in normalized or "review" in normalized:
-            return "Needs human review"
-        for level in ("Low", "Medium", "High"):
-            if normalized == level.casefold() or level.casefold() in normalized:
-                return level
-        return "Needs human review"
-
-    @staticmethod
-    def _coerce_conflict_status(value: Any) -> str:
-        if not isinstance(value, str):
-            return "Insufficient information"
-        normalized = value.strip().casefold()
-        if "potential" in normalized or ("conflict" in normalized and "no" not in normalized):
-            return "Potential conflict"
-        if "no conflict" in normalized or normalized == "none":
-            return "No conflict found"
-        return "Insufficient information"
-
-    @classmethod
-    def _infer_conflict_status(cls, content: str) -> str:
-        return cls._coerce_conflict_status(content)
-
-    @staticmethod
-    def _coerce_conflict_type(value: Any) -> str:
-        if not isinstance(value, str):
-            return "ambiguous_relationship"
-        normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().casefold()).strip("_")
-        aliases = {
-            "timeline_conflict": "deadline_mismatch",
-            "time_conflict": "deadline_mismatch",
-            "deadline_conflict": "deadline_mismatch",
-            "amount_conflict": "amount_mismatch",
-            "money_conflict": "amount_mismatch",
-            "definition_conflict": "definition_mismatch",
-            "scope_conflict": "scope_mismatch",
-            "process_conflict": "process_mismatch",
-            "procedural_conflict": "process_mismatch",
-            "direct_conflict": "direct_contradiction",
-            "contradiction": "direct_contradiction",
-            "none": "none",
-        }
-        normalized = aliases.get(normalized, normalized)
-        if normalized in allowed_conflict_type_keys():
-            return normalized
-        return "ambiguous_relationship"
-
-    def _risk_reason_list(self, value: Any, citations: list[Citation]) -> list[dict[str, str | None]]:
-        default_citation = self._first_source_id(citations, prefix="S")
-        if value is None:
-            return []
-        raw_items = value if isinstance(value, list) else [value]
-        reasons: list[dict[str, str | None]] = []
-        for item in raw_items:
-            if isinstance(item, dict):
-                reason = self._as_str(item.get("reason") or item.get("text") or item.get("issue"))
-                citation = self._source_id_list(
-                    item.get("citation") or item.get("citations"),
-                    citations,
-                    prefix="S",
-                )
-                citation_id = citation[0] if citation else default_citation
-            else:
-                reason = self._as_str(item)
-                citation_id = default_citation
-            if reason:
-                reasons.append({"reason": reason, "citation": citation_id})
-        return reasons
-
-    @staticmethod
-    def _first_source_id(citations: list[Citation], prefix: str | None = None) -> str | None:
-        for citation in citations:
-            if not prefix or citation.source_id.startswith(prefix):
-                return citation.source_id
-        return None
-
-    def _source_id_list(
-        self,
-        value: Any,
-        citations: list[Citation],
-        prefix: str | None = None,
-    ) -> list[str]:
-        valid_source_ids = {
-            citation.source_id
-            for citation in citations
-            if citation.source_id and (not prefix or citation.source_id.startswith(prefix))
-        }
-        if not valid_source_ids:
-            return []
-
-        raw_values: list[Any]
-        if value is None:
-            raw_values = []
-        elif isinstance(value, list):
-            raw_values = value
-        else:
-            raw_values = [value]
-
-        source_ids: list[str] = []
-        for raw_value in raw_values:
-            text = self._as_str(raw_value)
-            if not text:
-                continue
-            for match in re.findall(r"\[?([SCDPW]\d+)\]?", text, flags=re.IGNORECASE):
-                source_id = match.upper()
-                if source_id in valid_source_ids and source_id not in source_ids:
-                    source_ids.append(source_id)
-        return source_ids
-
-    def _citation_suffix(self, source_ids: list[Any], citations: list[Citation]) -> str:
-        normalized_ids: list[str] = []
-        valid_source_ids = {citation.source_id for citation in citations}
-        for value in source_ids:
-            for source_id in self._source_id_list(value, citations):
-                if source_id not in normalized_ids:
-                    normalized_ids.append(source_id)
-        if not normalized_ids:
-            first_source_id = self._first_source_id(citations)
-            if first_source_id:
-                normalized_ids.append(first_source_id)
-        normalized_ids = [source_id for source_id in normalized_ids if source_id in valid_source_ids]
-        return self._format_source_refs(normalized_ids)
-
-    @staticmethod
-    def _format_source_refs(source_ids: list[Any]) -> str:
-        refs: list[str] = []
-        for source_id in source_ids:
-            if not isinstance(source_id, str):
-                continue
-            normalized = source_id.strip().strip("[]").upper()
-            if re.fullmatch(r"[SCDPW]\d+", normalized) and normalized not in refs:
-                refs.append(normalized)
-        return " " + " ".join(f"[{source_id}]" for source_id in refs) if refs else ""
-
     def _format_context(self, documents: list[Document]) -> tuple[str, list[Citation]]:
         """把检索到的 Document 列表格式化为 prompt 上下文 + Citation 列表（编号 S1,S2…）。"""
         return self._format_context_prefixed(documents, prefix="S")
@@ -998,8 +701,8 @@ class DocumentQAService:
             retrieval_score = metadata.get("retrieval_score")
             retrieval_relevance = metadata.get("retrieval_relevance")
             file_name = metadata.get("file_name") or metadata.get("source") or "unknown"
-            file_id = self._optional_str(metadata.get("file_id"))
-            document_key = self._optional_str(metadata.get("document_key"))
+            file_id = optional_str(metadata.get("file_id"))
+            document_key = optional_str(metadata.get("document_key"))
             document_version = (
                 metadata.get("document_version")
                 if isinstance(metadata.get("document_version"), int)
@@ -1237,7 +940,7 @@ def _try_lightweight_repair(
     guard_result: AnswerGuardResult,
     citations: list[Citation],
 ) -> tuple[str, bool]:
-    valid_ids = {citation.source_id.upper() for citation in citations}
+    valid_ids = {c.source_id.upper() for c in citations}
     if not valid_ids:
         return content, False
 
