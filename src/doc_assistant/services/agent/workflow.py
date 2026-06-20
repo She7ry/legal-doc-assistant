@@ -12,6 +12,30 @@ from typing import Any
 from uuid import uuid4
 
 from doc_assistant.graphs.agent import build_agent_graph
+from doc_assistant.services.agent._artifacts import _build_agent_artifacts
+from doc_assistant.services.agent._confirmation_gates import (
+    _build_confirmation_gates,
+    _confirmation_gate_payload,
+)
+from doc_assistant.services.agent._constants import (
+    AGENT_REACT_ACTIONS,
+    AGENT_TOOL_REGISTRY,
+    _workflow_type,
+)
+from doc_assistant.services.agent._findings import _audit_findings
+from doc_assistant.services.agent._helpers import (
+    _CitationRegistry,
+    _dedupe_texts,
+    _emit_progress,
+    _plan_step_payload,
+    _renumber_findings,
+)
+from doc_assistant.services.agent._matter_profile import _build_matter_profile
+from doc_assistant.services.agent._planning import _review_scope_from_plan
+from doc_assistant.services.agent._react import (
+    _agent_react_enabled,
+    _agent_react_max_iterations,
+)
 from doc_assistant.services.agent.schemas import AgentFinding, AgentTaskResult
 from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.evidence import build_evidence_profile
@@ -40,32 +64,28 @@ def run_agent_workflow(
     状态机节点：plan → execute_steps → collect_findings
     → build_deliverables → synthesize_report → finalize_result
     """
-    from doc_assistant.services import agent_service as agent_module
-
     resolved_task_id = task_id or uuid4().hex
     resolved_matter_id = matter_id or resolved_task_id
     resolved_focus_areas = focus_areas or []
 
     def plan_node(_state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 1/6：生成多步计划，并创建全局 CitationRegistry（后续步骤引用统一编号）
         plan = service.plan_task(
             objective=objective,
             focus_areas=resolved_focus_areas,
             user_role=user_role,
             max_steps=max_steps,
         )
-        agent_module._emit_progress(
+        _emit_progress(
             progress_callback,
             event_type="plan_created",
             stage="planning",
             progress=10,
             message=f"Created a {len(plan)} step agent plan.",
-            payload={"plan": [agent_module._plan_step_payload(step) for step in plan]},
+            payload={"plan": [_plan_step_payload(step) for step in plan]},
         )
-        return {"plan": plan, "citation_registry": agent_module._CitationRegistry()}
+        return {"plan": plan, "citation_registry": _CitationRegistry()}
 
     def execute_steps_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 2/6：逐步执行 plan（含并行 review、ReAct 补证），写入 citation_registry
         steps = service._execute_plan_steps(
             state["plan"],
             objective=objective,
@@ -78,44 +98,42 @@ def run_agent_workflow(
         return {"steps": steps}
 
     def collect_findings_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 3/6：从各 step 汇总 finding，审计 evidence_coverage / support_level
         citation_registry = state["citation_registry"]
         findings: list[AgentFinding] = []
         missing_information: list[str] = []
         for step in state["steps"]:
             findings.extend(service._findings_from_step(step))
             missing_information.extend(
-                agent_module._dedupe_texts(step.output.get("missing_information", []))
+                _dedupe_texts(step.output.get("missing_information", []))
             )
         return {
-            "findings": agent_module._audit_findings(
-                agent_module._renumber_findings(findings),
+            "findings": _audit_findings(
+                _renumber_findings(findings),
                 citation_registry.citations,
             ),
-            "missing_information": agent_module._dedupe_texts(missing_information),
+            "missing_information": _dedupe_texts(missing_information),
         }
 
     def build_deliverables_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 4/6：构建 matter profile、artifact（风险矩阵等）、confirmation gate
         missing_information = state["missing_information"]
-        matter_profile = agent_module._build_matter_profile(
+        matter_profile = _build_matter_profile(
             matter_id=resolved_matter_id,
             objective=objective,
-            review_scope=agent_module._review_scope_from_plan(state["plan"]),
+            review_scope=_review_scope_from_plan(state["plan"]),
             steps=state["steps"],
             missing_information=missing_information,
         )
-        missing_information = agent_module._dedupe_texts(
+        missing_information = _dedupe_texts(
             [*missing_information, *matter_profile.open_questions]
         )
-        artifacts = agent_module._build_agent_artifacts(
+        artifacts = _build_agent_artifacts(
             matter_profile=matter_profile,
             findings=state["findings"],
             steps=state["steps"],
             missing_information=missing_information,
             user_role=user_role,
         )
-        confirmation_gates = agent_module._build_confirmation_gates(
+        confirmation_gates = _build_confirmation_gates(
             objective=objective,
             matter_profile=matter_profile,
             findings=state["findings"],
@@ -127,7 +145,7 @@ def run_agent_workflow(
         matter_profile = replace(
             matter_profile,
             confirmation_gates=[
-                agent_module._confirmation_gate_payload(gate)
+                _confirmation_gate_payload(gate)
                 for gate in confirmation_gates
             ],
         )
@@ -139,9 +157,8 @@ def run_agent_workflow(
         }
 
     def synthesize_report_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 5/6：渲染 Markdown 报告 + answer_guard；告警时追加 evidence 类闸门
         citation_registry = state["citation_registry"]
-        agent_module._emit_progress(
+        _emit_progress(
             progress_callback,
             event_type="report_started",
             stage="reporting",
@@ -175,7 +192,7 @@ def run_agent_workflow(
                 "evidence": evidence,
             }
 
-        confirmation_gates = agent_module._build_confirmation_gates(
+        confirmation_gates = _build_confirmation_gates(
             objective=objective,
             matter_profile=state["matter_profile"],
             findings=state["findings"],
@@ -187,7 +204,7 @@ def run_agent_workflow(
         matter_profile = replace(
             state["matter_profile"],
             confirmation_gates=[
-                agent_module._confirmation_gate_payload(gate)
+                _confirmation_gate_payload(gate)
                 for gate in confirmation_gates
             ],
         )
@@ -200,7 +217,6 @@ def run_agent_workflow(
         }
 
     def finalize_result_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 节点 6/6：判定 completed / needs_human_review，组装 AgentTaskResult
         citation_registry = state["citation_registry"]
         guard_result = state["guard_result"]
         human_review_required = (
@@ -240,12 +256,12 @@ def run_agent_workflow(
                 "planner": "heuristic_v2",
                 "executor": "plan_react_v1",
                 "tenant_id": service.qa_service.tenant_id,
-                "workflow_type": agent_module._workflow_type(objective),
-                "available_tools": sorted(agent_module.AGENT_TOOL_REGISTRY),
+                "workflow_type": _workflow_type(objective),
+                "available_tools": sorted(AGENT_TOOL_REGISTRY),
                 "react": {
-                    "enabled": agent_module._agent_react_enabled(),
-                    "max_iterations": agent_module._agent_react_max_iterations(),
-                    "allowed_actions": sorted(agent_module.AGENT_REACT_ACTIONS),
+                    "enabled": _agent_react_enabled(),
+                    "max_iterations": _agent_react_max_iterations(),
+                    "allowed_actions": sorted(AGENT_REACT_ACTIONS),
                     "policy": "controlled_evidence_v1",
                 },
             },

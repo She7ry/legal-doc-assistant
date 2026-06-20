@@ -10,7 +10,7 @@ from api.agent_tasks import AgentTaskStore
 from api import dependencies
 from api.main import app
 from doc_assistant.matter.store import MatterStore
-from doc_assistant.services.agent_service import (
+from doc_assistant.services.agent.schemas import (
     AgentArtifact,
     AgentConfirmationGate,
     AgentTaskResult,

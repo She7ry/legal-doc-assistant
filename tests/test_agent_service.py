@@ -7,12 +7,10 @@ from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from doc_assistant.schemas.citation import Citation, QAAnswer
-from doc_assistant.services import agent_service as agent_service_module
-from doc_assistant.services.agent_service import (
-    AgentPlanStep,
-    LegalAgentService,
-    clarification_questions_for_task,
-)
+from doc_assistant.services.agent._constants import clarification_questions_for_task
+from doc_assistant.services.agent._helpers import _CitationRegistry
+from doc_assistant.services.agent.schemas import AgentPlanStep
+from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.services.qa_service import DocumentQAService
 
 
@@ -294,8 +292,10 @@ def test_legal_agent_react_repairs_uncited_clause_review_with_followup_evidence(
 
 
 def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) -> None:
+    from doc_assistant.services.agent import _planning
+
     monkeypatch.setattr(
-        agent_service_module,
+        _planning,
         "settings",
         SimpleNamespace(agent_max_parallel_steps=2),
     )
@@ -323,8 +323,10 @@ def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) ->
 
 
 def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
+    from doc_assistant.services.agent import _react
+
     monkeypatch.setattr(
-        agent_service_module,
+        _react,
         "settings",
         SimpleNamespace(agent_react_enabled=False),
     )
@@ -353,7 +355,7 @@ def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
         user_id=None,
         conversation_id=None,
         task_id="task-a",
-        citation_registry=agent_service_module._CitationRegistry(),
+        citation_registry=_CitationRegistry(),
         progress_callback=None,
     )
 
