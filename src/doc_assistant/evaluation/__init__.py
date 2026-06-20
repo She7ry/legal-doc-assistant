@@ -1,2 +1,1 @@
-"""Evaluation helpers for the RAG assistant."""
-
+"""RAG 离线评测：指标计算与 CLI 入口。"""

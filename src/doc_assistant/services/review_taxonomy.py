@@ -1,3 +1,9 @@
+"""条款审查与冲突检查的分类体系：ClauseProfile、风险规则、prompt 片段生成。
+
+``resolve_clause_profile`` 将用户输入的条款类型映射到预置 taxonomy；
+``qa_service.review_clause`` / ``check_conflict`` 依赖此处配置检索词与风险权重。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +14,12 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ClauseProfile:
+    """一种合同条款类型的审查「配置包」。
+
+    用途：用户说「审查 indemnity 条款」时，通过 aliases/query_terms 扩展检索 query，
+    并把 high/medium/low_risk_rules 注入 LLM prompt，让模型按统一标准打风险分。
+    """
+
     key: str
     label: str
     aliases: tuple[str, ...]
@@ -43,6 +55,8 @@ class ClauseProfile:
 
 @dataclass(frozen=True)
 class ConflictType:
+    """合同与政策/另一文档冲突检查的类型定义（如 obligation_conflict、definition_mismatch）。"""
+
     key: str
     label: str
     description: str

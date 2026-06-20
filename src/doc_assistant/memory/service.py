@@ -1,3 +1,9 @@
+"""用户记忆服务：对话历史、长期记忆写入/检索、自动摘要与衰减维护。
+
+MemoryService 在 QA / ToolCalling 提问前注入相关记忆，在回答后提取新记忆候选。
+底层 ``MemoryStore``（SQLite）存结构化记录，``MemoryVectorStore`` 做语义检索去重。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +42,16 @@ _RULE_SUMMARY_MAX_CHARS = 2000
 
 
 class MemoryService:
+    """用户记忆与对话历史的业务编排层。
+
+    主要能力：
+    - 问答前：检索相关记忆、加载/合并对话历史，注入 prompt
+    - 问答后：规则 + LLM 抽取新记忆、写入 SQLite 与向量索引
+    - 维护：过期清理、置信度衰减、冲突记忆 supersede、自动摘要
+
+    QA / ToolCalling / Agent 通过本类共享同一套记忆，而非各自读写数据库。
+    """
+
     def __init__(
         self,
         store: MemoryStore | None = None,

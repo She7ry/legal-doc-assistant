@@ -1,3 +1,11 @@
+"""文档向量库：分块入库、混合检索（Dense + BM25 + RRF）、引用构建。
+
+``DocumentVectorStore`` 是 RAG 的数据层：
+- 入库：``ingest_file`` 解析 → 分块 → embedding → 写入 Chroma + BM25
+- 检索：``similarity_search`` 支持 hybrid / dense / bm25 模式，带查询缓存
+- 引用：检索结果转为 ``Citation``，供 QA 与 Agent 在答案中标注 [Sx]
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -66,6 +74,8 @@ ProgressCallback = Callable[[str, int, str | None], None]
 
 @dataclass
 class _SearchCandidate:
+    """混合检索流水线中的单个候选 chunk，携带 dense/BM25/RRF 各阶段分数。"""
+
     identity: str
     document: Document
     dense_rank: int | None = None
@@ -80,6 +90,8 @@ class _SearchCandidate:
 
 
 class _QueryCache:
+    """线程安全的检索结果 TTL 缓存，避免重复 embedding 与 BM25 查询。"""
+
     def __init__(self, *, ttl_seconds: int, max_size: int) -> None:
         self._ttl_seconds = ttl_seconds
         self._max_size = max_size
@@ -115,6 +127,13 @@ class _QueryCache:
 
 
 class DocumentVectorStore:
+    """文档 RAG 的数据层：入库、混合检索、引用构建。
+
+    存储：Chroma 向量库 + PersistentBM25Index 词法索引（同 tenant/collection）。
+    检索：hybrid 模式下 RRF 融合 dense 与 BM25，再 MMR 去重；
+    引用：检索结果转为 Citation，供 QA/Agent 在答案中标注 [S1][S2]。
+    """
+
     def __init__(
         self,
         collection_name: str | None = None,
@@ -156,6 +175,11 @@ class DocumentVectorStore:
         file_name: str | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> IngestResult:
+        """摄入文档：解析 → 分块 → 向量化 + BM25 索引，并维护版本生命周期。
+
+        同一 document_key 重复上传相同内容时跳过；内容变更时递增 version，
+        将旧版 chunk 标记 active=False，检索时只返回 active 记录。
+        """
         file_path = Path(file_path)
         display_name = file_name or file_path.name
         file_id = file_sha256(file_path)
@@ -169,6 +193,7 @@ class DocumentVectorStore:
         ]
 
         if active_same_content:
+            # 内容哈希相同且已激活：复用已有 chunk，避免重复嵌入。
             version = max(_metadata_int(record["metadata"], "document_version", 1) for record in active_same_content)
             warning = "Document content is already indexed as the active version; existing chunks were reused."
             _report_progress(progress_callback, "completed", 100, warning)
@@ -189,7 +214,7 @@ class DocumentVectorStore:
         version = max(
             [_metadata_int(record["metadata"], "document_version", 0) for record in existing_records]
             or [0]
-        ) + 1
+        ) + 1  # 内容变更时递增版本号
 
         _report_progress(progress_callback, "parsing", 20)
         documents = load_documents(file_path)
@@ -259,6 +284,7 @@ class DocumentVectorStore:
                 self._batch_embed_and_add(chunks, ids)
                 self._bm25_index.add_documents(_bm25_documents_for_chunks(chunks, ids))
                 try:
+                    # 新版本入库后，将同 document_key 的旧 active 记录置为 inactive。
                     self._deactivate_records(active_records, superseded_by_file_id=file_id)
                     self._bm25_index.mark_inactive(record["id"] for record in active_records)
                 except Exception as exc:
@@ -290,6 +316,7 @@ class DocumentVectorStore:
         )
 
     def search(self, query: str, k: int | None = None) -> list[Document]:
+        """检索入口：混合排序 → MMR 多样性筛选 → 附带检索元数据返回。"""
         top_k = max(1, int(k or settings.top_k))
         cache_key = self._query_cache_key(query, top_k)
         query_cache = getattr(self, "_query_cache", None)
@@ -306,6 +333,7 @@ class DocumentVectorStore:
             query=query[:120],
         ):
             candidates = self._rank_candidates(query, fetch_k=fetch_k)
+        # MMR 降低语义相近 chunk 的重复，提升覆盖面（lambda=1 时退化为纯相关性排序）。
         selected = _select_diverse_candidates(
             candidates,
             top_k=top_k,
@@ -365,7 +393,79 @@ class DocumentVectorStore:
             reverse=True,
         )
 
+    def get_document_text(
+        self,
+        *,
+        document_key: str | None = None,
+        file_id: str | None = None,
+        document_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_document_key = (document_key or "").strip()
+        resolved_file_id = (file_id or "").strip()
+        if not resolved_document_key and not resolved_file_id:
+            raise ValueError("Provide document_key or file_id.")
+
+        records = []
+        for record in self._all_records(include_documents=True):
+            metadata = record["metadata"]
+            if document_version is None and not _metadata_is_active(metadata):
+                continue
+            if resolved_document_key and metadata.get("document_key") != resolved_document_key:
+                continue
+            if resolved_file_id and metadata.get("file_id") != resolved_file_id:
+                continue
+            if document_version is not None and _metadata_int(metadata, "document_version", 1) != document_version:
+                continue
+            records.append(record)
+
+        if not records:
+            return None
+
+        if document_version is None:
+            latest_version = max(
+                _metadata_int(record["metadata"], "document_version", 1)
+                for record in records
+            )
+            records = [
+                record
+                for record in records
+                if _metadata_int(record["metadata"], "document_version", 1) == latest_version
+            ]
+
+        records = sorted(records, key=_document_preview_sort_key)
+        metadata_values = [record["metadata"] for record in records]
+        first_metadata = records[0]["metadata"]
+        document = {
+            "file_id": str(first_metadata.get("file_id") or resolved_file_id),
+            "file_name": str(first_metadata.get("file_name") or first_metadata.get("source") or "unknown"),
+            "document_key": str(first_metadata.get("document_key") or resolved_document_key),
+            "document_version": _metadata_int(first_metadata, "document_version", document_version or 1),
+            "file_extension": str(first_metadata.get("file_extension") or ""),
+            "indexed_at": first_metadata.get("indexed_at"),
+            "document_count": _metadata_int(first_metadata, "document_count", 1),
+            "page_count": _optional_metadata_int(first_metadata, "page_count"),
+            "chunk_count": len(records),
+            "warning_count": max(_metadata_int(metadata, "warning_count", 0) for metadata in metadata_values),
+        }
+        chunks = [
+            {
+                "chunk_id": _optional_metadata_int(record["metadata"], "chunk_id"),
+                "text": str(record.get("document") or ""),
+                "page": _optional_metadata_int(record["metadata"], "page"),
+                "page_label": _page_label(record["metadata"]),
+                "section_heading": _optional_metadata_str(record["metadata"], "section_heading"),
+                "location_label": _record_location_label(record["metadata"]),
+            }
+            for record in records
+        ]
+        return {"document": document, "chunks": chunks, "total_chunks": len(chunks)}
+
     def _rank_candidates(self, query: str, *, fetch_k: int) -> list[_SearchCandidate]:
+        """混合检索排序：dense 向量 + BM25 稀疏检索，经 RRF 融合后再做词法重排。
+
+        retrieval_mode 控制启用哪些通道：hybrid / dense / bm25。
+        rank_score = rrf_score × (1 + rerank_weight × lexical_rerank)。
+        """
         mode = str(settings.retrieval_mode or "hybrid").strip().lower()
         if mode not in {"hybrid", "dense", "vector", "bm25", "sparse"}:
             logger.warning("Unknown retrieval mode %r; falling back to hybrid.", mode)
@@ -408,6 +508,7 @@ class DocumentVectorStore:
         rerank_weight = max(0.0, float(getattr(settings, "retrieval_rerank_weight", 0.25)))
         ranked_candidates = []
         for candidate in candidates.values():
+            # RRF（Reciprocal Rank Fusion）：按各路排名倒数加权求和，不依赖原始分数尺度。
             if candidate.dense_rank is not None:
                 candidate.rrf_score += (
                     float(settings.retrieval_dense_weight)
@@ -454,6 +555,7 @@ class DocumentVectorStore:
         *,
         fetch_k: int,
     ) -> list[tuple[Document, float]]:
+        """优先只检索 active=True 的 chunk；Chroma filter 失败时回退全量检索再客户端过滤。"""
         try:
             docs_and_scores = self.vector_store.similarity_search_with_relevance_scores(
                 query,
@@ -888,6 +990,7 @@ def _select_diverse_candidates(
     top_k: int,
     lambda_mult: float,
 ) -> list[_SearchCandidate]:
+    """MMR（Maximal Marginal Relevance）多样性选择，平衡相关性与结果差异性。"""
     if lambda_mult >= 1.0:
         return candidates[:top_k]
 
@@ -1120,6 +1223,47 @@ def _metadata_int(metadata: dict[str, Any], key: str, default: int) -> int:
 def _optional_metadata_int(metadata: dict[str, Any], key: str) -> int | None:
     value = _metadata_int(metadata, key, -1)
     return value if value >= 0 else None
+
+
+def _optional_metadata_str(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _page_label(metadata: dict[str, Any]) -> str | None:
+    existing = _optional_metadata_str(metadata, "page_label")
+    if existing:
+        return existing
+    page = _optional_metadata_int(metadata, "page")
+    return f"page {page + 1}" if page is not None else None
+
+
+def _record_location_label(metadata: dict[str, Any]) -> str:
+    parts = []
+    page_label = _page_label(metadata)
+    chunk_id = _optional_metadata_int(metadata, "chunk_id")
+    section_heading = _optional_metadata_str(metadata, "section_heading")
+    if page_label:
+        parts.append(page_label)
+    if chunk_id is not None:
+        parts.append(f"chunk {chunk_id}")
+    if section_heading:
+        parts.append(section_heading)
+    return ", ".join(parts)
+
+
+def _document_preview_sort_key(record: dict[str, Any]) -> tuple[int, int, str]:
+    metadata = record.get("metadata") or {}
+    chunk_id = _optional_metadata_int(metadata, "chunk_id")
+    page = _optional_metadata_int(metadata, "page")
+    return (
+        chunk_id if chunk_id is not None else 1_000_000_000,
+        page if page is not None else 1_000_000_000,
+        str(record.get("id") or ""),
+    )
 
 
 def _clean_metadata(metadata: dict[str, Any]) -> dict[str, str | int | float | bool]:

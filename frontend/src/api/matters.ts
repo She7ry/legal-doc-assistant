@@ -1,6 +1,7 @@
 import { apiRequest } from "./http";
 import type {
   MatterArtifactRecord,
+  MatterArtifactUpdateRequest,
   MatterConfirmationGateUpdateRequest,
   MatterFindingRecord,
   MatterFindingUpdateRequest,
@@ -58,6 +59,18 @@ export function updateMatterFinding(
   return apiRequest<MatterRecord>({
     method: "PATCH",
     url: `/api/v1/matters/${matterId}/findings/${findingId}`,
+    data: body,
+  });
+}
+
+export function updateMatterArtifact(
+  matterId: string,
+  artifactId: string,
+  body: MatterArtifactUpdateRequest,
+): Promise<MatterRecord> {
+  return apiRequest<MatterRecord>({
+    method: "PATCH",
+    url: `/api/v1/matters/${matterId}/artifacts/${artifactId}`,
     data: body,
   });
 }

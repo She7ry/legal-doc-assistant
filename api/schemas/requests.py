@@ -62,6 +62,17 @@ class MatterFormalReportCreateRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class MatterArtifactUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    summary: str | None = Field(default=None, max_length=2000)
+    items: list[dict[str, Any]] | None = Field(default=None, max_length=200)
+    status: str | None = Field(
+        default=None,
+        pattern="^(draft|active|needs_review|approved|archived)$",
+    )
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class MatterFindingUpdateRequest(BaseModel):
     human_review_status: str = Field(
         ...,

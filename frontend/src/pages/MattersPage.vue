@@ -407,6 +407,16 @@
               <span class="agent-artifact__actions">
                 <el-tag size="small" effect="plain">v{{ artifact.version }}</el-tag>
                 <el-button
+                  :icon="Edit"
+                  size="small"
+                  plain
+                  :loading="isArtifactSaving(artifact)"
+                  :disabled="artifactEditSaving"
+                  @click="openArtifactEdit(artifact)"
+                >
+                  Edit
+                </el-button>
+                <el-button
                   :icon="Download"
                   size="small"
                   plain
@@ -442,6 +452,62 @@
         </div>
       </section>
     </div>
+
+    <el-dialog v-model="artifactEditVisible" title="Edit artifact" width="720px">
+      <el-form class="artifact-edit-form" label-position="top" @submit.prevent>
+        <el-form-item label="Title">
+          <el-input v-model="artifactEditForm.title" maxlength="200" show-word-limit />
+        </el-form-item>
+        <el-form-item label="Status">
+          <el-select v-model="artifactEditForm.status">
+            <el-option label="Draft" value="draft" />
+            <el-option label="Active" value="active" />
+            <el-option label="Needs review" value="needs_review" />
+            <el-option label="Approved" value="approved" />
+            <el-option label="Archived" value="archived" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Summary">
+          <el-input
+            v-model="artifactEditForm.summary"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            show-word-limit
+            resize="none"
+          />
+        </el-form-item>
+        <el-form-item label="Items JSON">
+          <el-input
+            v-model="artifactEditForm.itemsJson"
+            type="textarea"
+            :rows="10"
+            resize="vertical"
+          />
+        </el-form-item>
+        <el-form-item label="Review note">
+          <el-input
+            v-model="artifactEditForm.note"
+            type="textarea"
+            :rows="2"
+            maxlength="1000"
+            show-word-limit
+            resize="none"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="artifactEditVisible = false">Cancel</el-button>
+        <el-button
+          type="primary"
+          :loading="artifactEditSaving"
+          :disabled="!artifactEditForm.title.trim()"
+          @click="saveArtifactEdit"
+        >
+          Save version
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -449,7 +515,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CircleCheck, CircleClose, Download, Refresh, Warning } from "@element-plus/icons-vue";
+import { CircleCheck, CircleClose, Download, Edit, Refresh, Warning } from "@element-plus/icons-vue";
 
 import {
   exportMatterArtifactDocx,
@@ -458,6 +524,7 @@ import {
   generateMatterFormalReport,
   getMatter,
   listMatters,
+  updateMatterArtifact,
   updateMatterConfirmationGate,
   updateMatterFinding,
 } from "../api/matters";
@@ -481,10 +548,20 @@ const findingUpdating = ref("");
 const formalReportLoading = ref(false);
 const artifactExporting = ref("");
 const artifactBundleExporting = ref(false);
+const artifactEditVisible = ref(false);
+const artifactEditSaving = ref(false);
+const editingArtifactId = ref("");
 const filters = reactive({
   artifactType: "all",
   gateStatus: "all",
   riskSeverity: "all",
+});
+const artifactEditForm = reactive({
+  title: "",
+  summary: "",
+  status: "active",
+  itemsJson: "[]",
+  note: "",
 });
 
 const profileDateItems = computed(() => {
@@ -759,6 +836,70 @@ function applyMatterUpdate(updatedMatter: MatterRecord) {
     };
   }
   pruneFiltersForSelectedMatter();
+}
+
+function openArtifactEdit(artifact: MatterArtifactRecord) {
+  editingArtifactId.value = artifact.artifact_id;
+  artifactEditForm.title = artifact.title;
+  artifactEditForm.summary = artifact.summary;
+  artifactEditForm.status = artifact.status || "active";
+  artifactEditForm.itemsJson = JSON.stringify(artifact.items, null, 2);
+  artifactEditForm.note = "";
+  artifactEditVisible.value = true;
+}
+
+async function saveArtifactEdit() {
+  if (!selectedMatter.value || !editingArtifactId.value || artifactEditSaving.value) {
+    return;
+  }
+  const items = parseArtifactItemsJson(artifactEditForm.itemsJson);
+  if (!items) {
+    return;
+  }
+
+  artifactEditSaving.value = true;
+  try {
+    const updatedMatter = await updateMatterArtifact(
+      selectedMatter.value.matter_id,
+      editingArtifactId.value,
+      {
+        title: artifactEditForm.title.trim(),
+        summary: artifactEditForm.summary.trim(),
+        status: artifactEditForm.status,
+        items,
+        note: artifactEditForm.note.trim() || null,
+      },
+    );
+    applyMatterUpdate(updatedMatter);
+    artifactEditVisible.value = false;
+    ElMessage.success("Artifact version saved.");
+  } catch (error) {
+    ElMessage.error(formatApiError(error));
+  } finally {
+    artifactEditSaving.value = false;
+  }
+}
+
+function parseArtifactItemsJson(value: string): Record<string, unknown>[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    ElMessage.error("Items JSON is not valid.");
+    return null;
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((item) => !item || typeof item !== "object" || Array.isArray(item))
+  ) {
+    ElMessage.error("Items JSON must be an array of objects.");
+    return null;
+  }
+  return parsed as Record<string, unknown>[];
+}
+
+function isArtifactSaving(artifact: MatterArtifactRecord) {
+  return artifactEditSaving.value && editingArtifactId.value === artifact.artifact_id;
 }
 
 async function downloadArtifact(

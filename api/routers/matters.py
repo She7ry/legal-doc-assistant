@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from api.dependencies import MatterStoreDep, TenantIdDep, UserIdDep, require_api_key
 from api.schemas.requests import (
+    MatterArtifactUpdateRequest,
     MatterConfirmationGateUpdateRequest,
     MatterFindingUpdateRequest,
     MatterFormalReportCreateRequest,
@@ -151,6 +152,49 @@ def list_matter_artifacts(
     if artifacts is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
     return [MatterArtifactRecordOut.from_record(artifact) for artifact in artifacts]
+
+
+@router.patch(
+    "/{matter_id}/artifacts/{artifact_id}",
+    response_model=MatterRecordOut,
+    summary="Update a generated matter artifact and create a new version",
+)
+def update_matter_artifact(
+    matter_id: str,
+    artifact_id: str,
+    body: MatterArtifactUpdateRequest,
+    matter_store: MatterStoreDep,
+    tenant_id: TenantIdDep,
+    user_id: UserIdDep,
+) -> MatterRecordOut:
+    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    if not fields_set:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one artifact field must be provided.",
+        )
+    try:
+        matter = matter_store.update_artifact(
+            matter_id=matter_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            artifact_id=artifact_id,
+            title=body.title if "title" in fields_set else None,
+            summary=body.summary if "summary" in fields_set else None,
+            items=body.items if "items" in fields_set else None,
+            status=body.status if "status" in fields_set else None,
+            note=body.note,
+            updated_by=user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Artifact not found.",
+        ) from exc
+
+    if matter is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Matter not found.")
+    return MatterRecordOut.from_record(matter)
 
 
 @router.get(

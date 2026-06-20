@@ -1,3 +1,9 @@
+"""用 LLM 从对话中抽取可长期保存的用户偏好与业务上下文。
+
+仅提取跨事项稳定的偏好（角色、法域、条款关注点等），
+不存储单次合同事实或法律结论；由 ``MemoryService`` 在回答后异步调用。
+"""
+
 from __future__ import annotations
 
 import json
@@ -42,7 +48,10 @@ Return {"memories": []} when nothing should be remembered."""
 
 
 class LLMMemoryExtractor:
-    """Optional LLM-backed fallback for memory writes after rules miss."""
+    """当规则引擎（policy.py）未命中时，用 LLM 从用户消息抽取可长期保存的记忆。
+
+    只提取跨会话稳定的偏好/角色/审查习惯，不存合同原文或法律结论。
+    """
 
     def __init__(
         self,

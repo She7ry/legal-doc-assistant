@@ -1,3 +1,12 @@
+"""LLM 与 Embedding 模型工厂。
+
+``build_chat_model`` / ``build_embedding_model`` 根据 settings 选择：
+- DashScope / DeepSeek 的 OpenAI 兼容 HTTP 客户端（带重试与熔断）
+- 或 LangChain 原生 ChatTongyi / DashScopeEmbeddings
+
+业务层通常只调用 factory，不直接实例化 ``OpenAICompatibleChatModel``。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,6 +33,8 @@ _ORIGINAL_REQUESTS_POST = requests.post
 
 @dataclass(frozen=True)
 class CompatibleProviderDefaults:
+    """某个 LLM 提供商的默认 base_url 与 API Key 环境变量名。"""
+
     label: str
     base_url: str
     api_key_setting: str
@@ -61,6 +72,13 @@ PROVIDER_ALIASES = {
 
 @dataclass(frozen=True)
 class OpenAICompatibleChatModel:
+    """直连 OpenAI Chat Completions API 的 HTTP 客户端（项目默认 LLM 实现）。
+
+    能力：同步/异步 invoke、SSE 流式、tool calling（invoke_messages）、
+    失败重试与熔断（settings.llm_circuit_breaker_*）。
+    DashScope / DeepSeek 等均通过 compatible-mode 走本客户端。
+    """
+
     provider: str
     model: str
     api_key: str
@@ -416,6 +434,8 @@ AsyncOpenAICompatibleChatModel = OpenAICompatibleChatModel
 
 
 class DashScopeCompatibleChatModel(OpenAICompatibleChatModel):
+    """DashScope 专用子类：为 qwen3.5 系列自动注入 enable_thinking 等 extra_body。"""
+
     def __init__(
         self,
         *,
@@ -572,7 +592,13 @@ def _build_chat_model_cached(_cache_key: tuple[object, ...]):
 
 
 def build_chat_model():
+    """按 settings 构建并缓存聊天模型（LRU cache，配置变更需重启进程）。"""
     return _build_chat_model_cached(_chat_model_cache_key())
+
+
+def build_embedding_model():
+    """按 settings 构建并缓存 embedding 模型。"""
+    return _build_embedding_model_cached(_embedding_model_cache_key())
 
 
 def _embedding_model_cache_key() -> tuple[object, ...]:
@@ -632,6 +658,3 @@ def _build_embedding_model_cached(_cache_key: tuple[object, ...]):
         "dashscope, openai-compatible, or local."
     )
 
-
-def build_embedding_model():
-    return _build_embedding_model_cached(_embedding_model_cache_key())

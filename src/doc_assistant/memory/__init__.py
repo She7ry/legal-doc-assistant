@@ -1,2 +1,1 @@
-"""Memory management primitives for user, conversation, and task context."""
-
+"""用户记忆：对话历史、长期偏好、任务状态与语义检索。"""

@@ -1,3 +1,10 @@
+"""全局配置：从环境变量 / .env 读取并校验 Settings 单例。
+
+所有可调参数（模型、检索、Agent、记忆、API 安全等）集中在此；
+业务代码应通过 ``from doc_assistant.config.settings import settings`` 访问，
+避免直接读 ``os.getenv``。
+"""
+
 from __future__ import annotations
 
 import json
@@ -74,6 +81,9 @@ def _first_env(*names: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    """应用全局配置单例的数据类；字段默认值来自环境变量，启动时做基本校验。"""
+
+    # ── Storage paths ─────────────────────────────────────────────────────
     project_root: Path = PROJECT_ROOT
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
@@ -107,6 +117,7 @@ class Settings:
             PROJECT_ROOT / "data" / "memory.sqlite3",
         )
     )
+    # ── LLM / Chat model ────────────────────────────────────────────────
     dashscope_api_key: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", ""))
     deepseek_api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
     collection_name: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_COLLECTION", "legal_documents"))
@@ -124,6 +135,7 @@ class Settings:
     llm_circuit_breaker_cooldown_seconds: int = field(
         default_factory=lambda: _int_env("DOC_ASSISTANT_LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30)
     )
+    # ── Embedding model ─────────────────────────────────────────────────
     embedding_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_PROVIDER", "dashscope"))
     embedding_api_key: str = field(default_factory=lambda: _first_env("DOC_ASSISTANT_EMBEDDING_API_KEY", "DASHSCOPE_API_KEY"))
     embedding_base_url: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_BASE_URL", ""))
@@ -131,6 +143,8 @@ class Settings:
     embedding_device: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_EMBEDDING_DEVICE", "cpu"))
     enable_thinking: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_ENABLE_THINKING", False))
     temperature: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_TEMPERATURE", 0.0))
+
+    # ── Retrieval / RAG ───────────────────────────────────────────────────
     top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOP_K", 5))
     retrieval_mode: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_RETRIEVAL_MODE", "hybrid"))
     retrieval_fetch_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_FETCH_K", 40))
@@ -144,8 +158,11 @@ class Settings:
     retrieval_cache_ttl_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_TTL_SECONDS", 300))
     retrieval_cache_max_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_MAX_SIZE", 128))
     query_rewrite_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_QUERY_REWRITE_ENABLED", True))
+
+    # ── Ingestion / chunking ──────────────────────────────────────────────
     embedding_batch_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_BATCH_SIZE", 20))
     embedding_max_workers: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_EMBED_MAX_WORKERS", 4))
+    # ── Agent / planner ─────────────────────────────────────────────────
     agent_max_parallel_steps: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS", 3))
     agent_step_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES", 2))
     agent_step_retry_backoff_seconds: tuple[float, ...] = field(
@@ -158,6 +175,8 @@ class Settings:
     agent_react_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_REACT_ENABLED", True))
     agent_react_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS", 2))
     chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
+
+    # ── Memory ────────────────────────────────────────────────────────────
     memory_top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TOP_K", 5))
     memory_min_confidence: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55))
     memory_semantic_dedup_min_score: float = field(
@@ -180,11 +199,14 @@ class Settings:
     memory_llm_extraction_min_confidence: float = field(
         default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE", 0.6)
     )
+    # ── Text splitting ─────────────────────────────────────────────────
     chunk_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900))
     chunk_overlap: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120))
+    # ── Tool calling ──────────────────────────────────────────────────────
     tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
     tool_call_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_HISTORY_WINDOW", 12))
     tool_call_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_TIMEOUT_SECONDS", 30))
+    # ── Web search ────────────────────────────────────────────────────────
     web_search_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_WEB_SEARCH_ENABLED", False))
     web_search_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_WEB_SEARCH_PROVIDER", "duckduckgo"))
     web_search_api_key: str = field(
@@ -198,6 +220,7 @@ class Settings:
     web_search_max_results: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS", 5))
     web_search_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS", 10))
     web_search_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_WEB_SEARCH_MAX_RETRIES", 3))
+    # ── API security / CORS ─────────────────────────────────────────────
     api_keys: tuple[str, ...] = field(default_factory=lambda: _csv_env("DOC_ASSISTANT_API_KEYS"))
     rate_limit_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_RATE_LIMIT_ENABLED", True))
     rate_limit_max_requests: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RATE_LIMIT_MAX_REQUESTS", 120))
@@ -210,6 +233,7 @@ class Settings:
         )
     )
     cors_allow_credentials: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_CORS_ALLOW_CREDENTIALS", False))
+    # ── Tenant / runtime ────────────────────────────────────────────────
     default_tenant_id: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_DEFAULT_TENANT_ID", "default"))
     max_upload_bytes: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MAX_UPLOAD_BYTES", 20 * 1024 * 1024))
     background_max_workers: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_BACKGROUND_MAX_WORKERS", 4))
@@ -257,9 +281,11 @@ class Settings:
             raise ValueError("memory_llm_extraction_min_confidence must be between 0 and 1.")
 
     def with_overrides(self, **kwargs: Any) -> Settings:
+        """返回应用了临时覆盖项的新 Settings 副本（测试或单次请求用）。"""
         return replace(self, **kwargs)
 
     def ensure_directories(self) -> None:
+        """创建 data/ 下 uploads、vector_store、各 SQLite 库所在目录（应用启动时调用）。"""
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.vector_store_dir.mkdir(parents=True, exist_ok=True)
         self.memory_vector_store_dir.mkdir(parents=True, exist_ok=True)

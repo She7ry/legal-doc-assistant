@@ -1,3 +1,9 @@
+"""记忆写入策略：从用户消息中识别「请记住」等显式/隐式写入意图。
+
+规则引擎 ``extract_memory_write_intents`` 与 LLM 抽取（``extraction.py``）配合，
+过滤一次性指令与敏感内容，输出 ``MemoryWriteIntent`` 列表。
+"""
+
 from __future__ import annotations
 
 import re
@@ -144,10 +150,10 @@ _LEGAL_PROFILE_SIGNALS = (
 
 
 def extract_memory_write_intents(user_text: str) -> list[MemoryWriteIntent]:
-    """Return explicit long-term memory write intents from a user message.
+    """从用户消息中识别「请记住…」等显式长期记忆写入意图。
 
-    The policy is intentionally conservative: ordinary chat is not persisted as
-    long-term memory unless the user clearly asks the assistant to remember it.
+    策略偏保守：普通聊天不会自动入库，除非用户明确表达要记住，
+    或命中隐式 profile 规则（如稳定角色/偏好描述）。
     """
 
     text = " ".join(user_text.split())
@@ -221,7 +227,7 @@ def extract_task_memory_write_intents(
     *,
     task_id: str,
 ) -> list[MemoryWriteIntent]:
-    """Extract conservative task-scoped facts from an assistant answer."""
+    """从 Agent 回答中提取任务级事实（scope=task），任务结束后可标记 stale。"""
 
     text = " ".join(assistant_text.split())
     if not text or not task_id:

@@ -1,3 +1,5 @@
+"""评测用常量：拒答措辞列表等，与 answer_guard 的 REFUSAL_TERMS 对齐。"""
+
 from __future__ import annotations
 
 DEFAULT_REFUSAL_TERMS: tuple[str, ...] = (

@@ -58,6 +58,51 @@ def test_protected_routes_require_api_key_when_configured(monkeypatch) -> None:
     assert response.json()["code"] == "http_401"
 
 
+def test_document_text_endpoint_returns_indexed_chunks() -> None:
+    class FakeVectorStore:
+        def get_document_text(self, *, document_key=None, file_id=None, document_version=None):
+            assert document_key == "doc-key"
+            assert file_id is None
+            assert document_version is None
+            return {
+                "document": {
+                    "file_name": "contract.pdf",
+                    "file_id": "file-a",
+                    "document_key": "doc-key",
+                    "document_version": 2,
+                    "file_extension": ".pdf",
+                    "document_count": 1,
+                    "chunk_count": 1,
+                    "page_count": 1,
+                    "indexed_at": "2026-06-17T00:00:00+00:00",
+                    "warning_count": 0,
+                },
+                "chunks": [
+                    {
+                        "chunk_id": 0,
+                        "text": "Payment is due within 30 days.",
+                        "page": 0,
+                        "page_label": "page 1",
+                        "section_heading": "2. Payment",
+                        "location_label": "page 1, chunk 0, 2. Payment",
+                    }
+                ],
+                "total_chunks": 1,
+            }
+
+    app.dependency_overrides[dependencies.get_vector_store] = lambda: FakeVectorStore()
+    try:
+        client = TestClient(app)
+        response = client.get("/api/v1/documents/text", params={"document_key": "doc-key"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["document"]["document_key"] == "doc-key"
+    assert data["chunks"][0]["text"] == "Payment is due within 30 days."
+
+
 def test_health_returns_runtime_diagnostics_and_request_id() -> None:
     client = TestClient(app)
 

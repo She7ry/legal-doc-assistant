@@ -1,3 +1,5 @@
+"""离线 RAG 评测 CLI 入口，委托 ``scripts/`` 下的评测脚本执行。"""
+
 from __future__ import annotations
 
 import runpy

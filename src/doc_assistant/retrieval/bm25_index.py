@@ -1,3 +1,9 @@
+"""BM25 稀疏检索索引：SQLite 持久化 + 内存倒排，与 Chroma 向量检索互补。
+
+``PersistentBM25Index`` 与 ``DocumentVectorStore`` 共用 tenant/collection 维度；
+hybrid 模式下通过 RRF 融合 dense 与 bm25 排名。
+"""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +19,8 @@ from typing import Any, Iterable
 
 @dataclass(frozen=True)
 class BM25Document:
+    """索引中的一篇文档：doc_id、分词 tokens、原文与 metadata。"""
+
     doc_id: str
     tokens: list[str]
     document: str = ""
@@ -22,6 +30,8 @@ class BM25Document:
 
 @dataclass(frozen=True)
 class BM25Hit:
+    """BM25 检索命中项：doc_id、相关性分数及原文 metadata。"""
+
     doc_id: str
     score: float
     document: str
@@ -29,7 +39,7 @@ class BM25Hit:
 
 
 class PersistentBM25Index:
-    """SQLite-backed BM25 postings index for incremental lexical retrieval."""
+    """SQLite 持久化的 BM25 倒排索引，支持增量 upsert 与按 collection 查询。"""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)

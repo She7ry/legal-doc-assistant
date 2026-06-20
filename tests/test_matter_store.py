@@ -61,6 +61,67 @@ def test_matter_store_upserts_profile_and_artifact_versions(tmp_path) -> None:
     }
 
 
+def test_matter_store_updates_artifact_with_new_version_and_event(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        matter_id="matter-1",
+        result={
+            "task_id": "task-1",
+            "matter_profile": {"matter_id": "matter-1", "open_questions": []},
+            "artifacts": [
+                {
+                    "artifact_id": "risk_matrix",
+                    "artifact_type": "risk_matrix",
+                    "title": "Risk matrix",
+                    "summary": "Original risks.",
+                    "items": [{"item_id": "risk-1", "category": "payment"}],
+                    "source_finding_ids": ["f1"],
+                    "citations": ["S1"],
+                    "metadata": {"source": "agent"},
+                }
+            ],
+        },
+    )
+
+    updated = store.update_artifact(
+        matter_id="matter-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        artifact_id="risk_matrix",
+        title="Reviewed risk matrix",
+        summary="Reviewed risks.",
+        items=[{"item_id": "risk-1", "category": "payment", "status": "approved"}],
+        status="approved",
+        note="Approved for client discussion.",
+        updated_by="lawyer-1",
+    )
+
+    assert updated is not None
+    assert updated.artifacts
+    artifact = updated.artifacts[0]
+    assert artifact.title == "Reviewed risk matrix"
+    assert artifact.summary == "Reviewed risks."
+    assert artifact.version == 2
+    assert artifact.status == "approved"
+    assert artifact.items[0]["status"] == "approved"
+    assert artifact.source_finding_ids == ["f1"]
+    assert artifact.citations == ["S1"]
+    assert artifact.metadata["source"] == "agent"
+    assert artifact.metadata["last_edit"]["note"] == "Approved for client discussion."
+    assert artifact.metadata["last_edit"]["updated_by"] == "lawyer-1"
+
+    events = store.list_events("matter-1", "tenant-a", "user-a")
+    assert events is not None
+    assert any(
+        event.event_type == "artifact_updated"
+        and event.entity_id == "risk_matrix"
+        and event.actor == "lawyer-1"
+        for event in events
+    )
+
+
 def test_matter_store_isolates_tenants_and_users(tmp_path) -> None:
     store = MatterStore(tmp_path / "matters.sqlite3")
     store.upsert_from_agent_result(

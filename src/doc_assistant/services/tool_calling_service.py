@@ -1,6 +1,13 @@
+"""工具调用聊天服务：LLM + 文档检索 / 条款审查 / 网页搜索 的 ReAct 循环。
+
+与 ``DocumentQAService`` 的区别：模型可主动决定调用哪个 tool（LangGraph 状态机），
+适合开放式对话；工具包括 search_documents、review_clause、web_search 等。
+"""
+
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
@@ -8,9 +15,18 @@ from hashlib import sha1
 from typing import Any
 
 from langchain_core.documents import Document
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from doc_assistant.config.settings import settings
+from doc_assistant.graphs.tool_calling import build_tool_calling_graph
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
+from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.evidence import build_evidence_profile
@@ -23,8 +39,11 @@ from doc_assistant.tools.web_search import (
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
+logger = logging.getLogger(__name__)
+
 
 def build_tool_system_prompt(user_memory: str | None = None) -> str:
+    """组装 tool-calling 模式的系统 prompt：基础法律角色 + 工具说明 + 可选用户记忆。"""
     prompt = f"{load_base_legal_prompt()}\n\n{load_prompt('tool_calling_system.txt')}"
     if user_memory:
         prompt = f"{prompt}\n\n<user_memory>\n{user_memory}\n</user_memory>"
@@ -33,6 +52,8 @@ def build_tool_system_prompt(user_memory: str | None = None) -> str:
 
 @dataclass(frozen=True)
 class WebSource:
+    """网页搜索工具返回的单条外部来源（对应答案中的 [W1] 等编号）。"""
+
     source_id: str
     title: str
     url: str
@@ -43,6 +64,8 @@ class WebSource:
 
 @dataclass(frozen=True)
 class ToolCallTrace:
+    """单次 tool 调用的审计记录：调用了什么、传了什么参数、返回了什么。"""
+
     tool_call_id: str
     name: str
     arguments: dict[str, Any]
@@ -51,6 +74,12 @@ class ToolCallTrace:
 
 @dataclass(frozen=True)
 class ToolCallingAnswer:
+    """``ToolCallingChatService.ask()`` 的完整返回值。
+
+    比 QAAnswer 多了 web_sources（网页引用）和 tool_calls（ReAct 轨迹），
+    便于前端展示「模型调用了哪些工具」以及调试。
+    """
+
     content: str
     citations: list[Citation] = field(default_factory=list)
     memories_used: list[MemoryUsage] = field(default_factory=list)
@@ -63,6 +92,11 @@ class ToolCallingAnswer:
 
 @dataclass
 class _ToolExecutionState:
+    """一次 ask() 调用内的可变状态：累积引用、网页来源、tool 调用轨迹。
+
+    仅在 LangGraph 的 execute_tools 回调中读写；每次 ask 新建实例。
+    """
+
     citations: list[Citation] = field(default_factory=list)
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
@@ -71,6 +105,8 @@ class _ToolExecutionState:
 
 @dataclass
 class _ToolMemoryContext:
+    """ask() 开始前准备好的记忆与对话上下文，贯穿整轮 tool-calling。"""
+
     user_id: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
@@ -81,6 +117,15 @@ class _ToolMemoryContext:
 
 
 class ToolCallingChatService:
+    """支持多轮工具调用的对话服务（ReAct 模式）。
+
+    与 DocumentQAService 的区别：本类让 LLM **自主决定**何时检索文档、
+    审查条款或搜索网页；QA 服务只负责执行具体 tool 逻辑。
+
+    内部用 LangGraph（model ↔ tools 循环）替代手写 for 循环；
+    每次 tool 调用会累积 Citation / WebSource，最终一并返回给前端。
+    """
+
     def __init__(
         self,
         qa_service: DocumentQAService,
@@ -91,6 +136,7 @@ class ToolCallingChatService:
         self.invoke_messages = getattr(self.chat_model, "invoke_messages", None)
         if not callable(self.invoke_messages):
             raise ValueError("The configured chat model does not support tool calling.")
+        self._lc_chat_model = ChatOpenAICompatible(client=self.chat_model)
         self.vector_store = qa_service.vector_store
         self.web_search_client = web_search_client or build_web_search_client()
         self._tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-call")
@@ -106,7 +152,8 @@ class ToolCallingChatService:
         enable_web_search: bool = False,
         max_tool_iterations: int | None = None,
     ) -> ToolCallingAnswer:
-        state = _ToolExecutionState()
+        """运行 LangGraph 工具调用循环：模型自主选 tool → 执行 → 合成带引用的答案。"""
+        exec_state = _ToolExecutionState()
         memory_context = self._prepare_memory_context(
             question,
             chat_history=chat_history or [],
@@ -114,7 +161,7 @@ class ToolCallingChatService:
             conversation_id=conversation_id,
             task_id=task_id,
         )
-        tools = self._tool_schemas(enable_web_search=enable_web_search)
+        tool_schemas = self._tool_schemas(enable_web_search=enable_web_search)
         messages = self._initial_messages(
             question,
             memory_context.chat_history,
@@ -126,32 +173,35 @@ class ToolCallingChatService:
             maximum=10,
         )
 
-        for _ in range(iterations):
-            message = self.invoke_messages(messages, tools=tools, tool_choice="auto")
-            tool_calls = _normalise_tool_calls(message)
-            if not tool_calls:
-                return self._finalize_answer(str(message.get("content") or ""), state, memory_context, question)
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.get("content") or "",
-                    "tool_calls": tool_calls,
-                }
-            )
-            for tool_call in tool_calls:
-                tool_result = self._execute_tool_call(tool_call, state, enable_web_search)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_call["function"]["name"],
-                        "content": json.dumps(tool_result, ensure_ascii=False),
-                    }
+        def execute_tools_node(graph_state: dict) -> dict:
+            last_message = graph_state["messages"][-1]
+            tool_messages: list[ToolMessage] = []
+            for tc in last_message.tool_calls:
+                openai_tc = _lc_tool_call_to_openai(tc)
+                result = self._execute_tool_call(openai_tc, exec_state, enable_web_search)
+                tool_messages.append(
+                    ToolMessage(
+                        content=json.dumps(result, ensure_ascii=False),
+                        tool_call_id=tc["id"],
+                        name=tc["name"],
+                    )
                 )
+            return {"messages": tool_messages, "iteration": graph_state["iteration"] + 1}
 
-        final_message = self.invoke_messages(messages, tools=None, tool_choice=None)
-        return self._finalize_answer(str(final_message.get("content") or ""), state, memory_context, question)
+        graph = build_tool_calling_graph(
+            llm=self._lc_chat_model,
+            tool_schemas=tool_schemas,
+            execute_tools=execute_tools_node,
+        )
+
+        lc_messages = [_dict_to_lc_message(m) for m in messages]
+        result = graph.invoke(
+            {"messages": lc_messages, "iteration": 0, "max_iterations": iterations},
+            config={"recursion_limit": iterations * 2 + 5},
+        )
+
+        content = str(result["messages"][-1].content or "")
+        return self._finalize_answer(content, exec_state, memory_context, question)
 
     def _finalize_answer(
         self,
@@ -279,6 +329,11 @@ class ToolCallingChatService:
                 max_messages=settings.tool_call_history_window,
             )
         except Exception:
+            logger.warning(
+                "Memory context preparation failed; continuing without memory.",
+                extra={"tenant_id": self.qa_service.tenant_id, "user_id": user_id, "memory_available": False},
+                exc_info=True,
+            )
             context.chat_history = chat_history
         return context
 
@@ -326,6 +381,11 @@ class ToolCallingChatService:
                 conversation_id=memory_context.conversation_id,
             )
         except Exception:
+            logger.warning(
+                "Tool calling memory result recording failed.",
+                extra={"tenant_id": self.qa_service.tenant_id, "user_id": memory_context.user_id},
+                exc_info=True,
+            )
             return
 
     def _tool_schemas(self, *, enable_web_search: bool) -> list[dict[str, Any]]:
@@ -690,3 +750,27 @@ def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
 
 def _compact_text(text: str) -> str:
     return " ".join(text.split())
+
+
+def _dict_to_lc_message(msg: dict[str, Any]) -> BaseMessage:
+    """Convert an OpenAI-style message dict to a LangChain BaseMessage."""
+    role = msg.get("role", "user")
+    content = str(msg.get("content") or "")
+    if role == "system":
+        return SystemMessage(content=content)
+    if role == "assistant":
+        return AIMessage(content=content)
+    return HumanMessage(content=content)
+
+
+def _lc_tool_call_to_openai(tc: dict[str, Any]) -> dict[str, Any]:
+    """Convert a LangChain ToolCall dict back to OpenAI wire format."""
+    args = tc.get("args", {})
+    return {
+        "id": tc["id"],
+        "type": "function",
+        "function": {
+            "name": tc["name"],
+            "arguments": json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args),
+        },
+    }

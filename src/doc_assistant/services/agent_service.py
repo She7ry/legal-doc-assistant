@@ -1,20 +1,51 @@
+"""法律 Agent 核心实现：任务规划、逐步执行、ReAct 补证、报告合成。
+
+本文件是 Agent 功能的主体，体量较大，可按以下区块阅读：
+
+1. 常量与工具注册表（AGENT_TOOL_REGISTRY、FOCUS_KEYWORDS 等）
+2. LegalAgentService 类
+   - plan_task / _plan_with_llm     启发式或 LLM 生成多步计划
+   - _execute_plan_steps            并行/串行执行，每步调用 qa_service 上的 tool
+   - _run_controlled_react            证据不足时的受控 ReAct 补检索
+   - _render_report                   组装 Markdown 报告
+3. 模块级辅助函数（1500 行起）
+   - 规划解析、ReAct 策略、matter profile、artifact、confirmation gate
+   - _CitationRegistry              跨步骤全局引用编号
+
+对外入口：``LegalAgentService.run_task`` → ``workflow.run_agent_workflow``（LangGraph）。
+"""
+
 from __future__ import annotations
 
 import json
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from inspect import Parameter, signature
 from time import sleep
 from typing import Any
-from uuid import uuid4
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from doc_assistant.config.settings import settings
+from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
 from doc_assistant.schemas.citation import Citation, QAAnswer
+from doc_assistant.services.agent.schemas import (
+    AgentArtifact,
+    AgentConfirmationGate,
+    AgentFinding,
+    AgentPlanStep,
+    AgentStepResult,
+    AgentTaskResult,
+    MatterProfile,
+)
+from doc_assistant.services.agent.workflow import run_agent_workflow
 from doc_assistant.services.answer_guard import validate_answer
 from doc_assistant.services.evidence import build_evidence_profile
 from doc_assistant.services.qa_service import DocumentQAService
+from doc_assistant.utils.prompt_loader import load_prompt
 
 SOURCE_REF_PATTERN = re.compile(r"\[([SCDPW]\d+)\]", re.IGNORECASE)
 BARE_SOURCE_REF_PATTERN = re.compile(r"(?<![A-Za-z0-9])([SCDPW]\d+)(?![A-Za-z0-9])", re.IGNORECASE)
@@ -95,18 +126,7 @@ AGENT_REACT_ACTIONS = frozenset(
 )
 _AGENT_REACT_EXECUTABLE_TOOLS = frozenset({"document_qa", "build_evidence_profile"})
 
-PLANNER_PROMPT = """You are a legal review planner. Given the user's objective and available tools, create an execution plan.
-Available tools:
-{tool_descriptions}
-
-Objective:
-{objective}
-
-Focus areas:
-{focus_areas}
-
-Output a JSON array of steps. Each step must include step_id, title, purpose, tool, and arguments.
-Only use tools from the available tools list. Keep the plan under {max_steps} steps and include synthesize_report as the final step."""
+PLANNER_PROMPT = load_prompt("agent_planner.txt")
 
 VERSION_COMPARE_KEYWORDS = (
     "compare versions",
@@ -288,7 +308,7 @@ def clarification_questions_for_task(
     objective: str,
     focus_areas: list[str] | None = None,
 ) -> list[str]:
-    """Return blocking clarification questions for underspecified Agent tasks."""
+    """任务 objective 信息不足时，返回最多 3 条阻塞性澄清问题（API 可在执行前展示）。"""
     text = _clean_text(objective)
     lowered = text.casefold()
     normalized_focus = [_clean_text(area) for area in focus_areas or [] if _clean_text(area)]
@@ -319,118 +339,25 @@ def clarification_questions_for_task(
     return questions[:3]
 
 
-@dataclass(frozen=True)
-class AgentPlanStep:
-    step_id: str
-    title: str
-    purpose: str
-    tool: str
-    arguments: dict[str, Any] = field(default_factory=dict)
-    requires_confirmation: bool = False
-
-
-@dataclass(frozen=True)
-class AgentStepResult:
-    step_id: str
-    title: str
-    tool: str
-    status: str
-    summary: str
-    citations: list[Citation] = field(default_factory=list)
-    evidence: dict[str, Any] | None = None
-    guard_warnings: list[str] = field(default_factory=list)
-    output: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AgentFinding:
-    finding_id: str
-    category: str
-    severity: str
-    summary: str
-    citations: list[str] = field(default_factory=list)
-    recommended_action: str = ""
-    needs_human_review: bool = True
-    source_step_id: str = ""
-    clause_reference: str = ""
-    evidence_coverage: str = "missing"
-    support_level: str = "missing"
-    unsupported_reason: str = ""
-    source_quote: str = ""
-    location_label: str = ""
-    human_review_status: str = "pending"
-    status: str = "open"
-    evidence: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class MatterProfile:
-    matter_id: str
-    document_type: str = "Unknown"
-    parties: list[str] = field(default_factory=list)
-    user_side: str = ""
-    governing_law: str = ""
-    jurisdiction: str = ""
-    key_dates: list[dict[str, Any]] = field(default_factory=list)
-    review_scope: list[str] = field(default_factory=list)
-    open_questions: list[str] = field(default_factory=list)
-    confidence: str = "Low"
-    citations: list[str] = field(default_factory=list)
-    source_step_id: str = ""
-    confirmation_gates: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class AgentArtifact:
-    artifact_id: str
-    artifact_type: str
-    title: str
-    summary: str
-    items: list[dict[str, Any]] = field(default_factory=list)
-    source_finding_ids: list[str] = field(default_factory=list)
-    citations: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AgentConfirmationGate:
-    gate_id: str
-    gate_type: str
-    title: str
-    question: str
-    status: str = "pending"
-    priority: str = "normal"
-    required: bool = True
-    reason: str = ""
-    related_finding_ids: list[str] = field(default_factory=list)
-    related_artifact_ids: list[str] = field(default_factory=list)
-    citations: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AgentTaskResult:
-    task_id: str
-    status: str
-    objective: str
-    plan: list[AgentPlanStep]
-    steps: list[AgentStepResult]
-    findings: list[AgentFinding]
-    missing_information: list[str]
-    human_review_required: bool
-    report: str
-    citations: list[Citation]
-    confidence: str | None = None
-    guard_warnings: list[str] = field(default_factory=list)
-    evidence: dict[str, Any] | None = None
-    matter_profile: MatterProfile | None = None
-    artifacts: list[AgentArtifact] = field(default_factory=list)
-    confirmation_gates: list[AgentConfirmationGate] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+# ══════════════════════════════════════════════════════════════════════════════
+# LegalAgentService — 任务规划、执行、报告（对外主类）
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 class LegalAgentService:
-    """Task-oriented legal assistant workflow built on the citation-first QA service."""
+    """面向复杂法律任务的 Agent 编排器。
+
+    典型场景：用户给出 objective（如「审查这份 MSA 的付款与终止条款」），
+    本类会：规划多步 → 逐步调用 document_qa / review_clause 等工具 →
+    汇总 finding 与 artifact → 生成 Markdown 报告。
+
+    设计要点：
+    - 所有结论必须带 [Sx] 引用，由 _CitationRegistry 统一编号
+    - 证据不足时可走受控 ReAct 补检索
+    - 缺失信息或 guard 告警时标记 needs_human_review
+
+    对外入口：``run_task()``；内部通过 LangGraph workflow 串联六个阶段。
+    """
 
     def __init__(self, qa_service: DocumentQAService) -> None:
         self.qa_service = qa_service
@@ -448,158 +375,22 @@ class LegalAgentService:
         matter_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> AgentTaskResult:
-        resolved_task_id = task_id or uuid4().hex
-        resolved_matter_id = matter_id or resolved_task_id
-        plan = self.plan_task(
+        """执行完整 Agent 任务（对外主入口）。
+
+        委托 ``run_agent_workflow`` 走 LangGraph 六阶段流水线；
+        ``progress_callback`` 可接收 plan_created / step_started 等 SSE 事件。
+        """
+        return run_agent_workflow(
+            self,
             objective=objective,
-            focus_areas=focus_areas or [],
+            focus_areas=focus_areas,
             user_role=user_role,
             max_steps=max_steps,
-        )
-        _emit_progress(
-            progress_callback,
-            event_type="plan_created",
-            stage="planning",
-            progress=10,
-            message=f"Created a {len(plan)} step agent plan.",
-            payload={"plan": [_plan_step_payload(step) for step in plan]},
-        )
-        citation_registry = _CitationRegistry()
-        findings: list[AgentFinding] = []
-        missing_information: list[str] = []
-
-        steps = self._execute_plan_steps(
-            plan,
-            objective=objective,
             user_id=user_id,
             conversation_id=conversation_id,
-            task_id=resolved_task_id,
-            citation_registry=citation_registry,
+            task_id=task_id,
+            matter_id=matter_id,
             progress_callback=progress_callback,
-        )
-        for step in steps:
-            findings.extend(self._findings_from_step(step))
-            missing_information.extend(_dedupe_texts(step.output.get("missing_information", [])))
-
-        findings = _audit_findings(_renumber_findings(findings), citation_registry.citations)
-        missing_information = _dedupe_texts(missing_information)
-        matter_profile = _build_matter_profile(
-            matter_id=resolved_matter_id,
-            objective=objective,
-            review_scope=_review_scope_from_plan(plan),
-            steps=steps,
-            missing_information=missing_information,
-        )
-        missing_information = _dedupe_texts(
-            [*missing_information, *matter_profile.open_questions]
-        )
-        artifacts = _build_agent_artifacts(
-            matter_profile=matter_profile,
-            findings=findings,
-            steps=steps,
-            missing_information=missing_information,
-            user_role=user_role,
-        )
-        confirmation_gates = _build_confirmation_gates(
-            objective=objective,
-            matter_profile=matter_profile,
-            findings=findings,
-            missing_information=missing_information,
-            guard_warnings=[],
-            artifacts=artifacts,
-            user_role=user_role,
-        )
-        matter_profile = replace(
-            matter_profile,
-            confirmation_gates=[
-                _confirmation_gate_payload(gate) for gate in confirmation_gates
-            ],
-        )
-        _emit_progress(
-            progress_callback,
-            event_type="report_started",
-            stage="reporting",
-            progress=90,
-            message="Compiling the final agent report.",
-        )
-        report = self._render_report(
-            objective=objective,
-            user_role=user_role,
-            steps=steps,
-            findings=findings,
-            missing_information=missing_information,
-            matter_profile=matter_profile,
-            artifacts=artifacts,
-            confirmation_gates=confirmation_gates,
-        )
-        guard_result = validate_answer(
-            report,
-            citation_registry.citations,
-            has_retrieved_documents=bool(citation_registry.citations),
-        )
-        evidence = build_evidence_profile(report, citation_registry.citations, guard_result.issues)
-        if guard_result.issues:
-            confirmation_gates = _build_confirmation_gates(
-                objective=objective,
-                matter_profile=matter_profile,
-                findings=findings,
-                missing_information=missing_information,
-                guard_warnings=guard_result.issues,
-                artifacts=artifacts,
-                user_role=user_role,
-            )
-            matter_profile = replace(
-                matter_profile,
-                confirmation_gates=[
-                    _confirmation_gate_payload(gate) for gate in confirmation_gates
-                ],
-            )
-        human_review_required = (
-            bool(missing_information)
-            or any(finding.needs_human_review for finding in findings)
-            or bool(guard_result.issues)
-            or any(gate.required for gate in confirmation_gates)
-        )
-        status = "needs_human_review" if human_review_required else "completed"
-        memory_service = getattr(self.qa_service, "memory_service", None)
-        if status == "completed" and user_id and memory_service:
-            memory_service.mark_task_memories_stale(
-                self.qa_service.tenant_id,
-                user_id,
-                resolved_task_id,
-            )
-
-        return AgentTaskResult(
-            task_id=resolved_task_id,
-            status=status,
-            objective=objective,
-            plan=plan,
-            steps=steps,
-            findings=findings,
-            missing_information=missing_information,
-            human_review_required=human_review_required,
-            report=report,
-            citations=citation_registry.citations,
-            confidence=guard_result.confidence,
-            guard_warnings=guard_result.issues,
-            evidence=evidence,
-            matter_profile=matter_profile,
-            artifacts=artifacts,
-            confirmation_gates=confirmation_gates,
-            metadata={
-                "user_role": user_role,
-                "planner": "heuristic_v2",
-                "executor": "plan_react_v1",
-                "tenant_id": self.qa_service.tenant_id,
-                "workflow_type": _workflow_type(objective),
-                "available_tools": sorted(AGENT_TOOL_REGISTRY),
-                "react": {
-                    "enabled": _agent_react_enabled(),
-                    "max_iterations": _agent_react_max_iterations(),
-                    "allowed_actions": sorted(AGENT_REACT_ACTIONS),
-                    "policy": "controlled_evidence_v1",
-                },
-            },
         )
 
     def plan_task(
@@ -610,10 +401,18 @@ class LegalAgentService:
         user_role: str,
         max_steps: int,
     ) -> list[AgentPlanStep]:
+        """启发式生成多步计划（默认规划器）。
+
+        根据 objective 识别 workflow_type，在步数预算内分配：
+        profile 建档 → 条款 review / 专项工具 → 可选 conflict → synthesize_report。
+        若启用 LLM planner 且 objective 足够复杂，会优先走 ``plan_task_with_llm``。
+        """
         del user_role
+        # 步骤上限 3~10；先识别任务类型，再按预算分配各阶段步骤。
         normalized_max_steps = max(3, min(max_steps, 10))
         workflow_type = _workflow_type(objective)
         wants_conflict = _looks_like_conflict_task(objective)
+        # 专项工具（版本对比、义务日历等）与冲突检查各占用一步，需从总步数中预留。
         special_tool_count = 0
         if workflow_type in {
             "version_comparison",
@@ -623,9 +422,12 @@ class LegalAgentService:
             special_tool_count += 1
         if workflow_type in {"clause_revision", "negotiation_prep"}:
             special_tool_count += 1
+        # 固定预留：profile（建档）+ report（汇总）= 2 步；冲突检查与专项工具额外占步。
         reserved_steps = 2 + (1 if wants_conflict else 0) + special_tool_count
+        # 剩余预算用于 clause review，决定最多审查几个 focus area。
         review_budget = max(1, normalized_max_steps - reserved_steps)
         resolved_focus_areas = _resolve_focus_areas(objective, focus_areas)[:review_budget]
+        # 部分工作流需要结构化事实提取，其余用通用 document_qa 建档。
         profile_tool = (
             "extract_parties_dates_jurisdiction"
             if workflow_type in {"version_comparison", "obligation_calendar", "evidence_audit"}
@@ -749,6 +551,7 @@ class LegalAgentService:
             )
         )
         heuristic_plan = _trim_plan(plan, normalized_max_steps)
+        # 启发式规划失败或任务过于复杂时，回退到 LLM 动态规划。
         if self._should_use_llm_planner(objective, focus_areas, heuristic_plan):
             llm_plan = self.plan_task_with_llm(
                 objective=objective,
@@ -765,10 +568,13 @@ class LegalAgentService:
         focus_areas: list[str],
         heuristic_plan: list[AgentPlanStep],
     ) -> bool:
+        """判断是否启用 LLM 规划器替代启发式计划。"""
         if not getattr(settings, "agent_llm_planner_enabled", True):
             return False
+        # 用户已指定 focus_areas 时，启发式计划更可控，不交给 LLM。
         if focus_areas:
             return False
+        # 启发式计划过短（通常 objective 过于笼统），交给 LLM 补充步骤。
         if len(heuristic_plan) <= 2:
             return True
         lowered = objective.casefold()
@@ -795,6 +601,7 @@ class LegalAgentService:
         focus_areas: list[str],
         max_steps: int,
     ) -> list[AgentPlanStep]:
+        """用 LLM + agent_planner.txt 生成 JSON 计划；解析失败时返回空列表由启发式兜底。"""
         tool_descriptions = "\n".join(
             f"- {name}: {info['description']}"
             for name, info in sorted(AGENT_TOOL_REGISTRY.items())
@@ -805,13 +612,26 @@ class LegalAgentService:
             focus_areas=", ".join(focus_areas) or "None provided",
             max_steps=max_steps,
         )
+        messages = [
+            SystemMessage(content="You are a legal workflow planner."),
+            HumanMessage(content=prompt),
+        ]
         try:
-            response = self.qa_service._invoke_chat_messages(
-                [
-                    {"role": "system", "content": "You are a legal workflow planner."},
-                    {"role": "user", "content": prompt},
-                ]
-            )
+            chat_model = self.qa_service.chat_model
+            if isinstance(chat_model, BaseChatModel):
+                llm = chat_model
+            elif callable(getattr(chat_model, "invoke_messages", None)):
+                llm = ChatOpenAICompatible(client=chat_model)
+            else:
+                response = self.qa_service._invoke_chat_messages(
+                    [
+                        {"role": "system", "content": "You are a legal workflow planner."},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
+                return _parse_llm_plan(response, max_steps)
+            response_message = llm.invoke(messages)
+            response = str(getattr(response_message, "content", response_message) or "")
         except Exception:
             return []
         return _parse_llm_plan(response, max_steps)
@@ -827,6 +647,12 @@ class LegalAgentService:
         citation_registry: _CitationRegistry,
         progress_callback: ProgressCallback | None,
     ) -> list[AgentStepResult]:
+        """按计划逐步执行工具，汇总 AgentStepResult 列表。
+
+        - 首个 profile 步骤串行执行，建立 matter 上下文
+        - 多个 review_clause 步骤可并行（受 agent_max_parallel_steps 限制）
+        - 每步引用经 citation_registry 重编号；可选 ReAct 微循环补证据
+        """
         executable_steps = [step for step in plan if step.tool != "synthesize_report"]
         step_count = max(len(executable_steps), 1)
         executable_index = {
@@ -1080,6 +906,10 @@ class LegalAgentService:
         step_index: int,
         step_count: int,
     ) -> AgentStepResult:
+        """单步执行后的受控 ReAct 微循环：证据不足时追加 document_qa 或 ask_user。
+
+        仅允许白名单 action（AGENT_REACT_ACTIONS），迭代次数受 agent_react_max_iterations 限制。
+        """
         if (
             not _agent_react_enabled()
             or not _agent_react_allowed_for_step(plan_step)
@@ -1202,6 +1032,7 @@ class LegalAgentService:
         step_index: int,
         step_count: int,
     ) -> AgentStepResult:
+        """执行单个 plan 步骤：调 tool → 注册引用 → 必要时 ReAct 补证。"""
         raw_result = self._execute_step_raw_with_retry(
             plan_step,
             objective=objective,
@@ -1634,6 +1465,7 @@ class LegalAgentService:
         artifacts: list[AgentArtifact],
         confirmation_gates: list[AgentConfirmationGate],
     ) -> str:
+        """将 findings、artifacts、gates 等组装为 Markdown 格式的最终 Agent 报告。"""
         lines = [
             "## Agent task report",
             f"Objective: {objective}",
@@ -1726,6 +1558,11 @@ class LegalAgentService:
             ]
         )
         return "\n".join(lines).strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 规划辅助 — LLM 计划解析、并行/重试配置、工作流类型识别
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 def _review_scope_from_plan(plan: list[AgentPlanStep]) -> list[str]:
@@ -1836,6 +1673,11 @@ def _agent_retry_backoff_seconds() -> list[float]:
     return values or [2.0, 5.0]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ReAct 补证 — 步骤证据不足时，受控地追加 document_qa / ask_user 等动作
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 def _agent_react_enabled() -> bool:
     return bool(getattr(settings, "agent_react_enabled", True))
 
@@ -1892,6 +1734,7 @@ def _select_react_action(
     iteration: int,
     max_iterations: int,
 ) -> dict[str, Any]:
+    """受控 ReAct 策略（controlled_evidence_v1）：仅在证据缺口时补检索，不开放任意工具。"""
     if not _step_has_react_evidence_gap(observation):
         missing_information = _as_text_list(observation.get("missing_information"))
         if missing_information and iteration >= max_iterations - 1:
@@ -1919,6 +1762,7 @@ def _select_react_action(
             },
         }
 
+    # 已有引用但 guard 告警或主张薄弱时，用证据画像审计；否则补检索原文。
     tool = "document_qa"
     if observation.get("citation_count") and (
         observation.get("guard_warnings")
@@ -1937,6 +1781,7 @@ def _select_react_action(
 
 
 def _step_has_react_evidence_gap(observation: dict[str, Any]) -> bool:
+    """判断步骤结果是否存在需要 ReAct 补证的证据缺口。"""
     if int(observation.get("citation_count") or 0) <= 0:
         return True
     if observation.get("guard_warnings"):
@@ -2053,6 +1898,7 @@ def _merge_react_action_step(
     action_step: AgentStepResult,
     trace: list[dict[str, Any]],
 ) -> AgentStepResult:
+    """将 ReAct 补证步骤的结果合并回原计划步骤，并重算 guard 与证据画像。"""
     output = dict(step.output)
     metadata = output.get("metadata")
     metadata = dict(metadata) if isinstance(metadata, dict) else {}
@@ -2170,6 +2016,7 @@ def _dedupe_citations(citations: list[Citation]) -> list[Citation]:
 
 
 def _workflow_type(objective: str) -> str:
+    """根据 objective 关键词推断工作流类型，决定专项工具与计划结构。"""
     lowered = objective.casefold()
     if _mentions_any(lowered, VERSION_COMPARE_KEYWORDS):
         return "version_comparison"
@@ -2187,6 +2034,7 @@ def _workflow_type(objective: str) -> str:
 
 
 def _trim_plan(plan: list[AgentPlanStep], max_steps: int) -> list[AgentPlanStep]:
+    """裁剪超长计划；始终保留末尾的 synthesize_report 汇总步骤。"""
     if len(plan) <= max_steps:
         return plan
     if not plan or plan[-1].tool != "synthesize_report":
@@ -2194,10 +2042,20 @@ def _trim_plan(plan: list[AgentPlanStep], max_steps: int) -> list[AgentPlanStep]
     return [*plan[: max_steps - 1], plan[-1]]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Finding 审计 — 重编号、评估 evidence_coverage / support_level
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 def _audit_findings(
     findings: list[AgentFinding],
     citations: list[Citation],
 ) -> list[AgentFinding]:
+    """对每条 finding 做证据审计，补齐引用、原文摘录、支持度与人工复核状态。
+
+    正式报告要求：有效引用 + 原文摘录 + 位置标签 + support_level；
+    任一不满足则标记 needs_human_review。
+    """
     if not findings:
         return []
 
@@ -2319,6 +2177,11 @@ def _finding_evidence_coverage(
     if has_quote or has_location:
         return "partial"
     return "missing"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Matter Profile — 从执行步骤抽取当事方、法域、日期等案件画像
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 def _build_matter_profile(
@@ -2576,6 +2439,11 @@ def _matter_open_questions(
     return _dedupe_texts(questions)[:12]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 结构化交付物 — 风险矩阵、律师问题清单、谈判清单、义务日历
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 def _build_agent_artifacts(
     *,
     matter_profile: MatterProfile,
@@ -2770,6 +2638,11 @@ def _obligation_calendar_artifact(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 人工确认闸门 — 缺失信息、高风险 finding、guard 告警时阻断自动完成
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 def _build_confirmation_gates(
     *,
     objective: str,
@@ -2780,8 +2653,18 @@ def _build_confirmation_gates(
     artifacts: list[AgentArtifact],
     user_role: str,
 ) -> list[AgentConfirmationGate]:
+    """构建人工确认闸门，在关键事实缺失或证据不足时阻断自动交付。
+
+    gate_type 含义：
+    - matter_fact：案件基础事实（管辖法、代表方等）未确认
+    - missing_information：工作流识别到未回答的问题或缺失文档
+    - legal_review / evidence：finding 或报告证据不达标
+    - permission：需用户授权外部检索（如现行法规）
+    - delivery：正式交付前的最终审批
+    """
     gates: list[AgentConfirmationGate] = []
 
+    # 无管辖法/司法辖区时，法律结论不可靠，必须人工确认。
     if not matter_profile.governing_law and not matter_profile.jurisdiction:
         gates.append(
             AgentConfirmationGate(
@@ -2900,6 +2783,7 @@ def _build_confirmation_gates(
             )
         )
 
+    # 用户要求「现行法规/合规」时，需明确授权才能启用 web_search。
     if _mentions_any(objective.casefold(), CURRENT_LAW_KEYWORDS):
         gates.append(
             AgentConfirmationGate(
@@ -2927,6 +2811,7 @@ def _build_confirmation_gates(
                     "Confirm the evidence is sufficient before treating this as a formal "
                     "deliverable or negotiation position."
                 ),
+                # 律师用户默认可自行判断交付风险，普通用户需更高优先级确认。
                 priority="normal" if user_role == "lawyer" else "high",
                 reason="Legal deliverables should be approved before external reliance.",
                 related_artifact_ids=[artifact.artifact_id for artifact in artifacts],
@@ -3014,7 +2899,18 @@ def _artifact_finding_ids(items: list[dict[str, Any]]) -> list[str]:
     return finding_ids
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 引用与工具函数 — 全局 S 编号、文本去重、进度回调序列化
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 class _CitationRegistry:
+    """跨步骤全局引用编号器。
+
+    各 QA 步骤独立返回 S1、S2… 会在最终报告中冲突；
+    此处统一重编号为全局 S1、S2…，并返回 mapping 供重写文本中的 [Sx]。
+    """
+
     def __init__(self) -> None:
         self.citations: list[Citation] = []
 
@@ -3023,6 +2919,7 @@ class _CitationRegistry:
         step_id: str,
         citations: list[Citation],
     ) -> tuple[dict[str, str], list[Citation]]:
+        """把本步骤的 citations 追加到全局列表，返回 old→new 的 [Sx] 映射供重写文本。"""
         mapping: dict[str, str] = {}
         registered: list[Citation] = []
         for citation in citations:
