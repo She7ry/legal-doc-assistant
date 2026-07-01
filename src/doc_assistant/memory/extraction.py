@@ -93,20 +93,13 @@ class LLMMemoryExtractor:
             {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
         ]
-        invoke_messages = getattr(model, "invoke_messages", None)
-        if callable(invoke_messages):
-            response = invoke_messages(messages)
+        from doc_assistant.models.language_model import ChatModelProtocol
+
+        if isinstance(model, ChatModelProtocol):
+            response = model.invoke_messages(messages)
             if isinstance(response, dict):
                 return str(response.get("content") or "")
             return str(response)
-
-        invoke = getattr(model, "invoke", None)
-        if callable(invoke):
-            try:
-                response = invoke(messages=messages)
-            except TypeError:
-                response = invoke(messages)
-            return str(getattr(response, "content", response))
 
         raise ValueError("The configured chat model does not support memory extraction.")
 

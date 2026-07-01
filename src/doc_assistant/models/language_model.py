@@ -14,7 +14,7 @@ from functools import lru_cache
 import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from time import monotonic, sleep
 
 from langchain_community.chat_models.tongyi import ChatTongyi
@@ -29,6 +29,51 @@ DEEPSEEK_COMPATIBLE_BASE_URL = "https://api.deepseek.com"
 _SSE_DONE = object()
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _ORIGINAL_REQUESTS_POST = requests.post
+
+
+@runtime_checkable
+class ChatModelProtocol(Protocol):
+    """结构协议：任何实现了 invoke_messages + invoke + stream 的对象皆可视为 ChatModel。
+
+    ``OpenAICompatibleChatModel`` 和 LangChain adapter 均满足本协议，
+    无需显式继承。业务层用 ``isinstance(model, ChatModelProtocol)``
+    替代 ``hasattr + callable`` 鸭子类型检测。
+    """
+
+    def invoke_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = "auto",
+    ) -> dict[str, Any]: ...
+
+    def invoke(
+        self,
+        prompt: str | list[dict[str, Any]] | None = None,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> str: ...
+
+    def stream(self, messages: list[dict[str, Any]]) -> Iterator[str]: ...
+
+
+@runtime_checkable
+class AsyncChatModelProtocol(Protocol):
+    """``ChatModelProtocol`` 的异步版本。"""
+
+    async def ainvoke_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = "auto",
+    ) -> dict[str, Any]: ...
+
+    async def ainvoke(
+        self,
+        prompt: str | list[dict[str, Any]] | None = None,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -79,9 +124,9 @@ class CircuitBreaker:
         cooldown_seconds: int | None = None,
     ) -> None:
         if threshold is None:
-            threshold = getattr(settings, "llm_circuit_breaker_threshold", 5)
+            threshold = settings.llm_circuit_breaker_threshold
         if cooldown_seconds is None:
-            cooldown_seconds = getattr(settings, "llm_circuit_breaker_cooldown_seconds", 30)
+            cooldown_seconds = settings.llm_circuit_breaker_cooldown_seconds
         self._threshold = threshold
         self._cooldown_seconds = cooldown_seconds
         self._lock = __import__("threading").Lock()
@@ -501,9 +546,6 @@ def _normalise_chat_api(chat_api: str | None) -> str:
     return (chat_api or "compatible").strip().lower().replace("_", "-")
 
 
-def _setting(name: str, default: Any) -> Any:
-    return getattr(settings, name, default)
-
 
 def _resolve_provider_defaults(provider: str) -> CompatibleProviderDefaults:
     return COMPATIBLE_PROVIDER_DEFAULTS.get(
@@ -518,11 +560,11 @@ def _resolve_provider_defaults(provider: str) -> CompatibleProviderDefaults:
 
 
 def _resolve_chat_api_key(provider: str, defaults: CompatibleProviderDefaults) -> tuple[str, str]:
-    explicit_key = _setting("chat_api_key", "")
+    explicit_key = settings.chat_api_key
     if explicit_key:
         return explicit_key, "DOC_ASSISTANT_CHAT_API_KEY"
 
-    provider_key = _setting(defaults.api_key_setting, "")
+    provider_key = getattr(settings, defaults.api_key_setting, "")
     if provider_key:
         return provider_key, defaults.api_key_env_var
 
@@ -530,7 +572,7 @@ def _resolve_chat_api_key(provider: str, defaults: CompatibleProviderDefaults) -
 
 
 def _resolve_chat_base_url(provider: str, defaults: CompatibleProviderDefaults) -> str:
-    base_url = _setting("chat_base_url", "")
+    base_url = settings.chat_base_url
     if base_url:
         return base_url
     if defaults.base_url:
@@ -543,22 +585,22 @@ def _resolve_chat_base_url(provider: str, defaults: CompatibleProviderDefaults) 
 def _provider_extra_body(provider: str, model: str) -> dict[str, Any]:
     extra_body: dict[str, Any] = {}
     if provider == "dashscope" and model.startswith("qwen3.5"):
-        extra_body["enable_thinking"] = bool(_setting("enable_thinking", False))
-    extra_body.update(_setting("chat_extra_body", {}) or {})
+        extra_body["enable_thinking"] = bool(settings.enable_thinking)
+    extra_body.update(settings.chat_extra_body or {})
     return extra_body
 
 
 def _build_openai_compatible_chat_model(provider: str) -> OpenAICompatibleChatModel:
     defaults = _resolve_provider_defaults(provider)
     api_key, api_key_env_var = _resolve_chat_api_key(provider, defaults)
-    model = _setting("chat_model_name", "qwen3.5-flash")
+    model = settings.chat_model_name
     extra_body = _provider_extra_body(provider, model)
     if provider == "dashscope":
         return DashScopeCompatibleChatModel(
             model=model,
             api_key=api_key,
             base_url=_resolve_chat_base_url(provider, defaults),
-            temperature=_setting("temperature", 0.0),
+            temperature=settings.temperature,
             enable_thinking=bool(extra_body.get("enable_thinking", False)),
             api_key_env_var=api_key_env_var,
             extra_body=extra_body,
@@ -570,13 +612,13 @@ def _build_openai_compatible_chat_model(provider: str) -> OpenAICompatibleChatMo
         api_key=api_key,
         api_key_env_var=api_key_env_var,
         base_url=_resolve_chat_base_url(provider, defaults),
-        temperature=_setting("temperature", 0.0),
+        temperature=settings.temperature,
         extra_body=extra_body,
     )
 
 
 def _build_tongyi_chat_model():
-    model = _setting("chat_model_name", "qwen3.5-flash")
+    model = settings.chat_model_name
     if model.startswith("qwen3.5"):
         raise ValueError(
             "Qwen3.5 models must use DOC_ASSISTANT_CHAT_API=compatible because "
@@ -585,30 +627,30 @@ def _build_tongyi_chat_model():
 
     return ChatTongyi(
         model=model,
-        temperature=_setting("temperature", 0.0),
-        api_key=_setting("dashscope_api_key", "") or _setting("chat_api_key", ""),
+        temperature=settings.temperature,
+        api_key=settings.dashscope_api_key or settings.chat_api_key,
     )
 
 
 def _chat_model_cache_key() -> tuple[object, ...]:
     return (
-        _normalise_provider(_setting("chat_provider", "dashscope")),
-        _normalise_chat_api(_setting("chat_api", "compatible")),
-        _setting("chat_model_name", "qwen3.5-flash"),
-        _setting("chat_api_key", ""),
-        _setting("dashscope_api_key", ""),
-        _setting("deepseek_api_key", ""),
-        _setting("chat_base_url", ""),
-        json.dumps(_setting("chat_extra_body", {}) or {}, sort_keys=True),
-        _setting("temperature", 0.0),
-        _setting("enable_thinking", False),
+        _normalise_provider(settings.chat_provider),
+        _normalise_chat_api(settings.chat_api),
+        settings.chat_model_name,
+        settings.chat_api_key,
+        settings.dashscope_api_key,
+        settings.deepseek_api_key,
+        settings.chat_base_url,
+        json.dumps(settings.chat_extra_body or {}, sort_keys=True),
+        settings.temperature,
+        settings.enable_thinking,
     )
 
 
 @lru_cache(maxsize=16)
 def _build_chat_model_cached(_cache_key: tuple[object, ...]):
-    provider = _normalise_provider(_setting("chat_provider", "dashscope"))
-    chat_api = _normalise_chat_api(_setting("chat_api", "compatible"))
+    provider = _normalise_provider(settings.chat_provider)
+    chat_api = _normalise_chat_api(settings.chat_api)
     if chat_api in {"compatible", "openai-compatible", "chat-completions"}:
         return _build_openai_compatible_chat_model(provider)
     if provider == "dashscope" and chat_api in {"tongyi", "native", "text-generation"}:
@@ -632,23 +674,23 @@ def build_embedding_model():
 
 def _embedding_model_cache_key() -> tuple[object, ...]:
     return (
-        _normalise_provider(_setting("embedding_provider", "dashscope")),
-        _setting("embedding_model_name", "text-embedding-v3"),
-        _setting("embedding_api_key", ""),
-        _setting("dashscope_api_key", ""),
-        _setting("embedding_base_url", ""),
-        _setting("chat_base_url", ""),
-        _setting("embedding_device", "cpu"),
+        _normalise_provider(settings.embedding_provider),
+        settings.embedding_model_name,
+        settings.embedding_api_key,
+        settings.dashscope_api_key,
+        settings.embedding_base_url,
+        settings.chat_base_url,
+        settings.embedding_device,
     )
 
 
 @lru_cache(maxsize=16)
 def _build_embedding_model_cached(_cache_key: tuple[object, ...]):
-    provider = _normalise_provider(_setting("embedding_provider", "dashscope"))
+    provider = _normalise_provider(settings.embedding_provider)
     if provider == "dashscope":
         return DashScopeEmbeddings(
-            model=_setting("embedding_model_name", "text-embedding-v3"),
-            dashscope_api_key=_setting("embedding_api_key", "") or _setting("dashscope_api_key", ""),
+            model=settings.embedding_model_name,
+            dashscope_api_key=settings.embedding_api_key or settings.dashscope_api_key,
         )
 
     if provider == "openai-compatible":
@@ -661,10 +703,10 @@ def _build_embedding_model_cached(_cache_key: tuple[object, ...]):
             ) from exc
 
         return OpenAIEmbeddings(
-            model=_setting("embedding_model_name", "text-embedding-3-small"),
-            openai_api_key=_setting("embedding_api_key", ""),
-            openai_api_base=_setting("embedding_base_url", "")
-            or _setting("chat_base_url", ""),
+            model=settings.embedding_model_name,
+            openai_api_key=settings.embedding_api_key,
+            openai_api_base=settings.embedding_base_url
+            or settings.chat_base_url,
         )
 
     if provider == "local":
@@ -677,8 +719,8 @@ def _build_embedding_model_cached(_cache_key: tuple[object, ...]):
             ) from exc
 
         return HuggingFaceEmbeddings(
-            model_name=_setting("embedding_model_name", "BAAI/bge-m3"),
-            model_kwargs={"device": _setting("embedding_device", "cpu")},
+            model_name=settings.embedding_model_name,
+            model_kwargs={"device": settings.embedding_device},
         )
 
     raise ValueError(

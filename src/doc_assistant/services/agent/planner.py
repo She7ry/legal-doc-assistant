@@ -13,6 +13,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from doc_assistant.config.settings import settings
+from doc_assistant.models.language_model import ChatModelProtocol
 from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
 from doc_assistant.services.agent._constants import (
     AGENT_TOOL_REGISTRY,
@@ -186,7 +187,7 @@ def _should_use_llm_planner(
     focus_areas: list[str],
     heuristic_plan: list[AgentPlanStep],
 ) -> bool:
-    if not getattr(settings, "agent_llm_planner_enabled", True):
+    if not settings.agent_llm_planner_enabled:
         return False
     if focus_areas:
         return False
@@ -228,7 +229,7 @@ def plan_task_with_llm(
         chat_model = qa_service.chat_model
         if isinstance(chat_model, BaseChatModel):
             llm = chat_model
-        elif callable(getattr(chat_model, "invoke_messages", None)):
+        elif isinstance(chat_model, ChatModelProtocol):
             llm = ChatOpenAICompatible(client=chat_model)
         else:
             response = qa_service._invoke_chat_messages(

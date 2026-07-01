@@ -261,7 +261,7 @@ def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
     assert "## Artifacts" in result.report
     assert "## Confirmation gates" in result.report
     assert "[S2]" in result.report
-    assert result.metadata["executor"] == "plan_react_v1"
+    assert result.metadata["executor"] == "plan_react_v2"  # P0-1: graph-native ReAct
     assert vector_store.queries
 
 

@@ -23,6 +23,7 @@ class AgentTaskStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     NEEDS_INPUT = "needs_input"
+    INTERRUPTED = "interrupted"  # P1-1: HITL 中断等待审批
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -241,6 +242,24 @@ class AgentTaskStore:
                 progress=0,
                 message="需要补充信息后再运行 Agent 任务。",
                 payload={"questions": questions[:3]},
+            )
+
+    def mark_interrupted(self, task_id: str, interrupt_data: dict[str, Any]) -> None:
+        """P1-1: Mark task as interrupted by HITL confirmation gates."""
+        with self._lock:
+            record = self._require_record(task_id)
+            record.status = AgentTaskStatus.INTERRUPTED
+            record.stage = "confirmation_required"
+            record.progress = 95
+            record.result = None
+            self._save_record(record)
+            self._append_event(
+                task_id,
+                event_type="interrupted",
+                stage="confirmation_required",
+                progress=95,
+                message="Task requires human review before finalization.",
+                payload=interrupt_data,
             )
 
     def resume_with_input(

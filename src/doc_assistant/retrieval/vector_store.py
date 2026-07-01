@@ -10,14 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
-import re
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,59 +30,36 @@ from doc_assistant.ingestion.document_loader import (
 )
 from doc_assistant.models.language_model import build_embedding_model
 from doc_assistant.observability import traced_operation
-from doc_assistant.retrieval.bm25_index import BM25Document, PersistentBM25Index
+from doc_assistant.retrieval._bm25_utils import (
+    _bm25_documents_for_chunks,
+    _bm25_documents_for_records,
+    _bm25_index_path,
+    _bm25_rank,
+    _clean_metadata,
+    _MAX_COLLECTION_NAME_LENGTH,
+    _metadata_is_active,
+    _sanitize_collection_component,
+)
+from doc_assistant.retrieval._chunking import (
+    INGESTION_CHUNK_SEPARATORS,
+    chunk_text_with_heading,
+    split_documents_for_ingestion,
+)
+from doc_assistant.retrieval._search_utils import (
+    _clamp_float,
+    _lexical_rerank_score,
+    _SearchCandidate,
+    _select_diverse_candidates,
+    _tokenize_for_search,
+)
+from doc_assistant.retrieval.bm25_index import PersistentBM25Index
 from doc_assistant.schemas.citation import IngestResult
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION_COMPONENT_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
-_MAX_COLLECTION_NAME_LENGTH = 63
-_SEARCH_TOKEN_PATTERN = re.compile(
-    r"[A-Za-z]+(?:[-_][A-Za-z0-9]+)*|\d+(?:\.\d+)*%?|[\u4e00-\u9fff]"
-)
-_LEGAL_SECTION_PATTERN = re.compile(
-    r"^\s*("
-    r"第[一二三四五六七八九十百千万\d]+[章节条款项]|"
-    r"\d+(?:\.\d+)*[\.)、]?|"
-    r"(?:Section|Article|Clause|Schedule|Exhibit|Appendix)\s+[\w\dIVXLC]+"
-    r")\s*[:：.-]?\s*(.*)$",
-    re.IGNORECASE,
-)
-INGESTION_CHUNK_SEPARATORS: tuple[str, ...] = (
-    "\n第",
-    "\nSection ",
-    "\nArticle ",
-    "\nClause ",
-    "\nSchedule ",
-    "\nExhibit ",
-    "\n\n",
-    "\n",
-    "。 ",
-    "；",
-    ". ",
-    "; ",
-    ", ",
-    " ",
-    "",
-)
 ProgressCallback = Callable[[str, int, str | None], None]
 
 
-@dataclass
-class _SearchCandidate:
-    """混合检索流水线中的单个候选 chunk，携带 dense/BM25/RRF 各阶段分数。"""
-
-    identity: str
-    document: Document
-    dense_rank: int | None = None
-    dense_score: float | None = None
-    bm25_rank: int | None = None
-    bm25_score: float | None = None
-    bm25_relevance: float = 0.0
-    rrf_score: float = 0.0
-    rerank_score: float = 0.0
-    rank_score: float = 0.0
-    relevance: float = 0.0
 
 
 class _QueryCache:
@@ -744,223 +717,22 @@ def _records_from_collection(collection: dict[str, Any]) -> list[dict[str, Any]]
     return records
 
 
-def _bm25_index_path(persist_directory: Path, collection_name: str) -> Path:
-    return persist_directory / f"{_sanitize_collection_component(collection_name)}_bm25.sqlite3"
 
 
-def _bm25_documents_for_chunks(
-    chunks: list[Document],
-    ids: list[str],
-) -> list[BM25Document]:
-    documents = []
-    for chunk, doc_id in zip(chunks, ids, strict=True):
-        record = {
-            "id": doc_id,
-            "metadata": chunk.metadata or {},
-            "document": chunk.page_content or "",
-        }
-        indexed = _bm25_document_for_record(record)
-        if indexed is not None:
-            documents.append(indexed)
-    return documents
 
 
-def _bm25_documents_for_records(records: list[dict[str, Any]]) -> list[BM25Document]:
-    documents = []
-    for record in records:
-        indexed = _bm25_document_for_record(record)
-        if indexed is not None:
-            documents.append(indexed)
-    return documents
 
 
-def _bm25_document_for_record(record: dict[str, Any]) -> BM25Document | None:
-    record_id = str(record.get("id") or "")
-    if not record_id:
-        return None
-
-    metadata = dict(record.get("metadata") or {})
-    search_text = _record_search_text(record)
-    tokens = _tokenize_for_search(search_text)
-    if not tokens:
-        return None
-
-    return BM25Document(
-        doc_id=record_id,
-        tokens=tokens,
-        document=str(record.get("document") or ""),
-        metadata=_clean_metadata(metadata),
-        active=_metadata_is_active(metadata),
-    )
 
 
-def _bm25_rank(
-    query: str,
-    records: list[dict[str, Any]],
-    k: int,
-) -> list[tuple[Document, float, str]]:
-    query_tokens = _tokenize_for_search(query)
-    if not query_tokens:
-        return []
-
-    indexed_records = []
-    document_frequency: Counter[str] = Counter()
-    total_length = 0
-    for record in records:
-        text = _record_search_text(record)
-        tokens = _tokenize_for_search(text)
-        if not tokens:
-            continue
-        counts = Counter(tokens)
-        indexed_records.append((record, counts, len(tokens)))
-        document_frequency.update(counts.keys())
-        total_length += len(tokens)
-
-    document_count = len(indexed_records)
-    if document_count == 0:
-        return []
-
-    average_length = total_length / document_count
-    query_counts = Counter(query_tokens)
-    scored_documents = []
-    for record, token_counts, document_length in indexed_records:
-        score = _bm25_score(
-            query_counts,
-            token_counts,
-            document_frequency,
-            document_count=document_count,
-            document_length=document_length,
-            average_length=average_length,
-        )
-        if score <= 0:
-            continue
-        scored_documents.append(
-            (
-                Document(
-                    page_content=str(record.get("document") or ""),
-                    metadata=dict(record.get("metadata") or {}),
-                ),
-                score,
-                str(record.get("id") or ""),
-            )
-        )
-
-    return sorted(scored_documents, key=lambda item: item[1], reverse=True)[:k]
 
 
-def _bm25_score(
-    query_counts: Counter[str],
-    token_counts: Counter[str],
-    document_frequency: Counter[str],
-    *,
-    document_count: int,
-    document_length: int,
-    average_length: float,
-) -> float:
-    k1 = 1.5
-    b = 0.75
-    score = 0.0
-    normalizer = k1 * (1 - b + b * (document_length / max(average_length, 1.0)))
-    for token, query_frequency in query_counts.items():
-        term_frequency = token_counts.get(token, 0)
-        if term_frequency == 0:
-            continue
-        term_document_frequency = document_frequency.get(token, 0)
-        idf = math.log(1 + (document_count - term_document_frequency + 0.5) / (term_document_frequency + 0.5))
-        score += query_frequency * idf * (
-            term_frequency * (k1 + 1) / (term_frequency + normalizer)
-        )
-    return score
 
 
-def _record_search_text(record: dict[str, Any]) -> str:
-    metadata = record.get("metadata") or {}
-    parts = [
-        str(metadata.get("file_name") or metadata.get("source") or ""),
-        str(record.get("document") or ""),
-    ]
-    section_heading = metadata.get("section_heading")
-    if section_heading:
-        heading = str(section_heading)
-        parts.extend([heading, heading])
-    return "\n".join(part for part in parts if part)
 
 
-def _lexical_rerank_score(query: str, document: Document) -> float:
-    query_tokens = set(_tokenize_for_search(query))
-    if not query_tokens:
-        return 0.0
-
-    metadata = document.metadata or {}
-    document_text = "\n".join(
-        part
-        for part in [
-            str(metadata.get("section_heading") or ""),
-            document.page_content or "",
-        ]
-        if part
-    )
-    document_tokens = set(_tokenize_for_search(document_text))
-    if not document_tokens:
-        return 0.0
-
-    token_overlap = len(query_tokens & document_tokens) / len(query_tokens)
-    query_numbers = {token for token in query_tokens if any(char.isdigit() for char in token)}
-    if query_numbers:
-        number_overlap = len(query_numbers & document_tokens) / len(query_numbers)
-    else:
-        number_overlap = 0.0
-    phrase_bonus = 1.0 if query.strip().casefold() in document_text.casefold() else 0.0
-    return _clamp_float(
-        0.75 * token_overlap + 0.20 * number_overlap + 0.05 * phrase_bonus,
-        minimum=0.0,
-        maximum=1.0,
-    )
 
 
-def _tokenize_for_search(text: str) -> list[str]:
-    return [token.casefold() for token in _SEARCH_TOKEN_PATTERN.findall(text or "")]
-
-
-def build_ingestion_text_splitter(
-    *,
-    chunk_size: int | None = None,
-    chunk_overlap: int | None = None,
-) -> RecursiveCharacterTextSplitter:
-    return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size or settings.chunk_size,
-        chunk_overlap=chunk_overlap if chunk_overlap is not None else settings.chunk_overlap,
-        separators=list(INGESTION_CHUNK_SEPARATORS),
-    )
-
-
-def split_documents_for_ingestion(
-    documents: list[Document],
-    *,
-    splitter: RecursiveCharacterTextSplitter | None = None,
-) -> list[Document]:
-    text_splitter = splitter or build_ingestion_text_splitter()
-    chunks = text_splitter.split_documents(split_legal_sections(documents))
-    for chunk in chunks:
-        chunk.page_content = chunk_text_with_heading(
-            chunk.page_content,
-            chunk.metadata.get("section_heading"),
-        )
-    return chunks
-
-
-def chunk_text_with_heading(text: str, heading: Any) -> str:
-    heading_text = str(heading or "").strip()
-    content = text or ""
-    if not heading_text:
-        return content
-    if content.lstrip().startswith(heading_text):
-        return content
-    return f"{heading_text}\n{content}".strip()
-
-
-def _chunk_text_with_heading(text: str, heading: Any) -> str:
-    return chunk_text_with_heading(text, heading)
 
 
 def _document_identity(document: Document, fallback_id: str | None) -> str:
@@ -984,64 +756,6 @@ def _document_identity(document: Document, fallback_id: str | None) -> str:
     return hashlib.sha1(fallback.encode("utf-8")).hexdigest()
 
 
-def _select_diverse_candidates(
-    candidates: list[_SearchCandidate],
-    *,
-    top_k: int,
-    lambda_mult: float,
-) -> list[_SearchCandidate]:
-    """MMR（Maximal Marginal Relevance）多样性选择，平衡相关性与结果差异性。"""
-    if lambda_mult >= 1.0:
-        return candidates[:top_k]
-
-    selected: list[_SearchCandidate] = []
-    remaining = list(candidates)
-    selected_token_sets: list[set[str]] = []
-    token_sets = {
-        candidate.identity: set(_tokenize_for_search(candidate.document.page_content))
-        for candidate in candidates
-    }
-
-    while remaining and len(selected) < top_k:
-        best_candidate = max(
-            remaining,
-            key=lambda candidate: (
-                _mmr_score(
-                    candidate,
-                    token_sets.get(candidate.identity, set()),
-                    selected_token_sets,
-                    lambda_mult=lambda_mult,
-                ),
-                candidate.rank_score,
-            ),
-        )
-        selected.append(best_candidate)
-        selected_token_sets.append(token_sets.get(best_candidate.identity, set()))
-        remaining.remove(best_candidate)
-
-    return selected
-
-
-def _mmr_score(
-    candidate: _SearchCandidate,
-    candidate_tokens: set[str],
-    selected_token_sets: list[set[str]],
-    *,
-    lambda_mult: float,
-) -> float:
-    if not selected_token_sets:
-        return candidate.relevance
-    max_similarity = max(
-        (_jaccard_similarity(candidate_tokens, selected_tokens) for selected_tokens in selected_token_sets),
-        default=0.0,
-    )
-    return lambda_mult * candidate.relevance - (1 - lambda_mult) * max_similarity
-
-
-def _jaccard_similarity(left: set[str], right: set[str]) -> float:
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
 
 
 def _document_with_retrieval_metadata(candidate: _SearchCandidate) -> Document:
@@ -1069,10 +783,6 @@ def _copy_document(document: Document) -> Document:
     return Document(page_content=document.page_content, metadata=dict(document.metadata or {}))
 
 
-def _clamp_float(value: float | None, *, minimum: float, maximum: float) -> float:
-    if value is None:
-        return minimum
-    return max(minimum, min(maximum, float(value)))
 
 
 def collection_name_for_tenant(base_name: str, tenant_id: str | None) -> str:
@@ -1090,11 +800,6 @@ def collection_name_for_tenant(base_name: str, tenant_id: str | None) -> str:
     return f"{base[:available_base_length].rstrip('_-')}_{digest}"
 
 
-def _sanitize_collection_component(value: str) -> str:
-    sanitized = _COLLECTION_COMPONENT_PATTERN.sub("_", value.strip()).strip("_-")
-    if len(sanitized) < 3:
-        sanitized = f"{sanitized or 'col'}_collection"
-    return sanitized[:_MAX_COLLECTION_NAME_LENGTH].strip("_-") or "col_collection"
 
 
 def document_key_for_file_name(file_name: str) -> str:
@@ -1139,72 +844,9 @@ def _page_count(documents: list[Document]) -> int | None:
     return len(documents) if documents else None
 
 
-def split_legal_sections(documents: list[Document]) -> list[Document]:
-    section_documents = []
-    for document in documents:
-        text = document.page_content or ""
-        blocks = _section_blocks(text)
-        if len(blocks) <= 1:
-            section_documents.append(document)
-            continue
-
-        for section_index, (heading, content) in enumerate(blocks):
-            metadata = dict(document.metadata)
-            metadata["section_index"] = section_index
-            if heading:
-                metadata["section_heading"] = heading[:180]
-            section_documents.append(Document(page_content=content, metadata=metadata))
-
-    return section_documents
 
 
-def _split_legal_sections(documents: list[Document]) -> list[Document]:
-    return split_legal_sections(documents)
 
-
-def _section_blocks(text: str) -> list[tuple[str | None, str]]:
-    blocks: list[tuple[str | None, str]] = []
-    current_lines: list[str] = []
-    current_heading: str | None = None
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            if current_lines:
-                current_lines.append("")
-            continue
-
-        heading = _legal_section_heading(line)
-        if heading and current_lines:
-            content = "\n".join(current_lines).strip()
-            if content:
-                blocks.append((current_heading, content))
-            current_lines = [line]
-            current_heading = heading
-            continue
-
-        if heading and not current_lines:
-            current_heading = heading
-        current_lines.append(line)
-
-    content = "\n".join(current_lines).strip()
-    if content:
-        blocks.append((current_heading, content))
-
-    return blocks or [(None, text)]
-
-
-def _legal_section_heading(line: str) -> str | None:
-    if len(line) > 220:
-        return None
-    match = _LEGAL_SECTION_PATTERN.match(line)
-    if not match:
-        return None
-    return " ".join(line.split())
-
-
-def _metadata_is_active(metadata: dict[str, Any]) -> bool:
-    return metadata.get("active", True) is not False
 
 
 def _metadata_int(metadata: dict[str, Any], key: str, default: int) -> int:
@@ -1264,15 +906,12 @@ def _document_preview_sort_key(record: dict[str, Any]) -> tuple[int, int, str]:
         page if page is not None else 1_000_000_000,
         str(record.get("id") or ""),
     )
+# ── re-exports (backward compatibility) ──────────────────────────
+from doc_assistant.retrieval._chunking import (  # noqa: E402
+    _LEGAL_SECTION_PATTERN,
+    build_ingestion_text_splitter,
+    split_legal_sections,
+)
 
-
-def _clean_metadata(metadata: dict[str, Any]) -> dict[str, str | int | float | bool]:
-    clean: dict[str, str | int | float | bool] = {}
-    for key, value in metadata.items():
-        if key == INGEST_WARNINGS_METADATA_KEY or value is None:
-            continue
-        if isinstance(value, str | int | float | bool):
-            clean[key] = value
-        else:
-            clean[key] = str(value)
-    return clean
+_split_legal_sections = split_legal_sections
+_chunk_text_with_heading = chunk_text_with_heading

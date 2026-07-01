@@ -24,6 +24,7 @@ from api.task_queue import submit_background_task
 from doc_assistant.services.agent._constants import clarification_questions_for_task
 from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.matter.store import MatterStore
+from langgraph.errors import GraphInterrupt
 
 logger = logging.getLogger(__name__)
 
@@ -177,9 +178,15 @@ def _run_agent_task(
             task_id=task_id,
             matter_id=record.matter_id,
             progress_callback=progress_callback,
+            thread_id=task_id,  # P1-1: checkpoint thread
         )
         response = AgentTaskResponse.from_result(result)
         encoded_response = jsonable_encoder(response)
+    except GraphInterrupt as interrupt_exc:
+        # P1-1: 图在 finalize_result 因确认闸门而中断
+        interrupt_data = interrupt_exc.args[0] if interrupt_exc.args else {}
+        task_store.mark_interrupted(task_id, interrupt_data)
+        return
     except Exception as exc:
         logger.exception("Agent task failed", extra={"task_id": task_id})
         task_store.mark_failed(task_id, f"Failed to run Agent task: {exc}")

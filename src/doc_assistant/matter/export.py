@@ -9,7 +9,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from doc_assistant.matter.store import MatterArtifactRecord, MatterRecord
+from doc_assistant.matter.schemas import MatterArtifactRecord, MatterRecord
 
 
 def artifact_markdown_filename(matter_id: str, artifact_id: str, version: int) -> str:

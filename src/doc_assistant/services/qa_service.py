@@ -25,41 +25,17 @@ from langchain_core.prompts import PromptTemplate
 from doc_assistant.config.settings import settings
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.memory.service import MemoryService
-from doc_assistant.models.language_model import build_chat_model
+from doc_assistant.models.language_model import (
+    AsyncChatModelProtocol,
+    ChatModelProtocol,
+    build_chat_model,
+)
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.services.answer_guard import AnswerGuardResult, validate_answer
-from doc_assistant.services.clause_review import (
-    clause_review_metadata,
-    empty_clause_review_metadata,
-    render_clause_review,
-)
-from doc_assistant.services.conflict_check import (
-    conflict_metadata,
-    empty_conflict_metadata,
-    render_conflict_check,
-)
 from doc_assistant.services.evidence import build_evidence_profile
-from doc_assistant.services.review_taxonomy import (
-    ClauseProfile,
-    clause_taxonomy_prompt,
-    conflict_types_prompt,
-    resolve_clause_profile,
-)
 from doc_assistant.utils.coercion import (
-    as_list_str,
-    as_str,
-    citation_suffix,
-    coerce_bool,
-    coerce_conflict_status,
-    coerce_conflict_type,
-    coerce_risk_level,
-    extract_json_object,
-    first_source_id,
-    format_source_refs,
     optional_str,
-    risk_reason_list,
-    source_id_list,
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
@@ -108,6 +84,17 @@ class PreparedQAAnswer:
     user_message_recorded: bool
     task_id: str | None = None
     has_retrieved_documents: bool = True
+
+
+@dataclass(frozen=True)
+class _MemoryEnrichment:
+    """``_enrich_memory_context()`` 的返回结果，封装记忆富化阶段的所有产出。"""
+
+    resolved_conversation_id: str
+    memory_candidates: list[MemoryCandidate]
+    memory_context: str
+    user_message_recorded: bool
+    persisted_history: list[dict[str, str]]
 
 
 class DocumentQAService:
@@ -218,19 +205,19 @@ class DocumentQAService:
             },
         )
 
-    def prepare_answer(
+    # ── 记忆富化（同步，供 prepare / aprepare 共享） ──────────────────────
+
+    def _enrich_memory_context(
         self,
         question: str,
-        chat_history: list[dict[str, object]] | None = None,
-        user_id: str | None = None,
-        conversation_id: str | None = None,
-        task_id: str | None = None,
-        merge_persisted_history: bool = True,
-    ) -> PreparedQAAnswer:
-        """问答准备阶段：加载记忆与历史 → 改写检索 query → 向量检索 → 组装 prompt。
+        chat_history: list[dict[str, object]] | None,
+        user_id: str | None,
+        conversation_id: str | None,
+        merge_persisted_history: bool,
+    ) -> _MemoryEnrichment:
+        """记忆富化：确保会话存在 → 加载历史 → 记录用户消息 → 检索相关记忆。
 
-        无检索结果时切换 general_prompt，避免模型假装有文档依据。
-        记忆服务失败时静默降级，不阻断主流程。
+        失败时静默降级，不阻断主流程。
         """
         resolved_conversation_id = conversation_id
         memory_candidates: list[MemoryCandidate] = []
@@ -282,26 +269,36 @@ class DocumentQAService:
                 memory_candidates = []
                 memory_context = "No relevant user memory."
 
-        effective_chat_history = self._merge_chat_history(
-            persisted_history,
-            incoming_history,
-            max_messages=settings.chat_history_window,
+        return _MemoryEnrichment(
+            resolved_conversation_id=resolved_conversation_id,
+            memory_candidates=memory_candidates,
+            memory_context=memory_context,
+            user_message_recorded=user_message_recorded,
+            persisted_history=persisted_history,
         )
-        chat_history_text = self._format_chat_history(
-            effective_chat_history,
-            max_messages=settings.chat_history_window,
-        )
-        retrieval_query = self._rewrite_query(question, chat_history_text)
-        documents = self.vector_store.search(retrieval_query)
+
+    # ── 检索后组装（供 prepare / aprepare 共享） ──────────────────────────
+
+    def _finalize_preparation(
+        self,
+        question: str,
+        enrichment: _MemoryEnrichment,
+        chat_history_text: str,
+        retrieval_query: str,
+        documents: list[Document],
+        task_id: str | None,
+        user_id: str | None,
+    ) -> PreparedQAAnswer:
+        """从记忆富化结果 + 检索结果组装最终的 PreparedQAAnswer。"""
         self._log_retrieval(
             question=retrieval_query,
             user_id=user_id,
-            conversation_id=resolved_conversation_id,
+            conversation_id=enrichment.resolved_conversation_id,
             document_count=len(documents),
-            memory_candidates=memory_candidates,
+            memory_candidates=enrichment.memory_candidates,
         )
         memories_used = (
-            self.memory_service.usages_from_candidates(memory_candidates)
+            self.memory_service.usages_from_candidates(enrichment.memory_candidates)
             if self.memory_service
             else []
         )
@@ -309,15 +306,15 @@ class DocumentQAService:
             task_prompt = self.general_prompt.format(
                 question=question,
                 chat_history=chat_history_text,
-                user_memory=memory_context,
+                user_memory=enrichment.memory_context,
             )
             return PreparedQAAnswer(
                 messages=self._build_messages(task_prompt),
                 citations=[],
                 memories_used=memories_used,
                 user_id=user_id,
-                conversation_id=resolved_conversation_id,
-                user_message_recorded=user_message_recorded,
+                conversation_id=enrichment.resolved_conversation_id,
+                user_message_recorded=enrichment.user_message_recorded,
                 task_id=task_id,
                 has_retrieved_documents=False,
             )
@@ -327,17 +324,50 @@ class DocumentQAService:
             question=question,
             context=context,
             chat_history=chat_history_text,
-            user_memory=memory_context,
+            user_memory=enrichment.memory_context,
         )
         return PreparedQAAnswer(
             messages=self._build_messages(task_prompt),
             citations=citations,
             memories_used=memories_used,
             user_id=user_id,
-            conversation_id=resolved_conversation_id,
-            user_message_recorded=user_message_recorded,
+            conversation_id=enrichment.resolved_conversation_id,
+            user_message_recorded=enrichment.user_message_recorded,
             task_id=task_id,
             has_retrieved_documents=True,
+        )
+
+    def prepare_answer(
+        self,
+        question: str,
+        chat_history: list[dict[str, object]] | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+        merge_persisted_history: bool = True,
+    ) -> PreparedQAAnswer:
+        """问答准备阶段：加载记忆与历史 → 改写检索 query → 向量检索 → 组装 prompt。
+
+        无检索结果时切换 general_prompt，避免模型假装有文档依据。
+        记忆服务失败时静默降级，不阻断主流程。
+        """
+        enrichment = self._enrich_memory_context(
+            question, chat_history, user_id, conversation_id, merge_persisted_history,
+        )
+        incoming_history = chat_history or []
+        effective_chat_history = self._merge_chat_history(
+            enrichment.persisted_history,
+            incoming_history,
+            max_messages=settings.chat_history_window,
+        )
+        chat_history_text = self._format_chat_history(
+            effective_chat_history,
+            max_messages=settings.chat_history_window,
+        )
+        retrieval_query = self._rewrite_query(question, chat_history_text)
+        documents = self.vector_store.search(retrieval_query)
+        return self._finalize_preparation(
+            question, enrichment, chat_history_text, retrieval_query, documents, task_id, user_id,
         )
 
     async def aprepare_answer(
@@ -349,64 +379,14 @@ class DocumentQAService:
         task_id: str | None = None,
         merge_persisted_history: bool = True,
     ) -> PreparedQAAnswer:
-        """异步版 prepare_answer：记忆检索与向量检索可并发执行。"""
-        resolved_conversation_id = conversation_id
-        memory_candidates: list[MemoryCandidate] = []
-        memory_context = "No relevant user memory."
-        user_message_recorded = False
-        persisted_history: list[dict[str, str]] = []
+        """异步版 prepare_answer：记忆富化与向量检索通过线程池执行。"""
+        enrichment = await asyncio.to_thread(
+            self._enrich_memory_context,
+            question, chat_history, user_id, conversation_id, merge_persisted_history,
+        )
         incoming_history = chat_history or []
-
-        if self.memory_service and user_id:
-            try:
-                resolved_conversation_id = await asyncio.to_thread(
-                    self.memory_service.ensure_context,
-                    self.tenant_id,
-                    user_id,
-                    conversation_id,
-                )
-                if merge_persisted_history:
-                    persisted_history = await asyncio.to_thread(
-                        self.memory_service.load_conversation_history,
-                        self.tenant_id,
-                        user_id,
-                        resolved_conversation_id,
-                        max(settings.chat_history_window, len(incoming_history)),
-                    )
-                message_id = await asyncio.to_thread(
-                    self.memory_service.record_user_message,
-                    tenant_id=self.tenant_id,
-                    user_id=user_id,
-                    conversation_id=resolved_conversation_id,
-                    content=question,
-                )
-                user_message_recorded = True
-                await asyncio.to_thread(
-                    self.memory_service.write_memories_from_user_message,
-                    tenant_id=self.tenant_id,
-                    user_id=user_id,
-                    conversation_id=resolved_conversation_id,
-                    message_id=message_id,
-                    content=question,
-                )
-                memory_candidates = await asyncio.to_thread(
-                    self.memory_service.retrieve_relevant_memories,
-                    tenant_id=self.tenant_id,
-                    user_id=user_id,
-                    query=question,
-                )
-                memory_context = self.memory_service.format_for_prompt(memory_candidates)
-            except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-                logger.warning(
-                    "Memory enrichment failed; continuing without memory context.",
-                    extra={"tenant_id": self.tenant_id, "user_id": user_id, "memory_available": False},
-                    exc_info=True,
-                )
-                memory_candidates = []
-                memory_context = "No relevant user memory."
-
         effective_chat_history = self._merge_chat_history(
-            persisted_history,
+            enrichment.persisted_history,
             incoming_history,
             max_messages=settings.chat_history_window,
         )
@@ -414,60 +394,10 @@ class DocumentQAService:
             effective_chat_history,
             max_messages=settings.chat_history_window,
         )
-
-        # query rewrite 和向量检索并发执行
-        retrieval_query = await asyncio.to_thread(
-            self._rewrite_query, question, chat_history_text
-        )
-        documents = await asyncio.to_thread(
-            self.vector_store.search, retrieval_query
-        )
-
-        self._log_retrieval(
-            question=retrieval_query,
-            user_id=user_id,
-            conversation_id=resolved_conversation_id,
-            document_count=len(documents),
-            memory_candidates=memory_candidates,
-        )
-        memories_used = (
-            self.memory_service.usages_from_candidates(memory_candidates)
-            if self.memory_service
-            else []
-        )
-        if not documents:
-            task_prompt = self.general_prompt.format(
-                question=question,
-                chat_history=chat_history_text,
-                user_memory=memory_context,
-            )
-            return PreparedQAAnswer(
-                messages=self._build_messages(task_prompt),
-                citations=[],
-                memories_used=memories_used,
-                user_id=user_id,
-                conversation_id=resolved_conversation_id,
-                user_message_recorded=user_message_recorded,
-                task_id=task_id,
-                has_retrieved_documents=False,
-            )
-
-        context, citations = self._format_context(documents)
-        task_prompt = self.prompt.format(
-            question=question,
-            context=context,
-            chat_history=chat_history_text,
-            user_memory=memory_context,
-        )
-        return PreparedQAAnswer(
-            messages=self._build_messages(task_prompt),
-            citations=citations,
-            memories_used=memories_used,
-            user_id=user_id,
-            conversation_id=resolved_conversation_id,
-            user_message_recorded=user_message_recorded,
-            task_id=task_id,
-            has_retrieved_documents=True,
+        retrieval_query = self._rewrite_query(question, chat_history_text)
+        documents = await asyncio.to_thread(self.vector_store.search, retrieval_query)
+        return self._finalize_preparation(
+            question, enrichment, chat_history_text, retrieval_query, documents, task_id, user_id,
         )
 
     def stream_prepared_answer(self, prepared: PreparedQAAnswer) -> Iterator[str]:
@@ -495,112 +425,15 @@ class DocumentQAService:
 
     def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
         """按条款类型检索文档并输出结构化风险审查（高/中/低 + 理由 + 引用）。"""
-        profile = resolve_clause_profile(clause_type)
-        documents = self.vector_store.search(profile.expanded_query(clause_type), k=top_k)
-        if not documents:
-            metadata = empty_clause_review_metadata(clause_type, profile)
-            return QAAnswer(
-                content=render_clause_review(metadata, []),
-                citations=[],
-                confidence="Low",
-                metadata=metadata,
-            )
+        from doc_assistant.services.review_service import review_clause as _review
 
-        context, citations = self._format_context(documents)
-        task_prompt = self.clause_review_prompt.format(
-            clause_type=clause_type,
-            normalized_clause_type=profile.label,
-            clause_taxonomy=clause_taxonomy_prompt(),
-            risk_rules=profile.risk_rules_prompt(),
-            context=context,
-        )
-        raw_content = self._invoke_chat_messages(self._build_messages(task_prompt))
-        metadata = clause_review_metadata(clause_type, profile, raw_content, citations)
-        content = (
-            render_clause_review(metadata, citations)
-            if metadata.get("structured")
-            else raw_content
-        )
-        guard_result = validate_answer(content, citations, has_retrieved_documents=True)
-        if guard_result.needs_repair:
-            content = self._repair_content(content, guard_result, citations)
-            guard_result = validate_answer(content, citations, has_retrieved_documents=True)
-        return QAAnswer(
-            content=content,
-            citations=citations,
-            confidence=guard_result.confidence,
-            guard_warnings=guard_result.issues,
-            metadata={k: v for k, v in metadata.items() if k != "structured"},
-        )
+        return _review(self, clause_type, top_k)
 
     def check_conflict(self, contract_query: str, policy_query: str, top_k: int | None = None) -> QAAnswer:
         """分别检索合同与政策片段，比对义务/定义是否冲突并输出结构化结论。"""
-        contract_docs = self.vector_store.search(contract_query, k=top_k)
-        policy_docs = self.vector_store.search(policy_query, k=top_k)
+        from doc_assistant.services.review_service import check_conflict as _check
 
-        if not contract_docs and not policy_docs:
-            metadata = empty_conflict_metadata()
-            return QAAnswer(
-                content=render_conflict_check(metadata),
-                citations=[],
-                confidence="Low",
-                metadata=metadata,
-            )
-
-        contract_context, contract_citations = self._format_context_prefixed(contract_docs, prefix="C")
-        policy_context, policy_citations = self._format_context_prefixed(policy_docs, prefix="P")
-        citations = contract_citations + policy_citations
-
-        task_prompt = self.conflict_check_prompt.format(
-            contract_context=contract_context or "No contract excerpts found.",
-            policy_context=policy_context or "No policy excerpts found.",
-            conflict_types=conflict_types_prompt(),
-        )
-        raw_content = self._invoke_chat_messages(self._build_messages(task_prompt))
-        metadata = conflict_metadata(raw_content, citations)
-        content = (
-            render_conflict_check(metadata)
-            if metadata.get("structured")
-            else raw_content
-        )
-        guard_result = validate_answer(content, citations, has_retrieved_documents=True)
-        if guard_result.needs_repair:
-            content = self._repair_content(content, guard_result, citations)
-            guard_result = validate_answer(content, citations, has_retrieved_documents=True)
-        return QAAnswer(
-            content=content,
-            citations=citations,
-            confidence=guard_result.confidence,
-            guard_warnings=guard_result.issues,
-            metadata={k: v for k, v in metadata.items() if k != "structured"},
-        )
-
-    # ── 向后兼容的静态/类方法代理 ──────────────────────────────────────────
-    # 已有代码可能通过 DocumentQAService._extract_json_object 等调用。
-
-    _extract_json_object = staticmethod(extract_json_object)
-    _as_str = staticmethod(as_str)
-    _optional_str = staticmethod(optional_str)  # type: ignore[assignment]
-    _as_list_str = staticmethod(as_list_str)  # type: ignore[assignment]
-    _coerce_bool = staticmethod(coerce_bool)
-    _coerce_risk_level = staticmethod(coerce_risk_level)
-    _coerce_conflict_status = staticmethod(coerce_conflict_status)
-    _coerce_conflict_type = staticmethod(coerce_conflict_type)
-    _first_source_id = staticmethod(first_source_id)
-    _format_source_refs = staticmethod(format_source_refs)
-
-    @classmethod
-    def _infer_conflict_status(cls, content: str) -> str:
-        return coerce_conflict_status(content)
-
-    def _source_id_list(self, value: Any, citations: list[Citation], prefix: str | None = None) -> list[str]:
-        return source_id_list(value, citations, prefix)
-
-    def _citation_suffix(self, source_ids: list[Any], citations: list[Citation]) -> str:
-        return citation_suffix(source_ids, citations)
-
-    def _risk_reason_list(self, value: Any, citations: list[Citation]) -> list[dict[str, str | None]]:
-        return risk_reason_list(value, citations)
+        return _check(self, contract_query, policy_query, top_k)
 
     # ── 内部方法 ──────────────────────────────────────────────────────────
 
@@ -616,7 +449,7 @@ class DocumentQAService:
         guard_result: AnswerGuardResult,
         prepared: PreparedQAAnswer,
     ) -> str:
-        return self.repair_content(answer, guard_result, prepared.citations)
+        return self._repair_content(answer, guard_result, prepared.citations)
 
     def repair_content(
         self,
@@ -624,6 +457,7 @@ class DocumentQAService:
         guard_result: AnswerGuardResult,
         citations: list[Citation],
     ) -> str:
+        """Public entry point for answer repair (e.g. from streaming / Agent paths)."""
         return self._repair_content(answer, guard_result, citations)
 
     def _repair_content(
@@ -648,7 +482,7 @@ class DocumentQAService:
         return self._invoke_chat_messages(self._build_messages(repair_prompt))
 
     def _rewrite_query(self, question: str, chat_history_text: str) -> str:
-        if not getattr(settings, "query_rewrite_enabled", True):
+        if not settings.query_rewrite_enabled:
             return question
         if chat_history_text == "No previous messages.":
             return question
@@ -669,7 +503,7 @@ class DocumentQAService:
                     {"role": "user", "content": prompt},
                 ]
             ).strip()
-        except Exception:
+        except (OSError, RuntimeError, ValueError) as exc:
             logger.debug(
                 "Query rewrite failed; using original question.",
                 extra={"tenant_id": self.tenant_id},
@@ -751,11 +585,12 @@ class DocumentQAService:
         return " ".join(text.split())
 
     def _invoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        invoke_messages = getattr(self.chat_model, "invoke_messages", None)
-        if callable(invoke_messages):
-            response = invoke_messages(messages)
+        # 1) 项目自己的 ChatModelProtocol（首选）
+        if isinstance(self.chat_model, ChatModelProtocol):
+            response = self.chat_model.invoke_messages(messages)
             return str(response.get("content") or "")
 
+        # 2) LangChain BaseChatModel 兼容（FakeListChatModel 等）
         invoke = getattr(self.chat_model, "invoke", None)
         if callable(invoke):
             try:
@@ -768,33 +603,19 @@ class DocumentQAService:
         raise ValueError("The configured chat model does not support message-based chat.")
 
     async def _ainvoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        ainvoke_messages = getattr(self.chat_model, "ainvoke_messages", None)
-        if callable(ainvoke_messages):
-            response = await ainvoke_messages(messages)
+        if isinstance(self.chat_model, AsyncChatModelProtocol):
+            response = await self.chat_model.ainvoke_messages(messages)
             return str(response.get("content") or "")
-        ainvoke = getattr(self.chat_model, "ainvoke", None)
-        if callable(ainvoke):
-            try:
-                response = await ainvoke(messages=messages)
-            except TypeError:
-                response = await ainvoke(self._messages_to_prompt(messages))
-            content = getattr(response, "content", response)
-            return str(content)
         return await asyncio.to_thread(self._invoke_chat_messages, messages)
 
     def _stream_chat_messages(self, messages: list[dict[str, str]]) -> Iterator[str]:
-        stream = getattr(self.chat_model, "stream", None)
-        if callable(stream):
-            try:
-                chunks = stream(messages=messages)
-            except TypeError:
-                chunks = stream(self._messages_to_prompt(messages))
+        if isinstance(self.chat_model, ChatModelProtocol):
+            chunks = self.chat_model.stream(messages=messages)
             for chunk in chunks:
                 content = getattr(chunk, "content", chunk)
                 if content:
                     yield str(content)
             return
-
         yield self._invoke_chat_messages(messages)
 
     @staticmethod
@@ -838,7 +659,7 @@ class DocumentQAService:
                 user_id=user_id,
                 conversation_id=conversation_id,
             )
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             logger.warning(
                 "Assistant message persistence failed.",
                 extra={"tenant_id": self.tenant_id, "user_id": user_id},
@@ -866,7 +687,7 @@ class DocumentQAService:
                 document_count=document_count,
                 memories=memory_candidates,
             )
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             logger.warning(
                 "Retrieval logging failed.",
                 extra={"tenant_id": self.tenant_id, "user_id": user_id},

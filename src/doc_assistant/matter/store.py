@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -13,91 +13,40 @@ from uuid import uuid4
 
 from doc_assistant.config.settings import settings
 
-
-@dataclass(frozen=True)
-class MatterArtifactRecord:
-    """持久化到 MatterStore 的单条交付物（风险矩阵、谈判清单等）。"""
-
-    artifact_id: str
-    matter_id: str
-    tenant_id: str
-    user_id: str
-    artifact_type: str
-    title: str
-    summary: str
-    items: list[dict[str, Any]]
-    source_finding_ids: list[str]
-    citations: list[str]
-    metadata: dict[str, Any]
-    source_task_id: str
-    version: int
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True)
-class MatterFindingRecord:
-    """持久化到 MatterStore 的单条风险 finding，可跟踪人工复核状态。"""
-
-    finding_id: str
-    matter_id: str
-    tenant_id: str
-    user_id: str
-    category: str
-    severity: str
-    summary: str
-    recommended_action: str
-    citations: list[str]
-    source_step_id: str
-    clause_reference: str
-    evidence_coverage: str
-    support_level: str
-    unsupported_reason: str
-    source_quote: str
-    location_label: str
-    needs_human_review: bool
-    human_review_status: str
-    status: str
-    metadata: dict[str, Any]
-    source_task_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True)
-class MatterEventRecord:
-    """案件审计日志：finding/artifact 状态变更、人工确认等操作的 before/after 快照。"""
-
-    event_id: str
-    matter_id: str
-    tenant_id: str
-    user_id: str
-    event_type: str
-    entity_type: str
-    entity_id: str
-    old_value: dict[str, Any] | list[Any] | str | None
-    new_value: dict[str, Any] | list[Any] | str | None
-    actor: str
-    created_at: datetime
-
-
-@dataclass(frozen=True)
-class MatterRecord:
-    """一个法律「案件」的主记录：关联 profile、最新 task、可选嵌套 findings/artifacts。"""
-
-    matter_id: str
-    tenant_id: str
-    user_id: str
-    title: str
-    status: str
-    matter_profile: dict[str, Any]
-    source_task_id: str
-    latest_task_id: str
-    created_at: datetime
-    updated_at: datetime
-    artifacts: list[MatterArtifactRecord] | None = None
-    findings: list[MatterFindingRecord] | None = None
+# 内部模块
+from doc_assistant.matter import _sql as sql
+from doc_assistant.matter._serializers import (
+    _row_to_artifact,
+    _row_to_event,
+    _row_to_finding,
+    _row_to_matter,
+)
+from doc_assistant.matter._helpers import (
+    _apply_gate_profile_decision,
+    _finding_status,
+    _formal_report_blockers,
+    _human_review_status_for_gate_status,
+    _matter_status,
+    _matter_title,
+)
+from doc_assistant.matter._utils import (
+    _as_bool,
+    _as_dict,
+    _as_dict_list,
+    _as_text_list,
+    _clean_text,
+    _datetime_from_db,
+    _datetime_to_db,
+    _dedupe_texts,
+    _utc_now,
+)
+# 重新导出以保持向后兼容
+from doc_assistant.matter.schemas import (  # noqa: F401  # re-export
+    MatterArtifactRecord,
+    MatterEventRecord,
+    MatterFindingRecord,
+    MatterRecord,
+)
 
 
 class MatterStore:
@@ -112,6 +61,8 @@ class MatterStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         self._init_db()
+
+    # ── public API ────────────────────────────────────────────
 
     def upsert_from_agent_result(
         self,
@@ -137,29 +88,13 @@ class MatterStore:
 
         with self._connect() as connection, self._lock:
             existing = connection.execute(
-                """
-                SELECT created_at, matter_profile_json, status FROM matters
-                WHERE tenant_id = ? AND user_id = ? AND matter_id = ?
-                """,
+                sql.SELECT_MATTER_EXISTING_FOR_UPSERT,
                 (tenant_id, user_id, matter_id),
             ).fetchone()
             created_at = _datetime_from_db(existing["created_at"]) if existing else now
             old_profile = json.loads(existing["matter_profile_json"] or "{}") if existing else None
             connection.execute(
-                """
-                INSERT INTO matters (
-                    matter_id, tenant_id, user_id, title, status, matter_profile_json,
-                    source_task_id, latest_task_id, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(matter_id, tenant_id, user_id)
-                DO UPDATE SET
-                    title = excluded.title,
-                    status = excluded.status,
-                    matter_profile_json = excluded.matter_profile_json,
-                    latest_task_id = excluded.latest_task_id,
-                    updated_at = excluded.updated_at
-                """,
+                sql.UPSERT_MATTER,
                 (
                     matter_id,
                     tenant_id,
@@ -232,10 +167,7 @@ class MatterStore:
         """按 matter_id 读取案件；可选一并加载 artifacts / findings 列表。"""
         with self._connect() as connection:
             row = connection.execute(
-                """
-                SELECT * FROM matters
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.SELECT_MATTER_BY_IDS,
                 (matter_id, tenant_id, user_id),
             ).fetchone()
             if row is None:
@@ -270,12 +202,7 @@ class MatterStore:
     ) -> list[MatterRecord]:
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM matters
-                WHERE tenant_id = ? AND user_id = ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
+                sql.SELECT_MATTERS_BY_USER,
                 (tenant_id, user_id, max(1, min(limit, 200))),
             ).fetchall()
         return [_row_to_matter(row) for row in rows]
@@ -324,12 +251,7 @@ class MatterStore:
             return None
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM matter_events
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
+                sql.SELECT_EVENTS_BY_MATTER,
                 (matter_id, tenant_id, user_id, max(1, min(limit, 500))),
             ).fetchall()
         return [_row_to_event(row) for row in rows]
@@ -356,10 +278,7 @@ class MatterStore:
             if self.get(matter_id, tenant_id, user_id) is None:
                 return None
             row = connection.execute(
-                """
-                SELECT * FROM matter_artifacts
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
-                """,
+                sql.SELECT_ARTIFACT_BY_ID,
                 (matter_id, tenant_id, user_id, normalized_artifact_id),
             ).fetchone()
             if row is None:
@@ -384,12 +303,7 @@ class MatterStore:
             metadata["last_edit"] = edit
 
             connection.execute(
-                """
-                UPDATE matter_artifacts
-                SET title = ?, summary = ?, items_json = ?, metadata_json = ?,
-                    version = ?, status = ?, updated_at = ?
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
-                """,
+                sql.UPDATE_ARTIFACT,
                 (
                     next_title or old_artifact.title,
                     next_summary,
@@ -405,11 +319,7 @@ class MatterStore:
                 ),
             )
             connection.execute(
-                """
-                UPDATE matters
-                SET updated_at = ?
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.UPDATE_MATTER_UPDATED_AT,
                 (_datetime_to_db(now), matter_id, tenant_id, user_id),
             )
             self._emit_event(
@@ -465,10 +375,7 @@ class MatterStore:
 
         with self._connect() as connection, self._lock:
             row = connection.execute(
-                """
-                SELECT * FROM matters
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.SELECT_MATTER_BY_IDS,
                 (matter_id, tenant_id, user_id),
             ).fetchone()
             if row is None:
@@ -529,11 +436,7 @@ class MatterStore:
                     now=now,
                 )
             connection.execute(
-                """
-                UPDATE matters
-                SET status = ?, matter_profile_json = ?, updated_at = ?
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.UPDATE_MATTER_STATUS_AND_PROFILE,
                 (
                     _matter_status(profile),
                     json.dumps(profile, ensure_ascii=False),
@@ -590,10 +493,7 @@ class MatterStore:
             if self.get(matter_id, tenant_id, user_id) is None:
                 return None
             row = connection.execute(
-                """
-                SELECT finding_id FROM review_findings
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND finding_id = ?
-                """,
+                sql.SELECT_FINDING_BY_ID,
                 (matter_id, tenant_id, user_id, normalized_finding_id),
             ).fetchone()
             if row is None:
@@ -609,11 +509,7 @@ class MatterStore:
                 now=now,
             )
             connection.execute(
-                """
-                UPDATE matters
-                SET updated_at = ?
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.UPDATE_MATTER_UPDATED_AT,
                 (_datetime_to_db(now), matter_id, tenant_id, user_id),
             )
             self._emit_event(
@@ -650,10 +546,7 @@ class MatterStore:
         now = _utc_now()
         with self._connect() as connection, self._lock:
             row = connection.execute(
-                """
-                SELECT * FROM matters
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.SELECT_MATTER_BY_IDS,
                 (matter_id, tenant_id, user_id),
             ).fetchone()
             if row is None:
@@ -754,11 +647,7 @@ class MatterStore:
                 now=now,
             )
             connection.execute(
-                """
-                UPDATE matters
-                SET updated_at = ?
-                WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-                """,
+                sql.UPDATE_MATTER_UPDATED_AT,
                 (_datetime_to_db(now), matter_id, tenant_id, user_id),
             )
             self._emit_event(
@@ -783,6 +672,8 @@ class MatterStore:
             include_findings=True,
         )
 
+    # ── private persistence helpers ───────────────────────────
+
     def _upsert_artifact_row(
         self,
         connection: sqlite3.Connection,
@@ -800,36 +691,13 @@ class MatterStore:
         if not artifact_id:
             return
         existing = connection.execute(
-            """
-            SELECT version, created_at, title, summary, status FROM matter_artifacts
-            WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND artifact_id = ?
-            """,
+            sql.SELECT_ARTIFACT_EXISTING,
             (tenant_id, user_id, matter_id, artifact_id),
         ).fetchone()
         version = int(existing["version"]) + 1 if existing else 1
         created_at = _datetime_from_db(existing["created_at"]) if existing else now
         connection.execute(
-            """
-            INSERT INTO matter_artifacts (
-                artifact_id, matter_id, tenant_id, user_id, artifact_type, title, summary,
-                items_json, source_finding_ids_json, citations_json, metadata_json,
-                source_task_id, version, status, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(artifact_id, matter_id, tenant_id, user_id)
-            DO UPDATE SET
-                artifact_type = excluded.artifact_type,
-                title = excluded.title,
-                summary = excluded.summary,
-                items_json = excluded.items_json,
-                source_finding_ids_json = excluded.source_finding_ids_json,
-                citations_json = excluded.citations_json,
-                metadata_json = excluded.metadata_json,
-                source_task_id = excluded.source_task_id,
-                version = excluded.version,
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
+            sql.UPSERT_ARTIFACT,
             (
                 artifact_id,
                 matter_id,
@@ -884,10 +752,7 @@ class MatterStore:
         if not finding_id:
             return
         existing = connection.execute(
-            """
-            SELECT created_at, human_review_status, status, metadata_json FROM review_findings
-            WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND finding_id = ?
-            """,
+            sql.SELECT_FINDING_EXISTING,
             (tenant_id, user_id, matter_id, finding_id),
         ).fetchone()
         created_at = _datetime_from_db(existing["created_at"]) if existing else now
@@ -908,36 +773,7 @@ class MatterStore:
         if finding.get("evidence"):
             metadata["evidence"] = finding.get("evidence")
         connection.execute(
-            """
-            INSERT INTO review_findings (
-                finding_id, matter_id, tenant_id, user_id, category, severity, summary,
-                recommended_action, citations_json, source_step_id, clause_reference,
-                evidence_coverage, support_level, unsupported_reason, source_quote,
-                location_label, needs_human_review, human_review_status, status,
-                metadata_json, source_task_id, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(finding_id, matter_id, tenant_id, user_id)
-            DO UPDATE SET
-                category = excluded.category,
-                severity = excluded.severity,
-                summary = excluded.summary,
-                recommended_action = excluded.recommended_action,
-                citations_json = excluded.citations_json,
-                source_step_id = excluded.source_step_id,
-                clause_reference = excluded.clause_reference,
-                evidence_coverage = excluded.evidence_coverage,
-                support_level = excluded.support_level,
-                unsupported_reason = excluded.unsupported_reason,
-                source_quote = excluded.source_quote,
-                location_label = excluded.location_label,
-                needs_human_review = excluded.needs_human_review,
-                human_review_status = excluded.human_review_status,
-                status = excluded.status,
-                metadata_json = excluded.metadata_json,
-                source_task_id = excluded.source_task_id,
-                updated_at = excluded.updated_at
-            """,
+            sql.UPSERT_FINDING,
             (
                 finding_id,
                 matter_id,
@@ -998,10 +834,7 @@ class MatterStore:
     ) -> None:
         for finding_id in finding_ids:
             row = connection.execute(
-                """
-                SELECT * FROM review_findings
-                WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND finding_id = ?
-                """,
+                sql.SELECT_FINDING_ROW_BY_ID,
                 (tenant_id, user_id, matter_id, finding_id),
             ).fetchone()
             if row is None:
@@ -1016,11 +849,7 @@ class MatterStore:
                 evidence_coverage=row["evidence_coverage"],
             )
             connection.execute(
-                """
-                UPDATE review_findings
-                SET human_review_status = ?, status = ?, metadata_json = ?, updated_at = ?
-                WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND finding_id = ?
-                """,
+                sql.UPDATE_FINDING_REVIEW,
                 (
                     human_review_status,
                     status_value,
@@ -1042,11 +871,7 @@ class MatterStore:
         user_id: str,
     ) -> list[MatterArtifactRecord]:
         rows = connection.execute(
-            """
-            SELECT * FROM matter_artifacts
-            WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-            ORDER BY artifact_type ASC
-            """,
+            sql.SELECT_ARTIFACTS_BY_MATTER,
             (matter_id, tenant_id, user_id),
         ).fetchall()
         return [_row_to_artifact(row) for row in rows]
@@ -1060,11 +885,7 @@ class MatterStore:
         user_id: str,
     ) -> list[MatterFindingRecord]:
         rows = connection.execute(
-            """
-            SELECT * FROM review_findings
-            WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
-            ORDER BY finding_id ASC
-            """,
+            sql.SELECT_FINDINGS_BY_MATTER,
             (matter_id, tenant_id, user_id),
         ).fetchall()
         return [_row_to_finding(row) for row in rows]
@@ -1085,13 +906,7 @@ class MatterStore:
         created_at: datetime,
     ) -> None:
         connection.execute(
-            """
-            INSERT INTO matter_events (
-                event_id, matter_id, tenant_id, user_id, event_type, entity_type,
-                entity_id, old_value_json, new_value_json, actor, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            sql.INSERT_EVENT,
             (
                 uuid4().hex,
                 matter_id,
@@ -1114,413 +929,13 @@ class MatterStore:
 
     def _init_db(self) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matters (
-                    matter_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    matter_profile_json TEXT NOT NULL,
-                    source_task_id TEXT NOT NULL,
-                    latest_task_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(matter_id, tenant_id, user_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matter_artifacts (
-                    artifact_id TEXT NOT NULL,
-                    matter_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    artifact_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    items_json TEXT NOT NULL,
-                    source_finding_ids_json TEXT NOT NULL,
-                    citations_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    source_task_id TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(artifact_id, matter_id, tenant_id, user_id),
-                    FOREIGN KEY(matter_id, tenant_id, user_id)
-                        REFERENCES matters(matter_id, tenant_id, user_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS review_findings (
-                    finding_id TEXT NOT NULL,
-                    matter_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    recommended_action TEXT NOT NULL,
-                    citations_json TEXT NOT NULL,
-                    source_step_id TEXT NOT NULL,
-                    clause_reference TEXT NOT NULL,
-                    evidence_coverage TEXT NOT NULL,
-                    support_level TEXT NOT NULL,
-                    unsupported_reason TEXT NOT NULL,
-                    source_quote TEXT NOT NULL,
-                    location_label TEXT NOT NULL,
-                    needs_human_review INTEGER NOT NULL,
-                    human_review_status TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    source_task_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(finding_id, matter_id, tenant_id, user_id),
-                    FOREIGN KEY(matter_id, tenant_id, user_id)
-                        REFERENCES matters(matter_id, tenant_id, user_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_matters_user_updated
-                ON matters(tenant_id, user_id, updated_at)
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_matter_artifacts_matter
-                ON matter_artifacts(tenant_id, user_id, matter_id)
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_review_findings_matter
-                ON review_findings(tenant_id, user_id, matter_id)
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matter_events (
-                    event_id TEXT PRIMARY KEY,
-                    matter_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    entity_type TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    old_value_json TEXT,
-                    new_value_json TEXT,
-                    actor TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(matter_id, tenant_id, user_id)
-                        REFERENCES matters(matter_id, tenant_id, user_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_matter_events_matter
-                ON matter_events(tenant_id, user_id, matter_id, created_at)
-                """
-            )
+            connection.execute(sql.CREATE_TABLE_MATTERS)
+            connection.execute(sql.CREATE_TABLE_MATTER_ARTIFACTS)
+            connection.execute(sql.CREATE_TABLE_REVIEW_FINDINGS)
+            connection.execute(sql.CREATE_INDEX_MATTERS_USER_UPDATED)
+            connection.execute(sql.CREATE_INDEX_MATTER_ARTIFACTS_MATTER)
+            connection.execute(sql.CREATE_INDEX_REVIEW_FINDINGS_MATTER)
+            connection.execute(sql.CREATE_TABLE_MATTER_EVENTS)
+            connection.execute(sql.CREATE_INDEX_MATTER_EVENTS_MATTER)
 
 
-def _row_to_matter(row: sqlite3.Row) -> MatterRecord:
-    return MatterRecord(
-        matter_id=row["matter_id"],
-        tenant_id=row["tenant_id"],
-        user_id=row["user_id"],
-        title=row["title"],
-        status=row["status"],
-        matter_profile=json.loads(row["matter_profile_json"] or "{}"),
-        source_task_id=row["source_task_id"],
-        latest_task_id=row["latest_task_id"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
-    )
-
-
-def _row_to_artifact(row: sqlite3.Row) -> MatterArtifactRecord:
-    return MatterArtifactRecord(
-        artifact_id=row["artifact_id"],
-        matter_id=row["matter_id"],
-        tenant_id=row["tenant_id"],
-        user_id=row["user_id"],
-        artifact_type=row["artifact_type"],
-        title=row["title"],
-        summary=row["summary"],
-        items=json.loads(row["items_json"] or "[]"),
-        source_finding_ids=json.loads(row["source_finding_ids_json"] or "[]"),
-        citations=json.loads(row["citations_json"] or "[]"),
-        metadata=json.loads(row["metadata_json"] or "{}"),
-        source_task_id=row["source_task_id"],
-        version=int(row["version"]),
-        status=row["status"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
-    )
-
-
-def _row_to_finding(row: sqlite3.Row) -> MatterFindingRecord:
-    return MatterFindingRecord(
-        finding_id=row["finding_id"],
-        matter_id=row["matter_id"],
-        tenant_id=row["tenant_id"],
-        user_id=row["user_id"],
-        category=row["category"],
-        severity=row["severity"],
-        summary=row["summary"],
-        recommended_action=row["recommended_action"],
-        citations=json.loads(row["citations_json"] or "[]"),
-        source_step_id=row["source_step_id"],
-        clause_reference=row["clause_reference"],
-        evidence_coverage=row["evidence_coverage"],
-        support_level=row["support_level"],
-        unsupported_reason=row["unsupported_reason"],
-        source_quote=row["source_quote"],
-        location_label=row["location_label"],
-        needs_human_review=bool(row["needs_human_review"]),
-        human_review_status=row["human_review_status"],
-        status=row["status"],
-        metadata=json.loads(row["metadata_json"] or "{}"),
-        source_task_id=row["source_task_id"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
-    )
-
-
-def _row_to_event(row: sqlite3.Row) -> MatterEventRecord:
-    return MatterEventRecord(
-        event_id=row["event_id"],
-        matter_id=row["matter_id"],
-        tenant_id=row["tenant_id"],
-        user_id=row["user_id"],
-        event_type=row["event_type"],
-        entity_type=row["entity_type"],
-        entity_id=row["entity_id"],
-        old_value=_json_value(row["old_value_json"]),
-        new_value=_json_value(row["new_value_json"]),
-        actor=row["actor"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-    )
-
-
-def _json_value(value: str | None) -> Any:
-    if not value:
-        return None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
-
-
-def _matter_title(result: dict[str, Any], profile: dict[str, Any]) -> str:
-    document_type = _clean_text(profile.get("document_type"))
-    objective = _clean_text(result.get("objective"))
-    if document_type and document_type != "Unknown":
-        return document_type
-    return objective[:120] or _clean_text(profile.get("matter_id")) or "Untitled matter"
-
-
-def _matter_status(profile: dict[str, Any]) -> str:
-    open_questions = _as_text_list(profile.get("open_questions"))
-    if open_questions or _unresolved_required_gate_ids(profile):
-        return "needs_input"
-    return "active"
-
-
-def _formal_report_blockers(
-    profile: dict[str, Any],
-    findings: list[MatterFindingRecord] | None = None,
-) -> list[str]:
-    blockers = []
-    unresolved_gate_ids = _unresolved_required_gate_ids(profile)
-    if unresolved_gate_ids:
-        blockers.append(
-            "Matter still has unresolved required confirmation gates: "
-            + ", ".join(unresolved_gate_ids)
-        )
-    for finding in findings or []:
-        missing = _formal_finding_missing_fields(finding)
-        if missing:
-            blockers.append(
-                f"Finding {finding.finding_id} is not formal-report ready: "
-                + ", ".join(missing)
-            )
-    return blockers
-
-
-def _formal_finding_missing_fields(finding: MatterFindingRecord) -> list[str]:
-    missing = []
-    if not finding.citations:
-        missing.append("source citation")
-    if not finding.source_quote:
-        missing.append("exact quote")
-    if not finding.location_label:
-        missing.append("location")
-    if not finding.support_level:
-        missing.append("support level")
-    if finding.support_level != "direct" and not finding.unsupported_reason:
-        missing.append("unsupported reason")
-    if finding.needs_human_review and finding.human_review_status not in {
-        "approved",
-        "waived",
-        "resolved",
-        "not_required",
-    }:
-        missing.append("human review status")
-    return missing
-
-
-def _unresolved_required_gate_ids(profile: dict[str, Any]) -> list[str]:
-    unresolved_gate_ids = []
-    for gate in _as_dict_list(profile.get("confirmation_gates")):
-        if not gate.get("required", True):
-            continue
-        if _clean_text(gate.get("status")) not in {"approved", "waived"}:
-            unresolved_gate_ids.append(_clean_text(gate.get("gate_id")) or "unknown_gate")
-    return unresolved_gate_ids
-
-
-def _apply_gate_profile_decision(
-    profile: dict[str, Any],
-    *,
-    gate: dict[str, Any],
-    status: str,
-    confirmed_value: str | None,
-    decision: dict[str, Any],
-) -> None:
-    if status != "approved":
-        return
-    metadata = _as_dict(gate.get("metadata"))
-    profile_field = _clean_text(metadata.get("profile_field"))
-    value = _clean_text(confirmed_value)
-    if not profile_field or not value:
-        return
-    if profile_field not in {"user_side", "governing_law", "jurisdiction", "document_type"}:
-        return
-    profile[profile_field] = value
-    confirmed_facts = _as_dict_list(profile.get("confirmed_facts"))
-    confirmed_facts.append(
-        {
-            "field": profile_field,
-            "value": value,
-            "source": "confirmation_gate",
-            "gate_id": _clean_text(gate.get("gate_id")),
-            "decided_by": decision.get("decided_by", ""),
-            "decided_at": decision.get("decided_at", ""),
-        }
-    )
-    profile["confirmed_facts"] = confirmed_facts[-50:]
-
-
-def _human_review_status_for_gate_status(status: str) -> str:
-    if status == "approved":
-        return "approved"
-    if status == "waived":
-        return "waived"
-    if status == "needs_info":
-        return "needs_info"
-    return "pending"
-
-
-def _finding_status(
-    *,
-    needs_human_review: bool,
-    human_review_status: str,
-    evidence_coverage: str,
-) -> str:
-    if human_review_status == "needs_info":
-        return "needs_info"
-    if needs_human_review and human_review_status not in {
-        "approved",
-        "waived",
-        "resolved",
-        "not_required",
-    }:
-        return "needs_human_review"
-    if evidence_coverage == "direct":
-        return "resolved"
-    if human_review_status in {"approved", "waived", "resolved"}:
-        return "resolved_with_evidence_gap"
-    return "open"
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_dict_list(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _as_text_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [_clean_text(item) for item in value if _clean_text(item)]
-
-
-def _as_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"true", "yes", "1"}:
-            return True
-        if normalized in {"false", "no", "0"}:
-            return False
-    return default
-
-
-def _dedupe_texts(values: list[str]) -> list[str]:
-    result = []
-    seen = set()
-    for value in values:
-        text = _clean_text(value)
-        if not text:
-            continue
-        key = text.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(text)
-    return result
-
-
-def _clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return " ".join(value.split())
-    if isinstance(value, (int, float, bool)):
-        return str(value)
-    return ""
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _datetime_to_db(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _datetime_from_db(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
