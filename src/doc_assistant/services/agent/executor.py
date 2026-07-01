@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from time import sleep
 from typing import Any
 
@@ -48,6 +49,37 @@ from doc_assistant.services.agent._react import (
 )
 from doc_assistant.services.agent.schemas import AgentPlanStep, AgentStepResult
 from doc_assistant.services.evidence import build_evidence_profile
+
+
+# ── 共享线程池 ───────────────────────────────────────────────────────────
+
+_shared_executor: ThreadPoolExecutor | None = None
+_executor_lock = Lock()
+
+
+def _get_shared_executor() -> ThreadPoolExecutor:
+    """返回模块级共享 ``ThreadPoolExecutor``，避免每次并行执行都新建线程池。"""
+    global _shared_executor
+    if _shared_executor is not None:
+        return _shared_executor
+    with _executor_lock:
+        if _shared_executor is not None:
+            return _shared_executor
+        max_workers = max(1, settings.agent_max_parallel_steps)
+        _shared_executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="agent-step",
+        )
+    return _shared_executor
+
+
+def shutdown_executor(wait: bool = True) -> None:
+    """关闭共享线程池（应用退出时调用）。"""
+    global _shared_executor
+    with _executor_lock:
+        if _shared_executor is not None:
+            _shared_executor.shutdown(wait=wait)
+            _shared_executor = None
 
 
 # ── 计划步骤执行（顺序 + 并行） ─────────────────────────────────────────
@@ -155,20 +187,19 @@ def _execute_parallel_steps(
         )
 
     raw_results: dict[str, QAAnswer | AgentStepResult] = {}
-    max_workers = min(_agent_max_parallel_steps(), len(plan_steps))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                _execute_step_raw_with_retry, qa_service, plan_step,
-                objective=objective, user_id=user_id,
-                conversation_id=conversation_id, task_id=task_id,
-                chat_history=list(chat_history),
-            ): plan_step
-            for plan_step in plan_steps
-        }
-        for future in as_completed(futures):
-            plan_step = futures[future]
-            raw_results[plan_step.step_id] = future.result()
+    executor = _get_shared_executor()
+    futures = {
+        executor.submit(
+            _execute_step_raw_with_retry, qa_service, plan_step,
+            objective=objective, user_id=user_id,
+            conversation_id=conversation_id, task_id=task_id,
+            chat_history=list(chat_history),
+        ): plan_step
+        for plan_step in plan_steps
+    }
+    for future in as_completed(futures):
+        plan_step = futures[future]
+        raw_results[plan_step.step_id] = future.result()
 
     ordered_results: list[AgentStepResult] = []
     for plan_step in plan_steps:
@@ -372,6 +403,93 @@ def _execute_step(
         progress_callback=progress_callback,
         step_index=step_index, step_count=step_count,
     )
+
+
+# ── P0-1：单步执行（不含 ReAct）与单次 ReAct 迭代 ──────────────────────────
+# 这些函数供 LangGraph 图节点调用，将原有的内联 for 循环提升为图迭代。
+
+
+def execute_one_step(
+    qa_service: Any,
+    plan_step: AgentPlanStep, *,
+    objective: str,
+    user_id: str | None,
+    conversation_id: str | None,
+    task_id: str,
+    citation_registry: _CitationRegistry,
+    chat_history: list[dict[str, object]],
+) -> AgentStepResult:
+    """执行一个计划步骤，不含 ReAct 补证尾调用。
+
+    ReAct 迭代由图的 do_react / advance_step 循环在外部处理。
+    """
+    raw_result = _execute_step_raw_with_retry(
+        qa_service, plan_step,
+        objective=objective, user_id=user_id,
+        conversation_id=conversation_id, task_id=task_id,
+        chat_history=chat_history,
+    )
+    return _finalize_step_execution(plan_step, raw_result, citation_registry)
+
+
+def execute_one_react_iteration(
+    qa_service: Any,
+    plan_step: AgentPlanStep,
+    current_step: AgentStepResult, *,
+    iteration: int,
+    objective: str,
+    user_id: str | None,
+    conversation_id: str | None,
+    task_id: str,
+    citation_registry: _CitationRegistry,
+    chat_history: list[dict[str, object]],
+) -> tuple[AgentStepResult, dict[str, Any]]:
+    """执行一轮 ReAct 补证迭代。
+
+    Returns:
+        (updated_step, action): 合并后的步骤结果和本次选择的动作字典。
+        若动作为 finalize_report 或 ask_user，返回的 step 可能未修改。
+    """
+    from doc_assistant.services.agent._react import (
+        _agent_react_max_iterations,
+        _mark_react_needs_input,
+        _merge_react_action_step,
+        _react_action_observation,
+        _react_step_observation,
+        _react_trace_item,
+        _select_react_action,
+    )
+
+    max_iterations = _agent_react_max_iterations()
+    observation = _react_step_observation(current_step)
+    action = _select_react_action(
+        plan_step, current_step, observation,
+        iteration=iteration, max_iterations=max_iterations,
+    )
+
+    if action["tool"] not in _AGENT_REACT_EXECUTABLE_TOOLS:
+        trace_item = _react_trace_item(
+            iteration=iteration, observation=observation,
+            action=action, action_step=None,
+        )
+        if action["tool"] == "ask_user":
+            updated = _mark_react_needs_input(current_step, action, [trace_item])
+            return updated, action
+        # finalize_report
+        return current_step, action
+
+    action_step = _execute_react_action(
+        qa_service, plan_step, action, iteration=iteration,
+        objective=objective, user_id=user_id,
+        conversation_id=conversation_id, task_id=task_id,
+        citation_registry=citation_registry, chat_history=chat_history,
+    )
+    trace_item = _react_trace_item(
+        iteration=iteration, observation=observation,
+        action=action, action_step=action_step,
+    )
+    merged = _merge_react_action_step(current_step, action_step, [trace_item])
+    return merged, action
 
 
 def _execute_step_raw_with_retry(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from inspect import Parameter, signature
 from typing import Any
 
@@ -244,7 +244,7 @@ def _append_agent_step_history(
         f"Status: {step.status}. Summary: {summary}"
     )
     updated = [*history, {"role": "assistant", "content": content}]
-    window = max(1, int(getattr(settings, "chat_history_window", 12)))
+    window = max(1, settings.chat_history_window)
     return updated[-window:]
 
 
@@ -262,15 +262,17 @@ def _call_accepts_keyword(func: Callable[..., Any], keyword: str) -> bool:
 # ── CitationRegistry ─────────────────────────────────────────────────────────
 
 
+@dataclass
 class _CitationRegistry:
     """跨步骤全局引用编号器。
 
     各 QA 步骤独立返回 S1、S2… 会在最终报告中冲突；
     此处统一重编号为全局 S1、S2…，并返回 mapping 供重写文本中的 [Sx]。
+
+    P1-1: 改为 frozen=False dataclass 以支持 LangGraph checkpoint msgpack 序列化。
     """
 
-    def __init__(self) -> None:
-        self.citations: list[Citation] = []
+    citations: list[Citation] = field(default_factory=list)
 
     def add_step_citations(
         self,

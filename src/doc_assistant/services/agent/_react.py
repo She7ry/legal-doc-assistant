@@ -26,11 +26,11 @@ from doc_assistant.services.evidence import build_evidence_profile
 
 
 def _agent_react_enabled() -> bool:
-    return bool(getattr(settings, "agent_react_enabled", True))
+    return settings.agent_react_enabled
 
 
 def _agent_react_max_iterations() -> int:
-    return max(0, min(int(getattr(settings, "agent_react_max_iterations", 2)), 5))
+    return max(0, min(settings.agent_react_max_iterations, 5))
 
 
 def _agent_react_allowed_for_step(step: AgentPlanStep) -> bool:

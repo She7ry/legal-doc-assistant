@@ -77,11 +77,14 @@ class LegalAgentService:
         task_id: str | None = None,
         matter_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        thread_id: str | None = None,  # P1-1: checkpointing
+        resume_value: Any = None,  # P1-1: GraphInterrupt resume
     ) -> AgentTaskResult:
         """执行完整 Agent 任务（对外主入口）。
 
         委托 ``run_agent_workflow`` 走 LangGraph 六阶段流水线；
         ``progress_callback`` 可接收 plan_created / step_started 等 SSE 事件。
+        ``thread_id`` 与 ``resume_value`` 支持 HITL 中断后恢复。
         """
         return run_agent_workflow(
             self,
@@ -94,6 +97,8 @@ class LegalAgentService:
             task_id=task_id,
             matter_id=matter_id,
             progress_callback=progress_callback,
+            thread_id=thread_id,
+            resume_value=resume_value,
         )
 
     # ── workflow 节点委托方法 ─────────────────────────────────────────────
