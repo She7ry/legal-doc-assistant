@@ -42,6 +42,9 @@ class StreamingChatModel:
     def invoke_messages(self, messages):
         return {"content": "Hello!"}
 
+    def invoke(self, prompt=None, *, messages=None):
+        return "Hello!"
+
     def stream(self, prompt=None, *, messages=None):
         yield "Hel"
         yield "lo!"
@@ -77,6 +80,16 @@ def test_stream_prepared_answer_yields_chat_chunks() -> None:
     prepared = service.prepare_answer("hello")
 
     assert list(service.stream_prepared_answer(prepared)) == ["Hel", "lo!"]
+
+
+def test_stream_prepared_answer_falls_back_for_langchain_model() -> None:
+    service = DocumentQAService(
+        vector_store=EmptyVectorStore(),
+        chat_model=FakeListChatModel(responses=["Hello from LangChain."]),
+    )
+    prepared = service.prepare_answer("hello")
+
+    assert list(service.stream_prepared_answer(prepared)) == ["Hello from LangChain."]
 
 
 def test_stream_answer_events_emit_metadata_delta_and_done() -> None:
@@ -269,38 +282,13 @@ def test_check_conflict_returns_structured_conflict_matrix() -> None:
     assert "[P1]" in answer.content
 
 
-def test_qwen35_model_uses_compatible_chat_api(monkeypatch) -> None:
-    monkeypatch.setattr(
-        language_model,
-        "settings",
-        SimpleNamespace(
-            chat_provider="dashscope",
-            chat_model_name="qwen3.5-flash",
-            chat_api="compatible",
-            chat_api_key="",
-            dashscope_api_key="test-key",
-            chat_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            chat_extra_body={},
-            temperature=0,
-            enable_thinking=False,
-        ),
-    )
-
-    model = language_model.build_chat_model()
-
-    assert isinstance(model, OpenAICompatibleChatModel)
-    assert model.provider == "DashScope"
-    assert model.model == "qwen3.5-flash"
-    assert model.extra_body == {"enable_thinking": False}
-
-
 def test_deepseek_provider_uses_openai_compatible_defaults(monkeypatch) -> None:
     monkeypatch.setattr(
         language_model,
         "settings",
         SimpleNamespace(
             chat_provider="deepseek",
-            chat_model_name="deepseek-v4-flash",
+            chat_model_name="deepseek-v4-pro",
             chat_api="compatible",
             chat_api_key="test-key",
             deepseek_api_key="",
@@ -308,6 +296,9 @@ def test_deepseek_provider_uses_openai_compatible_defaults(monkeypatch) -> None:
             chat_extra_body={},
             temperature=0,
             enable_thinking=False,
+            llm_circuit_breaker_threshold=5,
+            llm_circuit_breaker_cooldown_seconds=30,
+            llm_max_retries=3,
         ),
     )
 
@@ -315,7 +306,7 @@ def test_deepseek_provider_uses_openai_compatible_defaults(monkeypatch) -> None:
 
     assert isinstance(model, OpenAICompatibleChatModel)
     assert model.provider == "DeepSeek"
-    assert model.model == "deepseek-v4-flash"
+    assert model.model == "deepseek-v4-pro"
     assert model.api_key == "test-key"
     assert model.base_url == "https://api.deepseek.com"
 
@@ -347,19 +338,17 @@ def test_openai_compatible_model_streams_openai_style_chunks(monkeypatch) -> Non
 
     monkeypatch.setattr(language_model.requests, "post", fake_post)
     model = OpenAICompatibleChatModel(
-        provider="DashScope",
-        model="qwen3.5-flash",
+        provider="DeepSeek",
+        model="deepseek-v4-pro",
         api_key="test-key",
         base_url="https://example.test/v1",
         temperature=0,
-        extra_body={"enable_thinking": False},
     )
 
     assert list(model.stream("prompt")) == ["Hel", "lo"]
     assert calls[0]["json"]["messages"] == [{"role": "user", "content": "prompt"}]
     assert calls[0]["json"]["stream"] is True
     assert calls[0]["stream"] is True
-    assert calls[0]["json"]["enable_thinking"] is False
 
 
 def test_openai_compatible_model_invokes_messages_with_tools(monkeypatch) -> None:
@@ -378,7 +367,7 @@ def test_openai_compatible_model_invokes_messages_with_tools(monkeypatch) -> Non
     monkeypatch.setattr(language_model.requests, "post", fake_post)
     model = OpenAICompatibleChatModel(
         provider="DeepSeek",
-        model="deepseek-v4-flash",
+        model="deepseek-v4-pro",
         api_key="test-key",
         base_url="https://example.test",
         temperature=0,

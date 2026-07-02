@@ -14,7 +14,7 @@
 | LLM 编排 | LangChain + LangGraph |
 | 向量存储 | ChromaDB |
 | 检索策略 | Hybrid（Dense + BM25 + RRF 融合 + MMR 去重） |
-| 默认 LLM | DashScope（Qwen3.5）/ DeepSeek / 任意 OpenAI-compatible |
+| 默认 LLM | DeepSeek（Chat）/ DashScope（Embedding） / 任意 OpenAI-compatible |
 | Embedding | DashScope text-embedding-v3 |
 | 中文分词 | jieba |
 | 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
@@ -211,32 +211,23 @@ npm.cmd run dev
 
 ### LLM 配置
 
-默认使用 DashScope（Qwen3.5）作为 Chat 模型：
+Chat 默认使用 DeepSeek，Embedding 默认使用阿里云 DashScope：
 
 ```env
-DOC_ASSISTANT_CHAT_PROVIDER=dashscope
-DOC_ASSISTANT_CHAT_API_KEY=<your-dashscope-key>
-DOC_ASSISTANT_CHAT_MODEL=qwen3.5-flash
+# Chat: DeepSeek
+DOC_ASSISTANT_CHAT_PROVIDER=deepseek
+DOC_ASSISTANT_CHAT_API_KEY=<your-deepseek-key>
+DOC_ASSISTANT_CHAT_MODEL=deepseek-v4-pro
 DOC_ASSISTANT_CHAT_API=compatible
 DOC_ASSISTANT_CHAT_BASE_URL=
-DOC_ASSISTANT_ENABLE_THINKING=false
 
+# Embedding: DashScope
 DOC_ASSISTANT_EMBEDDING_PROVIDER=dashscope
 DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
 DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
 ```
 
-切换到 DeepSeek：
-
-```env
-DOC_ASSISTANT_CHAT_PROVIDER=deepseek
-DOC_ASSISTANT_CHAT_API_KEY=<your-deepseek-key>
-DOC_ASSISTANT_CHAT_MODEL=deepseek-v4-flash
-DOC_ASSISTANT_CHAT_API=compatible
-DOC_ASSISTANT_CHAT_BASE_URL=
-```
-
-使用其他 OpenAI-compatible 服务：
+Chat 切换到其他 OpenAI-compatible 服务：
 
 ```env
 DOC_ASSISTANT_CHAT_PROVIDER=openai-compatible

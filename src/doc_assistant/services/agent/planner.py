@@ -13,8 +13,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from doc_assistant.config.settings import settings
-from doc_assistant.models.language_model import ChatModelProtocol
 from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
+from doc_assistant.models.language_model import MessageChatModelProtocol
 from doc_assistant.services.agent._constants import (
     AGENT_TOOL_REGISTRY,
     PLANNER_PROMPT,
@@ -229,7 +229,7 @@ def plan_task_with_llm(
         chat_model = qa_service.chat_model
         if isinstance(chat_model, BaseChatModel):
             llm = chat_model
-        elif isinstance(chat_model, ChatModelProtocol):
+        elif isinstance(chat_model, MessageChatModelProtocol):
             llm = ChatOpenAICompatible(client=chat_model)
         else:
             response = qa_service._invoke_chat_messages(

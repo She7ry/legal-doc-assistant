@@ -1,30 +1,28 @@
 """LLM 与 Embedding 模型工厂。
 
 ``build_chat_model`` / ``build_embedding_model`` 根据 settings 选择：
-- DashScope / DeepSeek 的 OpenAI 兼容 HTTP 客户端（带重试与熔断）
-- 或 LangChain 原生 ChatTongyi / DashScopeEmbeddings
+- DeepSeek 或其他 OpenAI 兼容 HTTP 客户端（带重试与熔断）
+- 或本地 HuggingFace Embedding 模型
 
 业务层通常只调用 factory，不直接实例化 ``OpenAICompatibleChatModel``。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from functools import lru_cache
 import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from functools import lru_cache
 from time import monotonic, sleep
+from typing import Any, Protocol, runtime_checkable
 
-from langchain_community.chat_models.tongyi import ChatTongyi
-from langchain_community.embeddings import DashScopeEmbeddings
 import httpx
 import requests
+from langchain_community.embeddings import DashScopeEmbeddings
 
 from doc_assistant.config.settings import settings
 
-DASHSCOPE_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEEPSEEK_COMPATIBLE_BASE_URL = "https://api.deepseek.com"
 _SSE_DONE = object()
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -32,13 +30,8 @@ _ORIGINAL_REQUESTS_POST = requests.post
 
 
 @runtime_checkable
-class ChatModelProtocol(Protocol):
-    """结构协议：任何实现了 invoke_messages + invoke + stream 的对象皆可视为 ChatModel。
-
-    ``OpenAICompatibleChatModel`` 和 LangChain adapter 均满足本协议，
-    无需显式继承。业务层用 ``isinstance(model, ChatModelProtocol)``
-    替代 ``hasattr + callable`` 鸭子类型检测。
-    """
+class MessageChatModelProtocol(Protocol):
+    """Model capability for OpenAI-style messages and optional tool calling."""
 
     def invoke_messages(
         self,
@@ -47,6 +40,11 @@ class ChatModelProtocol(Protocol):
         tool_choice: str | dict[str, Any] | None = "auto",
     ) -> dict[str, Any]: ...
 
+
+@runtime_checkable
+class InvokableChatModelProtocol(Protocol):
+    """Model capability for a generic synchronous invocation."""
+
     def invoke(
         self,
         prompt: str | list[dict[str, Any]] | None = None,
@@ -54,12 +52,39 @@ class ChatModelProtocol(Protocol):
         messages: list[dict[str, Any]] | None = None,
     ) -> str: ...
 
+
+@runtime_checkable
+class StreamingChatModelProtocol(Protocol):
+    """Model capability for synchronous streaming."""
+
     def stream(self, messages: list[dict[str, Any]]) -> Iterator[str]: ...
 
 
 @runtime_checkable
-class AsyncChatModelProtocol(Protocol):
-    """``ChatModelProtocol`` 的异步版本。"""
+class MessageStreamingChatModelProtocol(
+    MessageChatModelProtocol,
+    StreamingChatModelProtocol,
+    Protocol,
+):
+    """Model capability for streaming the project's message format."""
+
+
+@runtime_checkable
+class ChatModelProtocol(
+    MessageStreamingChatModelProtocol,
+    InvokableChatModelProtocol,
+    Protocol,
+):
+    """Combined protocol retained for fully capable synchronous clients.
+
+    Services should depend on the smallest capability protocol they use.
+    ``OpenAICompatibleChatModel`` satisfies this combined protocol.
+    """
+
+
+@runtime_checkable
+class AsyncMessageChatModelProtocol(Protocol):
+    """Model capability for asynchronous OpenAI-style message invocation."""
 
     async def ainvoke_messages(
         self,
@@ -68,12 +93,26 @@ class AsyncChatModelProtocol(Protocol):
         tool_choice: str | dict[str, Any] | None = "auto",
     ) -> dict[str, Any]: ...
 
+
+@runtime_checkable
+class AsyncInvokableChatModelProtocol(Protocol):
+    """Model capability for a generic asynchronous invocation."""
+
     async def ainvoke(
         self,
         prompt: str | list[dict[str, Any]] | None = None,
         *,
         messages: list[dict[str, Any]] | None = None,
     ) -> str: ...
+
+
+@runtime_checkable
+class AsyncChatModelProtocol(
+    AsyncMessageChatModelProtocol,
+    AsyncInvokableChatModelProtocol,
+    Protocol,
+):
+    """Combined protocol retained for fully capable asynchronous clients."""
 
 
 @dataclass(frozen=True)
@@ -87,12 +126,6 @@ class CompatibleProviderDefaults:
 
 
 COMPATIBLE_PROVIDER_DEFAULTS: dict[str, CompatibleProviderDefaults] = {
-    "dashscope": CompatibleProviderDefaults(
-        label="DashScope",
-        base_url=DASHSCOPE_COMPATIBLE_BASE_URL,
-        api_key_setting="dashscope_api_key",
-        api_key_env_var="DASHSCOPE_API_KEY",
-    ),
     "deepseek": CompatibleProviderDefaults(
         label="DeepSeek",
         base_url=DEEPSEEK_COMPATIBLE_BASE_URL,
@@ -110,8 +143,6 @@ COMPATIBLE_PROVIDER_DEFAULTS: dict[str, CompatibleProviderDefaults] = {
 PROVIDER_ALIASES = {
     "compatible": "openai-compatible",
     "openai": "openai-compatible",
-    "qwen": "dashscope",
-    "tongyi": "dashscope",
 }
 
 
@@ -156,7 +187,7 @@ class OpenAICompatibleChatModel:
 
     能力：同步/异步 invoke、SSE 流式、tool calling（invoke_messages）、
     失败重试与熔断（settings.llm_circuit_breaker_*）。
-    DashScope / DeepSeek 等均通过 compatible-mode 走本客户端。
+    DeepSeek 等 OpenAI-compatible 提供商均走本客户端。
     """
 
     provider: str
@@ -507,38 +538,8 @@ class OpenAICompatibleChatModel:
 AsyncOpenAICompatibleChatModel = OpenAICompatibleChatModel
 
 
-class DashScopeCompatibleChatModel(OpenAICompatibleChatModel):
-    """DashScope 专用子类：为 qwen3.5 系列自动注入 enable_thinking 等 extra_body。"""
-
-    def __init__(
-        self,
-        *,
-        model: str,
-        api_key: str,
-        base_url: str,
-        temperature: float,
-        enable_thinking: bool,
-        api_key_env_var: str = "DASHSCOPE_API_KEY",
-        extra_body: dict[str, Any] | None = None,
-    ) -> None:
-        body = dict(extra_body or {})
-        if model.startswith("qwen3.5"):
-            body.setdefault("enable_thinking", enable_thinking)
-
-        super().__init__(
-            provider="DashScope",
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=temperature,
-            api_key_env_var=api_key_env_var,
-            extra_body=body,
-            enable_thinking=enable_thinking,
-        )
-
-
 def _normalise_provider(provider: str | None) -> str:
-    normalised = (provider or "dashscope").strip().lower().replace("_", "-")
+    normalised = (provider or "deepseek").strip().lower().replace("_", "-")
     return PROVIDER_ALIASES.get(normalised, normalised)
 
 
@@ -584,8 +585,6 @@ def _resolve_chat_base_url(provider: str, defaults: CompatibleProviderDefaults) 
 
 def _provider_extra_body(provider: str, model: str) -> dict[str, Any]:
     extra_body: dict[str, Any] = {}
-    if provider == "dashscope" and model.startswith("qwen3.5"):
-        extra_body["enable_thinking"] = bool(settings.enable_thinking)
     extra_body.update(settings.chat_extra_body or {})
     return extra_body
 
@@ -595,16 +594,6 @@ def _build_openai_compatible_chat_model(provider: str) -> OpenAICompatibleChatMo
     api_key, api_key_env_var = _resolve_chat_api_key(provider, defaults)
     model = settings.chat_model_name
     extra_body = _provider_extra_body(provider, model)
-    if provider == "dashscope":
-        return DashScopeCompatibleChatModel(
-            model=model,
-            api_key=api_key,
-            base_url=_resolve_chat_base_url(provider, defaults),
-            temperature=settings.temperature,
-            enable_thinking=bool(extra_body.get("enable_thinking", False)),
-            api_key_env_var=api_key_env_var,
-            extra_body=extra_body,
-        )
 
     return AsyncOpenAICompatibleChatModel(
         provider=defaults.label,
@@ -617,28 +606,12 @@ def _build_openai_compatible_chat_model(provider: str) -> OpenAICompatibleChatMo
     )
 
 
-def _build_tongyi_chat_model():
-    model = settings.chat_model_name
-    if model.startswith("qwen3.5"):
-        raise ValueError(
-            "Qwen3.5 models must use DOC_ASSISTANT_CHAT_API=compatible because "
-            "DashScope's text-generation endpoint returns url error for this family."
-        )
-
-    return ChatTongyi(
-        model=model,
-        temperature=settings.temperature,
-        api_key=settings.dashscope_api_key or settings.chat_api_key,
-    )
-
-
 def _chat_model_cache_key() -> tuple[object, ...]:
     return (
         _normalise_provider(settings.chat_provider),
         _normalise_chat_api(settings.chat_api),
         settings.chat_model_name,
         settings.chat_api_key,
-        settings.dashscope_api_key,
         settings.deepseek_api_key,
         settings.chat_base_url,
         json.dumps(settings.chat_extra_body or {}, sort_keys=True),
@@ -653,8 +626,6 @@ def _build_chat_model_cached(_cache_key: tuple[object, ...]):
     chat_api = _normalise_chat_api(settings.chat_api)
     if chat_api in {"compatible", "openai-compatible", "chat-completions"}:
         return _build_openai_compatible_chat_model(provider)
-    if provider == "dashscope" and chat_api in {"tongyi", "native", "text-generation"}:
-        return _build_tongyi_chat_model()
 
     raise ValueError(
         "Unsupported chat configuration: "
@@ -726,6 +697,6 @@ def _build_embedding_model_cached(_cache_key: tuple[object, ...]):
     raise ValueError(
         "Unsupported embedding provider "
         f"'{provider}'. Configure DOC_ASSISTANT_EMBEDDING_PROVIDER as "
-        "dashscope, openai-compatible, or local."
+        "openai-compatible, dashscope, or local."
     )
 
