@@ -133,9 +133,9 @@ class ToolCallingChatService:
     ) -> None:
         self.qa_service = qa_service
         self.chat_model = qa_service.chat_model
-        from doc_assistant.models.language_model import ChatModelProtocol
+        from doc_assistant.models.language_model import MessageChatModelProtocol
 
-        if not isinstance(self.chat_model, ChatModelProtocol):
+        if not isinstance(self.chat_model, MessageChatModelProtocol):
             raise ValueError("The configured chat model does not support tool calling.")
         self.invoke_messages = self.chat_model.invoke_messages
         self._lc_chat_model = ChatOpenAICompatible(client=self.chat_model)

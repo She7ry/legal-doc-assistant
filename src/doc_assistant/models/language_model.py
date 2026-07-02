@@ -9,17 +9,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from functools import lru_cache
 import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from functools import lru_cache
 from time import monotonic, sleep
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 import requests
-
 from langchain_community.embeddings import DashScopeEmbeddings
 
 from doc_assistant.config.settings import settings
@@ -31,13 +30,8 @@ _ORIGINAL_REQUESTS_POST = requests.post
 
 
 @runtime_checkable
-class ChatModelProtocol(Protocol):
-    """结构协议：任何实现了 invoke_messages + invoke + stream 的对象皆可视为 ChatModel。
-
-    ``OpenAICompatibleChatModel`` 和 LangChain adapter 均满足本协议，
-    无需显式继承。业务层用 ``isinstance(model, ChatModelProtocol)``
-    替代 ``hasattr + callable`` 鸭子类型检测。
-    """
+class MessageChatModelProtocol(Protocol):
+    """Model capability for OpenAI-style messages and optional tool calling."""
 
     def invoke_messages(
         self,
@@ -46,6 +40,11 @@ class ChatModelProtocol(Protocol):
         tool_choice: str | dict[str, Any] | None = "auto",
     ) -> dict[str, Any]: ...
 
+
+@runtime_checkable
+class InvokableChatModelProtocol(Protocol):
+    """Model capability for a generic synchronous invocation."""
+
     def invoke(
         self,
         prompt: str | list[dict[str, Any]] | None = None,
@@ -53,12 +52,39 @@ class ChatModelProtocol(Protocol):
         messages: list[dict[str, Any]] | None = None,
     ) -> str: ...
 
+
+@runtime_checkable
+class StreamingChatModelProtocol(Protocol):
+    """Model capability for synchronous streaming."""
+
     def stream(self, messages: list[dict[str, Any]]) -> Iterator[str]: ...
 
 
 @runtime_checkable
-class AsyncChatModelProtocol(Protocol):
-    """``ChatModelProtocol`` 的异步版本。"""
+class MessageStreamingChatModelProtocol(
+    MessageChatModelProtocol,
+    StreamingChatModelProtocol,
+    Protocol,
+):
+    """Model capability for streaming the project's message format."""
+
+
+@runtime_checkable
+class ChatModelProtocol(
+    MessageStreamingChatModelProtocol,
+    InvokableChatModelProtocol,
+    Protocol,
+):
+    """Combined protocol retained for fully capable synchronous clients.
+
+    Services should depend on the smallest capability protocol they use.
+    ``OpenAICompatibleChatModel`` satisfies this combined protocol.
+    """
+
+
+@runtime_checkable
+class AsyncMessageChatModelProtocol(Protocol):
+    """Model capability for asynchronous OpenAI-style message invocation."""
 
     async def ainvoke_messages(
         self,
@@ -67,12 +93,26 @@ class AsyncChatModelProtocol(Protocol):
         tool_choice: str | dict[str, Any] | None = "auto",
     ) -> dict[str, Any]: ...
 
+
+@runtime_checkable
+class AsyncInvokableChatModelProtocol(Protocol):
+    """Model capability for a generic asynchronous invocation."""
+
     async def ainvoke(
         self,
         prompt: str | list[dict[str, Any]] | None = None,
         *,
         messages: list[dict[str, Any]] | None = None,
     ) -> str: ...
+
+
+@runtime_checkable
+class AsyncChatModelProtocol(
+    AsyncMessageChatModelProtocol,
+    AsyncInvokableChatModelProtocol,
+    Protocol,
+):
+    """Combined protocol retained for fully capable asynchronous clients."""
 
 
 @dataclass(frozen=True)
