@@ -82,6 +82,16 @@ def test_stream_prepared_answer_yields_chat_chunks() -> None:
     assert list(service.stream_prepared_answer(prepared)) == ["Hel", "lo!"]
 
 
+def test_stream_prepared_answer_falls_back_for_langchain_model() -> None:
+    service = DocumentQAService(
+        vector_store=EmptyVectorStore(),
+        chat_model=FakeListChatModel(responses=["Hello from LangChain."]),
+    )
+    prepared = service.prepare_answer("hello")
+
+    assert list(service.stream_prepared_answer(prepared)) == ["Hello from LangChain."]
+
+
 def test_stream_answer_events_emit_metadata_delta_and_done() -> None:
     service = DocumentQAService(vector_store=EmptyVectorStore(), chat_model=StreamingChatModel())
     prepared = service.prepare_answer("hello")

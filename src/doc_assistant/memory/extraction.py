@@ -93,9 +93,9 @@ class LLMMemoryExtractor:
             {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
         ]
-        from doc_assistant.models.language_model import ChatModelProtocol
+        from doc_assistant.models.language_model import MessageChatModelProtocol
 
-        if isinstance(model, ChatModelProtocol):
+        if isinstance(model, MessageChatModelProtocol):
             response = model.invoke_messages(messages)
             if isinstance(response, dict):
                 return str(response.get("content") or "")

@@ -26,8 +26,10 @@ from doc_assistant.config.settings import settings
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.models.language_model import (
-    AsyncChatModelProtocol,
-    ChatModelProtocol,
+    AsyncMessageChatModelProtocol,
+    InvokableChatModelProtocol,
+    MessageChatModelProtocol,
+    MessageStreamingChatModelProtocol,
     build_chat_model,
 )
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
@@ -585,31 +587,30 @@ class DocumentQAService:
         return " ".join(text.split())
 
     def _invoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        # 1) 项目自己的 ChatModelProtocol（首选）
-        if isinstance(self.chat_model, ChatModelProtocol):
+        # 1) Prefer the project's message invocation interface.
+        if isinstance(self.chat_model, MessageChatModelProtocol):
             response = self.chat_model.invoke_messages(messages)
             return str(response.get("content") or "")
 
-        # 2) LangChain BaseChatModel 兼容（FakeListChatModel 等）
-        invoke = getattr(self.chat_model, "invoke", None)
-        if callable(invoke):
+        # 2) Fall back to LangChain BaseChatModel-compatible invocation.
+        if isinstance(self.chat_model, InvokableChatModelProtocol):
             try:
-                response = invoke(messages=messages)
+                response = self.chat_model.invoke(messages=messages)
             except TypeError:
-                response = invoke(self._messages_to_prompt(messages))
+                response = self.chat_model.invoke(self._messages_to_prompt(messages))
             content = getattr(response, "content", response)
             return str(content)
 
         raise ValueError("The configured chat model does not support message-based chat.")
 
     async def _ainvoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        if isinstance(self.chat_model, AsyncChatModelProtocol):
+        if isinstance(self.chat_model, AsyncMessageChatModelProtocol):
             response = await self.chat_model.ainvoke_messages(messages)
             return str(response.get("content") or "")
         return await asyncio.to_thread(self._invoke_chat_messages, messages)
 
     def _stream_chat_messages(self, messages: list[dict[str, str]]) -> Iterator[str]:
-        if isinstance(self.chat_model, ChatModelProtocol):
+        if isinstance(self.chat_model, MessageStreamingChatModelProtocol):
             chunks = self.chat_model.stream(messages=messages)
             for chunk in chunks:
                 content = getattr(chunk, "content", chunk)
