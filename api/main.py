@@ -320,18 +320,16 @@ def _configuration_check(
 
 
 def _chat_api_key_configured() -> bool:
-    provider = settings.chat_provider.strip().lower().replace("_", "-")
     if settings.chat_api_key:
         return True
-    if provider in {"dashscope", "qwen", "tongyi"}:
-        return bool(settings.dashscope_api_key)
-    if provider == "deepseek":
+    if settings.chat_provider.strip().lower().replace("_", "-") == "deepseek":
         return bool(settings.deepseek_api_key)
     return False
 
 
 def _embedding_api_key_configured() -> bool:
-    provider = settings.embedding_provider.strip().lower().replace("_", "-")
-    if provider == "dashscope":
+    if settings.embedding_api_key:
+        return True
+    if settings.embedding_provider.strip().lower().replace("_", "-") == "dashscope":
         return bool(settings.embedding_api_key or settings.dashscope_api_key)
-    return bool(settings.embedding_api_key)
+    return False
