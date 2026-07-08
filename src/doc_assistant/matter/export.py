@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from io import BytesIO
 import json
 import re
+from io import BytesIO
 from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -401,7 +401,7 @@ def _simple_pdf(text: str) -> bytes:
     objects.append(b"")
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
-    for page_index, chunk in enumerate(page_chunks):
+    for _page_index, chunk in enumerate(page_chunks):
         content_stream = _pdf_content_stream(chunk)
         content_object_number = len(objects) + 2
         page_object_number = len(objects) + 1

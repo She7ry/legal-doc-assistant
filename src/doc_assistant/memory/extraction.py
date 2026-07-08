@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -15,6 +14,7 @@ from typing import Any
 from doc_assistant.config.settings import settings
 from doc_assistant.memory.schemas import MemoryWriteIntent
 from doc_assistant.models.language_model import build_chat_model
+from doc_assistant.utils.json import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class LLMMemoryExtractor:
         raise ValueError("The configured chat model does not support memory extraction.")
 
     def _intents_from_response(self, response: str) -> list[MemoryWriteIntent]:
-        payload = _extract_json_object(response)
+        payload = extract_json_object(response) or {}
         raw_items = payload.get("memories") if isinstance(payload, dict) else None
         if not isinstance(raw_items, list):
             return []
@@ -238,40 +238,6 @@ def _looks_like_question(text: str) -> bool:
     if re.search(r"^(?:what|how|why|when|where|who|can you|could you|please explain)\b", normalized):
         return True
     return any(term in stripped for term in ("什么", "如何", "怎么", "是否", "吗"))
-
-
-def _extract_json_object(content: str) -> dict[str, Any]:
-    text = content.strip()
-    if not text:
-        return {}
-
-    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    candidates = [fenced_match.group(1)] if fenced_match else []
-    candidates.append(text)
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if 0 <= first_brace < last_brace:
-        candidates.append(text[first_brace : last_brace + 1])
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
-
-
-def _infer_key(content: str, memory_type: str) -> str:
-    normalized = content.casefold()
-    if memory_type == "preference":
-        if any(term in normalized for term in ("answer", "reply", "response", "回答", "回复")):
-            return "answer_style"
-        return "user_preference"
-    if any(term in normalized for term in ("company", "business", "公司", "业务", "主营", "客户")):
-        return "business_context"
-    return "user_fact"
 
 
 def _infer_key(content: str, memory_type: str) -> str:

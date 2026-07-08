@@ -58,5 +58,4 @@ def _truncate_to_prompt_tokens(text: str, max_tokens: int) -> str:
 def _prompt_candidate_rank(candidate: MemoryCandidate) -> tuple[float, float, datetime, datetime]:
     memory = candidate.memory
     relevance = candidate.score if candidate.score is not None else 0.0
-    recency = memory.last_accessed_at or memory.updated_at
-    return (_effective_confidence(memory), relevance, recency, memory.created_at)
+    return (_effective_confidence(memory), relevance, memory.updated_at, memory.created_at)

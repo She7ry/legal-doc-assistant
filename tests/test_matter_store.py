@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from doc_assistant.matter.export import render_artifact_pdf
 from doc_assistant.matter.store import MatterStore
 
@@ -59,6 +63,196 @@ def test_matter_store_upserts_profile_and_artifact_versions(tmp_path) -> None:
         "matter_profile_upserted",
         "artifact_upserted",
     }
+
+
+def test_matter_store_retrying_same_task_is_idempotent(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+    result = {
+        "task_id": "task-1",
+        "matter_profile": {"matter_id": "matter-1", "open_questions": []},
+        "artifacts": [
+            {
+                "artifact_id": "risk_matrix",
+                "artifact_type": "risk_matrix",
+                "title": "Risk matrix",
+                "summary": "Structured risks.",
+                "items": [],
+            }
+        ],
+    }
+
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a", user_id="user-a", matter_id="matter-1", result=result,
+    )
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a", user_id="user-a", matter_id="matter-1", result=result,
+    )
+
+    loaded = store.get("matter-1", "tenant-a", "user-a", include_artifacts=True)
+    assert loaded is not None
+    assert loaded.artifacts
+    assert loaded.artifacts[0].version == 1
+    events = store.list_events("matter-1", "tenant-a", "user-a")
+    assert events is not None
+    assert [event.event_type for event in events].count("artifact_upserted") == 1
+
+
+def test_matter_store_preserves_human_changes_during_agent_resync(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+    base_result = {
+        "task_id": "task-1",
+        "matter_profile": {
+            "matter_id": "matter-1",
+            "open_questions": [],
+            "confirmation_gates": [
+                {
+                    "gate_id": "review-f1",
+                    "status": "pending",
+                    "required": True,
+                    "related_finding_ids": ["f1"],
+                    "metadata": {},
+                }
+            ],
+        },
+        "artifacts": [
+            {
+                "artifact_id": "risk_matrix",
+                "artifact_type": "risk_matrix",
+                "title": "Generated title",
+                "summary": "Generated summary",
+                "items": [{"item_id": "a1", "value": "generated"}],
+                "metadata": {"source": "agent"},
+            }
+        ],
+        "findings": [
+            {
+                "finding_id": "f1",
+                "summary": "Generated finding",
+                "evidence_coverage": "direct",
+                "needs_human_review": True,
+                "metadata": {"source": "agent"},
+            }
+        ],
+    }
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a", user_id="user-a", matter_id="matter-1", result=base_result,
+    )
+    store.update_confirmation_gate(
+        matter_id="matter-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        gate_id="review-f1",
+        status="approved",
+        note="Counsel approved.",
+        decided_by="lawyer-1",
+    )
+    store.update_artifact(
+        matter_id="matter-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        artifact_id="risk_matrix",
+        title="Counsel title",
+        summary="Counsel summary",
+        items=[{"item_id": "a1", "value": "reviewed"}],
+        status="approved",
+        updated_by="lawyer-1",
+    )
+
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        matter_id="matter-1",
+        result={**base_result, "task_id": "task-2"},
+    )
+
+    loaded = store.get(
+        "matter-1", "tenant-a", "user-a", include_artifacts=True, include_findings=True,
+    )
+    assert loaded is not None
+    assert loaded.matter_profile["confirmation_gates"][0]["status"] == "approved"
+    assert loaded.matter_profile["confirmation_gates"][0]["decided_by"] == "lawyer-1"
+    assert loaded.artifacts
+    assert loaded.artifacts[0].title == "Counsel title"
+    assert loaded.artifacts[0].items[0]["value"] == "reviewed"
+    assert loaded.artifacts[0].status == "approved"
+    assert loaded.findings
+    assert loaded.findings[0].human_review_status == "approved"
+    assert loaded.findings[0].metadata["last_decision"]["decided_by"] == "lawyer-1"
+
+
+def test_matter_store_keeps_queryable_artifact_version_history(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+    store.upsert_from_agent_result(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        matter_id="matter-1",
+        result={
+            "task_id": "task-1",
+            "matter_profile": {"matter_id": "matter-1", "open_questions": []},
+            "artifacts": [
+                {
+                    "artifact_id": "risk_matrix",
+                    "artifact_type": "risk_matrix",
+                    "title": "Version one",
+                    "summary": "First.",
+                    "items": [],
+                }
+            ],
+        },
+    )
+    store.update_artifact(
+        matter_id="matter-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        artifact_id="risk_matrix",
+        title="Version two",
+    )
+
+    versions = store.list_artifact_versions(
+        "matter-1", "tenant-a", "user-a", "risk_matrix",
+    )
+    assert versions is not None
+    assert [(item.version, item.title) for item in versions] == [
+        (1, "Version one"),
+        (2, "Version two"),
+    ]
+
+
+def test_matter_store_rolls_back_entire_agent_sync_on_serialization_error(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+
+    with pytest.raises(TypeError):
+        store.upsert_from_agent_result(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            matter_id="matter-1",
+            result={
+                "task_id": "task-1",
+                "matter_profile": {"matter_id": "matter-1", "open_questions": []},
+                "artifacts": [
+                    {
+                        "artifact_id": "risk_matrix",
+                        "artifact_type": "risk_matrix",
+                        "title": "Invalid artifact",
+                        "items": [{"invalid": object()}],
+                    }
+                ],
+            },
+        )
+
+    assert store.get("matter-1", "tenant-a", "user-a") is None
+
+
+def test_matter_database_configures_and_closes_connections(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+
+    with store._database.connection() as connection:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
 
 
 def test_matter_store_updates_artifact_with_new_version_and_event(tmp_path) -> None:

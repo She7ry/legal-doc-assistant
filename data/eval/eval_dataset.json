@@ -15,6 +15,11 @@
     "do not mention",
     "does not mention"
   ],
+  "default_expected_skills": [
+    "assess-evidence-sufficiency",
+    "grounded-rag-answer",
+    "verify-citation-support"
+  ],
   "chunking": {
     "chunk_size": 900,
     "chunk_overlap": 120,
@@ -915,6 +920,12 @@
       "question": "Compare the vendor incident notice period in the security policy with the processor incident notice period in the DPA.",
       "answer_type": "answerable",
       "category": "cross_document",
+      "expected_skills": [
+        "assess-evidence-sufficiency",
+        "decompose-retrieval-query",
+        "grounded-rag-answer",
+        "verify-citation-support"
+      ],
       "tags": [
         "answerable",
         "cross_document",
@@ -1192,6 +1203,12 @@
       "question": "Compare the DPA encryption requirement with the information security policy encryption requirement.",
       "answer_type": "answerable",
       "category": "cross_document",
+      "expected_skills": [
+        "assess-evidence-sufficiency",
+        "decompose-retrieval-query",
+        "grounded-rag-answer",
+        "verify-citation-support"
+      ],
       "tags": [
         "answerable",
         "cross_document",
@@ -1226,6 +1243,12 @@
       "question": "Compare the supply contract invoice payment period with the procurement policy standard supplier payment terms.",
       "answer_type": "answerable",
       "category": "cross_document",
+      "expected_skills": [
+        "assess-evidence-sufficiency",
+        "decompose-retrieval-query",
+        "grounded-rag-answer",
+        "verify-citation-support"
+      ],
       "tags": [
         "answerable",
         "cross_document",

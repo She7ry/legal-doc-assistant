@@ -22,7 +22,6 @@
           <el-option label="Preference" value="preference" />
           <el-option label="Fact" value="fact" />
           <el-option label="Task state" value="task_state" />
-          <el-option label="Feedback" value="feedback" />
           <el-option label="Correction" value="correction" />
         </el-select>
       </el-form-item>
@@ -76,10 +75,6 @@
       <el-table-column prop="content" label="Content" min-width="220" show-overflow-tooltip />
       <el-table-column prop="confidence" label="Conf." width="86">
         <template #default="{ row }">{{ row.confidence.toFixed(2) }}</template>
-      </el-table-column>
-      <el-table-column prop="access_count" label="Uses" width="74" />
-      <el-table-column label="Last used" width="140">
-        <template #default="{ row }">{{ formatDateTime(row.last_accessed_at) }}</template>
       </el-table-column>
       <el-table-column label="Actions" width="132" fixed="right">
         <template #default="{ row }">
@@ -275,19 +270,4 @@ async function removeMemory(memory: MemoryRecord) {
   }
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-  return date.toLocaleString(undefined, {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 </script>

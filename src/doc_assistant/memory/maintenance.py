@@ -25,11 +25,10 @@ def _effective_confidence(memory: MemoryRecord) -> float:
     half_life_days = settings.memory_decay_half_life_days
     if half_life_days <= 0:
         return memory.confidence
-    last_signal = memory.last_accessed_at or memory.updated_at
-    age_days = max(0.0, (datetime.now(timezone.utc) - last_signal).total_seconds() / 86400)
+    age_days = max(0.0, (datetime.now(timezone.utc) - memory.updated_at).total_seconds() / 86400)
     decay_factor = math.pow(0.5, age_days / half_life_days)
     return memory.confidence * decay_factor
 
 
 def _memory_retention_rank(memory: MemoryRecord) -> float:
-    return _effective_confidence(memory) + min(memory.access_count, 20) * 0.01
+    return _effective_confidence(memory)

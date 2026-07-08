@@ -15,7 +15,7 @@
 ------------
 config/       环境变量与 Settings（模型、检索、Agent、记忆等开关）
 ingestion/    PDF/DOCX/TXT 解析与上传落盘
-retrieval/    Chroma 向量库 + BM25 索引，混合检索与分块入库
+retrieval/    Qdrant Dense/BM25 Sparse 混合检索与分块入库
 models/       LLM / Embedding 客户端（DeepSeek、OpenAI-compatible 等）
 schemas/      跨模块共享的数据结构（Citation、QAAnswer 等）
 services/     业务核心：问答、工具调用聊天、法律 Agent

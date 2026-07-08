@@ -11,10 +11,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from hashlib import sha1
 from typing import Any
 
-from langchain_core.documents import Document
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -25,12 +23,16 @@ from langchain_core.messages import (
 
 from doc_assistant.config.settings import settings
 from doc_assistant.graphs.tool_calling import build_tool_calling_graph
+from doc_assistant.grounding.evidence import build_evidence_profile
+from doc_assistant.grounding.guard import validate_answer
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
 from doc_assistant.schemas.citation import Citation
-from doc_assistant.services.answer_guard import validate_answer
-from doc_assistant.services.evidence import build_evidence_profile
 from doc_assistant.services.qa_service import DocumentQAService
+from doc_assistant.tools.document_search import (
+    SEARCH_DOCUMENTS_TOOL_SCHEMA,
+    DocumentSearchTool,
+)
 from doc_assistant.tools.web_search import (
     DisabledWebSearchClient,
     WebSearchClient,
@@ -140,6 +142,10 @@ class ToolCallingChatService:
         self.invoke_messages = self.chat_model.invoke_messages
         self._lc_chat_model = ChatOpenAICompatible(client=self.chat_model)
         self.vector_store = qa_service.vector_store
+        self.document_search_tool = DocumentSearchTool(
+            self.vector_store,
+            default_top_k=settings.top_k,
+        )
         self.web_search_client = web_search_client or build_web_search_client()
         self._tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-call")
 
@@ -226,7 +232,7 @@ class ToolCallingChatService:
                 has_retrieved_documents=bool(guard_citations),
             )
 
-        self._record_memory_result(question, content, state, memory_context)
+        self._record_memory_result(content, memory_context)
         memories_used = (
             self.qa_service.memory_service.usages_from_candidates(memory_context.memory_candidates)
             if self.qa_service.memory_service
@@ -341,9 +347,7 @@ class ToolCallingChatService:
 
     def _record_memory_result(
         self,
-        question: str,
         content: str,
-        state: _ToolExecutionState,
         memory_context: _ToolMemoryContext,
     ) -> None:
         memory_service = self.qa_service.memory_service
@@ -368,14 +372,6 @@ class ToolCallingChatService:
                 message_id=message_id,
                 content=content,
                 task_id=memory_context.task_id,
-            )
-            memory_service.log_retrieval(
-                tenant_id=self.qa_service.tenant_id,
-                user_id=memory_context.user_id,
-                conversation_id=memory_context.conversation_id,
-                query=question,
-                document_count=len(state.citations),
-                memories=memory_context.memory_candidates,
             )
             memory_service.maybe_summarize_conversation(
                 tenant_id=self.qa_service.tenant_id,
@@ -460,19 +456,16 @@ class ToolCallingChatService:
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        query = _required_string(arguments, "query", max_length=500)
-        top_k = _clamp_int(int(arguments.get("top_k") or settings.top_k), minimum=1, maximum=10)
-        documents = self.vector_store.search(query, k=top_k)
+        execution = self.document_search_tool.execute(arguments)
 
         results = []
-        for document in documents:
-            identity = _document_identity(document)
-            source_id = state.document_source_ids.get(identity)
+        for hit in execution.hits:
+            source_id = state.document_source_ids.get(hit.identity)
             is_new_source = source_id is None
             if source_id is None:
                 source_id = f"D{len(state.citations) + 1}"
-                state.document_source_ids[identity] = source_id
-            item = _document_result(source_id, document)
+                state.document_source_ids[hit.identity] = source_id
+            item = {"source_id": source_id, **hit.result}
             if is_new_source:
                 state.citations.append(
                     Citation(
@@ -494,7 +487,7 @@ class ToolCallingChatService:
                 )
             results.append(item)
 
-        return {"query": query, "result_count": len(results), "results": results}
+        return {"query": execution.query, "result_count": len(results), "results": results}
 
     def _web_search(
         self,
@@ -543,33 +536,6 @@ class ToolCallingChatService:
 
         return {"query": query, "result_count": len(results), "results": results}
 
-
-SEARCH_DOCUMENTS_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "search_documents",
-        "description": "Search uploaded/indexed legal documents and return cited excerpts.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Focused search query for uploaded documents.",
-                    "minLength": 1,
-                    "maxLength": 500,
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "Number of document excerpts to retrieve.",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    },
-}
 
 WEB_SEARCH_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
@@ -656,53 +622,6 @@ def _parse_tool_arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
     return arguments
 
 
-def _document_result(source_id: str, document: Document) -> dict[str, Any]:
-    metadata = document.metadata or {}
-    content = _compact_text(document.page_content)[:1600]
-    page = metadata.get("page")
-    chunk_id = metadata.get("chunk_id")
-    section_heading = metadata.get("section_heading")
-    retrieval_score = metadata.get("retrieval_score")
-    retrieval_relevance = metadata.get("retrieval_relevance")
-    file_name = str(metadata.get("file_name") or metadata.get("source") or "unknown")
-    page_number = page if isinstance(page, int) else None
-    return {
-        "source_id": source_id,
-        "file_name": file_name,
-        "file_id": _optional_string(metadata.get("file_id")),
-        "document_key": _optional_string(metadata.get("document_key")),
-        "document_version": (
-            metadata.get("document_version")
-            if isinstance(metadata.get("document_version"), int)
-            else None
-        ),
-        "page": page_number,
-        "page_label": f"page {page_number + 1}" if page_number is not None else None,
-        "chunk_id": chunk_id if isinstance(chunk_id, int) else None,
-        "section_heading": str(section_heading) if section_heading else None,
-        "retrieval_score": retrieval_score if isinstance(retrieval_score, int | float) else None,
-        "retrieval_relevance": (
-            retrieval_relevance if isinstance(retrieval_relevance, int | float) else None
-        ),
-        "content": content,
-    }
-
-
-def _document_identity(document: Document) -> str:
-    metadata = document.metadata or {}
-    identity = {
-        "file_id": _optional_string(metadata.get("file_id")),
-        "document_key": _optional_string(metadata.get("document_key")),
-        "document_version": metadata.get("document_version"),
-        "page": metadata.get("page"),
-        "chunk_id": metadata.get("chunk_id"),
-        "source": _optional_string(metadata.get("source") or metadata.get("file_name")),
-    }
-    if any(value is not None for value in identity.values()):
-        return json.dumps(identity, ensure_ascii=False, sort_keys=True)
-    return sha1(_compact_text(document.page_content).encode("utf-8")).hexdigest()
-
-
 def _web_source(source_id: str, result: WebSearchResult) -> WebSource:
     return WebSource(
         source_id=source_id,
@@ -730,13 +649,6 @@ def _web_source_citations(sources: list[WebSource]) -> list[Citation]:
     return citations
 
 
-def _optional_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:
     value = str(arguments.get(name) or "").strip()
     if not value:
@@ -748,10 +660,6 @@ def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
-
-
-def _compact_text(text: str) -> str:
-    return " ".join(text.split())
 
 
 def _dict_to_lc_message(msg: dict[str, Any]) -> BaseMessage:

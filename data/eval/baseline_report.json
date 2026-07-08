@@ -1,0 +1,159 @@
+{
+  "baseline_capture": {
+    "status": "last_successful_pre_skill_report",
+    "unit_test_baseline": "148 passed",
+    "live_rerun": "blocked: configured chat API key is non-ASCII and caused UnicodeEncodeError for all 48 generation cases on 2026-07-02",
+    "comparable_to_current_dataset": false,
+    "note": "Configure a valid provider key, rebuild the eval vector store, and regenerate with skills disabled before using --fail-on-regression."
+  },
+  "dataset": "E:\\project\\legal_doc_assistant\\data\\eval\\eval_dataset.json",
+  "ingest_results": [
+    {
+      "file_id": "2781583738962b6320c7786b85b20632cf5658fe9cef430e1845f12eb1f11e14",
+      "file_name": "sample_supply_contract.pdf",
+      "document_count": 2,
+      "chunk_count": 2
+    }
+  ],
+  "summary": {
+    "retrieval": {
+      "at_5": {
+        "hit": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "recall": 1.0
+      },
+      "at_10": {
+        "hit": 1.0,
+        "mrr": 1.0,
+        "precision": 0.1,
+        "recall": 1.0
+      }
+    },
+    "generation": {
+      "answer_correctness": 1.0,
+      "citation_accuracy": 1.0,
+      "faithfulness": 1.0,
+      "refusal_accuracy": 1.0
+    },
+    "average_latency_seconds": 4.097241650000797
+  },
+  "records": [
+    {
+      "id": "eval_001_liquidated_damages_cap",
+      "question": "What is the cap on liquidated damages for late delivery?",
+      "answer": "The cap on liquidated damages for late delivery is **10% of the delayed shipment value** [S1].\n\nThis applies if goods are delivered more than five business days late, at which point the Supplier must pay 0.5% of the delayed shipment value for each day of delay until the 10% limit is reached [S1].",
+      "latency_seconds": 4.381219099999726,
+      "retrieved_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 1,
+          "chunk_id": 1,
+          "text": "ACME SUPPLY AGREEMENT\nDocument ID: EVAL-CONTRACT-001\nSection 12.2 Liquidated Damages\nMarker: EVAL-C-12.2.\nIf Supplier delivers goods more than five business days late, Supplier must pay liquidated\ndamages equal to 0.5% of the delayed shipment value for each day of delay.\nLiquidated damages are capped at 10% of the delayed shipment value.\nPayment of liquidated damages does not limit Buyer's right to reject nonconforming goods.\nSection 14. Confidentiality\nEach party must protect the other party's confidential information using reasonable care and\nmay use it only to perform this agreement.\nThe confidentiality obligation survives for three years after termination.",
+          "source_id": null
+        },
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 0,
+          "chunk_id": 0,
+          "text": "ACME SUPPLY AGREEMENT\nDocument ID: EVAL-CONTRACT-001\nSection 1. Parties\nBuyer: Northwind Retail LLC. Supplier: Blue Harbor Components Ltd.\nSection 2. Delivery\nSupplier must deliver conforming goods to Buyer's Shanghai warehouse on or before the\ndelivery date stated in each purchase order.\nA delivery is late if the goods arrive more than five business days after the applicable\ndelivery date.\nSection 5. Payment\nBuyer must pay undisputed invoices within 30 calendar days after receiving a valid invoice.\nDisputed invoice amounts may be withheld until the dispute is resolved in writing by both\nparties.",
+          "source_id": null
+        }
+      ],
+      "citations": [
+        {
+          "source_id": "S1",
+          "file_name": "sample_supply_contract.pdf",
+          "preview": "ACME SUPPLY AGREEMENT Document ID: EVAL-CONTRACT-001 Section 12.2 Liquidated Damages Marker: EVAL-C-12.2. If Supplier delivers goods more than five business days late, Supplier must pay liquidated damages equal to 0.5% of the delayed shipment value for each day of delay. Liquidated damages are capped at 10% of the delayed shipment value. Payment of liquidated damages does not limit Buyer's right to reject nonconforming goods. Section 14. Confidentiality Each party must protect the other party's ",
+          "page": 1,
+          "chunk_id": 1
+        },
+        {
+          "source_id": "S2",
+          "file_name": "sample_supply_contract.pdf",
+          "preview": "ACME SUPPLY AGREEMENT Document ID: EVAL-CONTRACT-001 Section 1. Parties Buyer: Northwind Retail LLC. Supplier: Blue Harbor Components Ltd. Section 2. Delivery Supplier must deliver conforming goods to Buyer's Shanghai warehouse on or before the delivery date stated in each purchase order. A delivery is late if the goods arrive more than five business days after the applicable delivery date. Section 5. Payment Buyer must pay undisputed invoices within 30 calendar days after receiving a valid invo",
+          "page": 0,
+          "chunk_id": 0
+        }
+      ],
+      "scores": {
+        "retrieval_at_5": {
+          "recall": 1.0,
+          "hit": 1.0,
+          "precision": 0.2,
+          "mrr": 1.0
+        },
+        "retrieval_at_10": {
+          "recall": 1.0,
+          "hit": 1.0,
+          "precision": 0.1,
+          "mrr": 1.0
+        },
+        "generation": {
+          "answer_correctness": 1.0,
+          "faithfulness": 1.0,
+          "citation_accuracy": 1.0,
+          "refusal_accuracy": null
+        }
+      }
+    },
+    {
+      "id": "eval_002_cyber_insurance_refusal",
+      "question": "Does the agreement require Supplier to buy cybersecurity insurance?",
+      "answer": "The provided source excerpts do not contain any requirement for the Supplier to purchase cybersecurity insurance.\n\nWhile Section 14 of the agreement mentions that each party must protect confidential information using \"reasonable care,\" it does not specify insurance obligations or cybersecurity coverage [S2]. No other sections in the provided text address insurance requirements [S1], [S2].",
+      "latency_seconds": 3.8132642000018677,
+      "retrieved_sources": [
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 0,
+          "chunk_id": 0,
+          "text": "ACME SUPPLY AGREEMENT\nDocument ID: EVAL-CONTRACT-001\nSection 1. Parties\nBuyer: Northwind Retail LLC. Supplier: Blue Harbor Components Ltd.\nSection 2. Delivery\nSupplier must deliver conforming goods to Buyer's Shanghai warehouse on or before the\ndelivery date stated in each purchase order.\nA delivery is late if the goods arrive more than five business days after the applicable\ndelivery date.\nSection 5. Payment\nBuyer must pay undisputed invoices within 30 calendar days after receiving a valid invoice.\nDisputed invoice amounts may be withheld until the dispute is resolved in writing by both\nparties.",
+          "source_id": null
+        },
+        {
+          "file_name": "sample_supply_contract.pdf",
+          "page": 1,
+          "chunk_id": 1,
+          "text": "ACME SUPPLY AGREEMENT\nDocument ID: EVAL-CONTRACT-001\nSection 12.2 Liquidated Damages\nMarker: EVAL-C-12.2.\nIf Supplier delivers goods more than five business days late, Supplier must pay liquidated\ndamages equal to 0.5% of the delayed shipment value for each day of delay.\nLiquidated damages are capped at 10% of the delayed shipment value.\nPayment of liquidated damages does not limit Buyer's right to reject nonconforming goods.\nSection 14. Confidentiality\nEach party must protect the other party's confidential information using reasonable care and\nmay use it only to perform this agreement.\nThe confidentiality obligation survives for three years after termination.",
+          "source_id": null
+        }
+      ],
+      "citations": [
+        {
+          "source_id": "S1",
+          "file_name": "sample_supply_contract.pdf",
+          "preview": "ACME SUPPLY AGREEMENT Document ID: EVAL-CONTRACT-001 Section 1. Parties Buyer: Northwind Retail LLC. Supplier: Blue Harbor Components Ltd. Section 2. Delivery Supplier must deliver conforming goods to Buyer's Shanghai warehouse on or before the delivery date stated in each purchase order. A delivery is late if the goods arrive more than five business days after the applicable delivery date. Section 5. Payment Buyer must pay undisputed invoices within 30 calendar days after receiving a valid invo",
+          "page": 0,
+          "chunk_id": 0
+        },
+        {
+          "source_id": "S2",
+          "file_name": "sample_supply_contract.pdf",
+          "preview": "ACME SUPPLY AGREEMENT Document ID: EVAL-CONTRACT-001 Section 12.2 Liquidated Damages Marker: EVAL-C-12.2. If Supplier delivers goods more than five business days late, Supplier must pay liquidated damages equal to 0.5% of the delayed shipment value for each day of delay. Liquidated damages are capped at 10% of the delayed shipment value. Payment of liquidated damages does not limit Buyer's right to reject nonconforming goods. Section 14. Confidentiality Each party must protect the other party's ",
+          "page": 1,
+          "chunk_id": 1
+        }
+      ],
+      "scores": {
+        "retrieval_at_5": {
+          "recall": null,
+          "hit": null,
+          "precision": null,
+          "mrr": null
+        },
+        "retrieval_at_10": {
+          "recall": null,
+          "hit": null,
+          "precision": null,
+          "mrr": null
+        },
+        "generation": {
+          "answer_correctness": 1.0,
+          "faithfulness": 1.0,
+          "citation_accuracy": null,
+          "refusal_accuracy": 1.0
+        }
+      }
+    }
+  ]
+}

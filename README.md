@@ -12,11 +12,10 @@
 |------|------|
 | 后端框架 | FastAPI + Uvicorn |
 | LLM 编排 | LangChain + LangGraph |
-| 向量存储 | ChromaDB |
-| 检索策略 | Hybrid（Dense + BM25 + RRF 融合 + MMR 去重） |
+| 向量存储 | Qdrant |
+| 检索策略 | Qdrant Hybrid（Dense + BM25 Sparse + RRF + MMR） |
 | 默认 LLM | DeepSeek（Chat）/ DashScope（Embedding） / 任意 OpenAI-compatible |
 | Embedding | DashScope text-embedding-v3 |
-| 中文分词 | jieba |
 | 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
 | 数据持久化 | SQLite（任务/记忆/Matter） |
 | 测试 | pytest + pytest-asyncio + coverage |
@@ -30,8 +29,8 @@
 
 - 支持上传 PDF、DOCX、TXT、Markdown 格式文档
 - 法律章节感知的智能分块（legal-section-aware chunking）
-- Hybrid 检索：向量语义搜索 + BM25 关键词匹配 + RRF 融合排序
-- 轻量级 lexical rerank + MMR 多样性选择，减少近似重复
+- Qdrant Hybrid 检索：Dense 语义搜索 + BM25 Sparse + RRF 融合排序
+- Qdrant 原生 MMR 多样性选择，减少近似重复
 - 后台异步文档摄入，支持进度查询与阶段性警告
 - 同名重复上传自动创建新版本，旧版本保留但不参与检索
 
@@ -73,7 +72,7 @@ Plan → Execute → Collect Findings → Build Deliverables → Synthesize Repo
 
 独立于文档 RAG 的记忆系统：
 
-- 存储用户偏好、对话上下文、任务状态和反馈
+- 存储用户偏好、对话上下文和 Agent 临时任务状态
 - 支持语义去重、置信度衰减、过期清理
 - LLM 驱动的自动记忆提取
 - 对话摘要压缩为 session memory
@@ -107,7 +106,6 @@ legal_doc_assistant/
 │   │   ├── matters.py            # Matter CRUD 与导出
 │   │   ├── memories.py           # 用户记忆管理
 │   │   ├── review.py             # 条款审查与冲突检测
-│   │   └── feedback.py           # 反馈收集
 │   ├── middleware/
 │   │   └── rate_limit.py         # 限流中间件
 │   └── schemas/                  # Pydantic 请求/响应模型
@@ -116,21 +114,21 @@ legal_doc_assistant/
 │   ├── config/settings.py        # 全局配置（环境变量驱动）
 │   ├── models/                   # LLM 与 Embedding 适配器
 │   ├── ingestion/                # 文档加载、哈希、持久化
-│   ├── retrieval/                # Chroma + BM25 混合检索
+│   ├── retrieval/                # Qdrant Dense/Sparse 混合检索
+│   ├── skills/                   # 只读 Skill catalog/selector/loader/renderer
+│   ├── agent/                    # 法律 Agent 子系统
+│   │   ├── service.py            # Agent 对外入口
+│   │   ├── planner.py            # LLM 规划器
+│   │   ├── executor.py           # 单步执行器
+│   │   ├── graph.py              # LangGraph 状态与路由
+│   │   ├── workflow.py           # 工作流编排入口
+│   │   └── schemas.py            # Agent 领域模型
+│   ├── grounding/                # 引用、证据与答案校验
+│   ├── review/                   # 条款分类、审查与冲突规则
 │   ├── services/
 │   │   ├── qa_service.py         # 问答核心逻辑
 │   │   ├── tool_calling_service.py  # Tool Calling 编排
-│   │   ├── agent_service.py      # Agent 业务逻辑入口
-│   │   ├── clause_review.py      # 条款风险评估
-│   │   ├── conflict_check.py     # 冲突检测
-│   │   ├── answer_guard.py       # 回答质量守卫
-│   │   ├── evidence.py           # 证据分析
-│   │   ├── review_taxonomy.py    # 审查分类体系
-│   │   └── agent/                # Agent 工作流子模块
-│   │       ├── planner.py        # LLM 规划器
-│   │       ├── executor.py       # 步骤执行器
-│   │       ├── workflow.py       # LangGraph 编排入口
-│   │       └── schemas.py        # Agent 领域模型
+│   │   └── review_service.py     # 条款审查业务编排
 │   ├── graphs/                   # LangGraph 状态图定义
 │   ├── memory/                   # 记忆策略、存储、检索
 │   ├── matter/                   # Matter 持久化与导出
@@ -139,6 +137,12 @@ legal_doc_assistant/
 │   ├── evaluation/               # RAG 评估指标与 CLI
 │   ├── schemas/                  # 共享领域模型
 │   └── utils/                    # 工具函数
+│
+├── skills/                       # 可移植的业务 Agent Skills（仅 Markdown/reference）
+│   ├── grounded-rag-answer/
+│   ├── decompose-retrieval-query/
+│   ├── assess-evidence-sufficiency/
+│   └── verify-citation-support/
 │
 ├── frontend/                     # Vue 3 前端
 │   ├── src/
@@ -151,7 +155,7 @@ legal_doc_assistant/
 │
 ├── data/                         # 运行时数据（不入版本控制）
 │   ├── uploads/                  # 上传文件
-│   ├── vector_store/             # ChromaDB 持久化
+│   ├── vector_store/             # Qdrant 本地持久化（默认）
 │   └── eval/                     # 评估数据集与报告
 │
 ├── tests/                        # 单元/集成测试
@@ -249,17 +253,33 @@ DOC_ASSISTANT_TOP_K=5
 DOC_ASSISTANT_RETRIEVAL_MODE=hybrid       # hybrid | dense | bm25
 DOC_ASSISTANT_RETRIEVAL_FETCH_K=40
 DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE=0
-DOC_ASSISTANT_RETRIEVAL_RRF_K=60
-DOC_ASSISTANT_RETRIEVAL_DENSE_WEIGHT=1
-DOC_ASSISTANT_RETRIEVAL_BM25_WEIGHT=1
-DOC_ASSISTANT_RETRIEVAL_RERANK_MODE=lexical
-DOC_ASSISTANT_RETRIEVAL_RERANK_WEIGHT=0.25
 DOC_ASSISTANT_RETRIEVAL_MMR_LAMBDA=0.85
+DOC_ASSISTANT_RETRIEVAL_BM25_K1=1.5
+DOC_ASSISTANT_RETRIEVAL_BM25_B=0.75
+DOC_ASSISTANT_RETRIEVAL_BM25_AVERAGE_LENGTH=256
 DOC_ASSISTANT_CHUNK_SIZE=900
 DOC_ASSISTANT_CHUNK_OVERLAP=120
 ```
 
-`hybrid` 模式将 Chroma 向量检索与进程内 BM25 通过 Reciprocal Rank Fusion 融合，经 lexical rerank 后使用 MMR 选择减少近似重复片段。
+默认使用 `data/vector_store` 下的嵌入式 Qdrant；设置 `DOC_ASSISTANT_QDRANT_URL` 和可选的 `DOC_ASSISTANT_QDRANT_API_KEY` 可连接 Qdrant 1.15+ 服务。`hybrid` 模式在 Qdrant 内执行 Dense/BM25 Sparse 检索、RRF 融合与 MMR 多样性选择。
+
+### Runtime Skill 配置
+
+```env
+DOC_ASSISTANT_SKILLS_ENABLED=true
+DOC_ASSISTANT_SKILLS_ROOT=
+DOC_ASSISTANT_SKILLS_ALLOWLIST=grounded-rag-answer,verify-citation-support,decompose-retrieval-query,assess-evidence-sufficiency
+DOC_ASSISTANT_SKILL_MAX_CATALOG_SIZE=32
+DOC_ASSISTANT_SKILL_MAX_FILE_BYTES=65536
+DOC_ASSISTANT_SKILL_MAX_REFERENCE_FILES=16
+DOC_ASSISTANT_SKILL_MAX_REFERENCE_BYTES=131072
+DOC_ASSISTANT_SKILL_MAX_LOADED_TOKENS=4000
+DOC_ASSISTANT_SKILL_MAX_SELECTED=4
+DOC_ASSISTANT_SKILL_QUERY_DECOMPOSITION_ENABLED=true
+DOC_ASSISTANT_SKILL_MAX_RETRIEVAL_QUERIES=4
+```
+
+Skill selector 只读取 `name + description`；正文和 reference 仅在选中后按需加载。运行时拒绝路径穿越、符号链接、名称冲突、超限文件和修改系统 Prompt/安全边界的指令。Skill 不执行自带脚本，也不能自行获得 shell、网络或动态 Python 权限。
 
 ### Tool Calling 配置
 
@@ -388,7 +408,6 @@ Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/api/v1/memories` | 列出活跃记忆 |
-| GET | `/api/v1/memories/stats` | 记忆健康统计 |
 | POST | `/api/v1/memories` | 创建记忆条目 |
 | POST | `/api/v1/memories/batch` | 批量创建记忆 |
 | POST | `/api/v1/memories/maintenance` | 执行维护（过期清理等） |
@@ -397,13 +416,12 @@ Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `
 | DELETE | `/api/v1/memories/{memory_id}` | 软删除记忆 |
 | POST | `/api/v1/memories/batch-delete` | 批量删除记忆 |
 
-### 审查与反馈
+### 审查
 
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | POST | `/api/v1/review/clause` | 条款风险评估 |
 | POST | `/api/v1/review/conflict` | 合同与政策冲突检测 |
-| POST | `/api/v1/feedback` | 提交回答反馈 |
 
 ---
 
@@ -469,6 +487,15 @@ $headers = @{
 | `plain_language_explain.txt` | 通俗语言解释 |
 | `general_chat.txt` | 通用对话 |
 
+### Skill 执行链
+
+```text
+用户任务 → metadata-only selector → bounded loader → Planner/QA
+        → 多查询检索与证据充分性检查 → 生成 → AnswerGuard 引用支持校验
+```
+
+QA 与 Agent 结果的 `metadata` 会记录 `selected_skills`、`skill_versions`、`selection_reason` 和 `skill_token_cost`。复杂查询才启用 query decomposition；普通闲聊不注入 RAG skill。
+
 ---
 
 ## 评估系统
@@ -515,6 +542,11 @@ run-rag-eval --skip-ingest `
 | `faithfulness` | 回答中的数字和关键词有引用上下文支撑 |
 | `citation_accuracy` | 引用的 source ID 对应 gold source |
 | `refusal_accuracy` | 不可回答问题包含预期的拒答表述 |
+| `unsupported_claim_count` | AnswerGuard 识别的无依据陈述数量 |
+| `skill_selection_accuracy` | Skill 选择集合是否与评测标注一致 |
+| `skill_token_cost` | 注入的 Skill 指令估算 token 成本 |
+
+最后一次成功的 pre-skill 报告快照保存为 `data/eval/baseline_report.json`；当前数据集重跑若未完成，该文件会明确标记为不可直接比较。执行 A/B 时应固定数据集、模型、检索配置与来源版本，先以 `DOC_ASSISTANT_SKILLS_ENABLED=false` 重新生成 baseline，再以 `true` 运行对照；外部 skill 只有在指标稳定改善或明确补充能力后才允许进入启用名单。
 
 评估数据集 `data/eval/eval_dataset.json` 包含可回答、不可回答、中文查询和跨文档场景，并记录 chunking config hash 以检测分块变更后的陈旧预期。
 
@@ -526,6 +558,12 @@ run-rag-eval --skip-ingest `
 
 ```powershell
 pytest
+
+# 单个测试模块
+pytest tests/test_qa_service.py -v
+
+# 覆盖率
+pytest --cov=src/doc_assistant --cov-report=term-missing
 ```
 
 ### 代码检查
@@ -539,6 +577,13 @@ ruff format --check src/ api/ tests/
 
 ```powershell
 python -m pip install -e ".[dev,eval]"
+```
+
+### 前端生产构建
+
+```powershell
+cd frontend
+npm.cmd run build
 ```
 
 ---

@@ -1,5 +1,12 @@
-"""Agent 可调用的外部工具（网页搜索等）及 tool 元数据注册表。"""
+"""Agent-callable external tools and tool metadata registry."""
 
+from doc_assistant.tools.document_search import (
+    SEARCH_DOCUMENTS_TOOL_SCHEMA,
+    DocumentSearchBackend,
+    DocumentSearchExecution,
+    DocumentSearchHit,
+    DocumentSearchTool,
+)
 from doc_assistant.tools.web_search import (
     DisabledWebSearchClient,
     WebSearchClient,
@@ -19,8 +26,13 @@ TOOL_REGISTRY = {
 }
 
 __all__ = [
-    "DisabledWebSearchClient",
+    "SEARCH_DOCUMENTS_TOOL_SCHEMA",
     "TOOL_REGISTRY",
+    "DisabledWebSearchClient",
+    "DocumentSearchBackend",
+    "DocumentSearchExecution",
+    "DocumentSearchHit",
+    "DocumentSearchTool",
     "WebSearchClient",
     "WebSearchResult",
     "build_web_search_client",

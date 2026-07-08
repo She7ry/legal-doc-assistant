@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api.agent_tasks import AgentTaskStore
 from api.jobs import IngestJobStore
+from doc_assistant.agent import LegalAgentService
 from doc_assistant.config.settings import settings
 from doc_assistant.matter.store import MatterStore
 from doc_assistant.memory.extraction import build_memory_extractor
@@ -17,7 +18,6 @@ from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.vector_store import MemoryVectorStore
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
-from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.services.qa_service import DocumentQAService
 from doc_assistant.services.tool_calling_service import ToolCallingChatService
 

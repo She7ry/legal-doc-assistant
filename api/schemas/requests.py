@@ -83,7 +83,7 @@ class MatterFindingUpdateRequest(BaseModel):
 
 class MemoryCreateRequest(BaseModel):
     scope: str = Field(default="user", pattern="^(user|org|session|task)$")
-    type: str = Field(default="preference", pattern="^(preference|fact|task_state|feedback|correction)$")
+    type: str = Field(default="preference", pattern="^(preference|fact|task_state|correction)$")
     key: str = Field(..., min_length=1, max_length=120)
     content: str = Field(..., min_length=1, max_length=2000)
     value: dict[str, Any] | None = None
@@ -115,18 +115,6 @@ class MemoryBatchDeleteRequest(BaseModel):
 class MemoryConversationSummaryRequest(BaseModel):
     conversation_id: str = Field(..., min_length=1, max_length=128)
     limit: int = Field(default=40, ge=2, le=200)
-
-
-class FeedbackCreateRequest(BaseModel):
-    rating: str | int = Field(
-        ...,
-        description="positive/negative or 1/-1.",
-        examples=["positive"],
-    )
-    conversation_id: str | None = Field(default=None, max_length=128)
-    message_id: str | None = Field(default=None, max_length=128)
-    memory_ids: list[str] = Field(default_factory=list, max_length=50)
-    comment: str | None = Field(default=None, max_length=1000)
 
 
 class ClauseReviewRequest(BaseModel):

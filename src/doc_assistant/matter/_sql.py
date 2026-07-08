@@ -91,6 +91,30 @@ CREATE TABLE IF NOT EXISTS matter_events (
 )
 """
 
+CREATE_TABLE_ARTIFACT_VERSIONS = """
+CREATE TABLE IF NOT EXISTS matter_artifact_versions (
+    artifact_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    items_json TEXT NOT NULL,
+    source_finding_ids_json TEXT NOT NULL,
+    citations_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    source_task_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(artifact_id, matter_id, tenant_id, user_id, version),
+    FOREIGN KEY(matter_id, tenant_id, user_id)
+        REFERENCES matters(matter_id, tenant_id, user_id)
+)
+"""
+
 # ── DDL: indexes ──────────────────────────────────────────────
 
 CREATE_INDEX_MATTERS_USER_UPDATED = """
@@ -111,6 +135,11 @@ ON review_findings(tenant_id, user_id, matter_id)
 CREATE_INDEX_MATTER_EVENTS_MATTER = """
 CREATE INDEX IF NOT EXISTS idx_matter_events_matter
 ON matter_events(tenant_id, user_id, matter_id, created_at)
+"""
+
+CREATE_INDEX_ARTIFACT_VERSIONS_ARTIFACT = """
+CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact
+ON matter_artifact_versions(tenant_id, user_id, matter_id, artifact_id, version)
 """
 
 # ── DML: matters 表 ───────────────────────────────────────────
@@ -206,6 +235,39 @@ WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
 ORDER BY artifact_type ASC
 """
 
+INSERT_CURRENT_ARTIFACT_VERSION = """
+INSERT OR REPLACE INTO matter_artifact_versions (
+    artifact_id, matter_id, tenant_id, user_id, artifact_type, title, summary,
+    items_json, source_finding_ids_json, citations_json, metadata_json,
+    source_task_id, version, status, created_at, updated_at
+)
+SELECT
+    artifact_id, matter_id, tenant_id, user_id, artifact_type, title, summary,
+    items_json, source_finding_ids_json, citations_json, metadata_json,
+    source_task_id, version, status, created_at, updated_at
+FROM matter_artifacts
+WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
+"""
+
+SELECT_ARTIFACT_VERSIONS = """
+SELECT * FROM matter_artifact_versions
+WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND artifact_id = ?
+ORDER BY version ASC
+"""
+
+BACKFILL_ARTIFACT_VERSIONS = """
+INSERT OR IGNORE INTO matter_artifact_versions (
+    artifact_id, matter_id, tenant_id, user_id, artifact_type, title, summary,
+    items_json, source_finding_ids_json, citations_json, metadata_json,
+    source_task_id, version, status, created_at, updated_at
+)
+SELECT
+    artifact_id, matter_id, tenant_id, user_id, artifact_type, title, summary,
+    items_json, source_finding_ids_json, citations_json, metadata_json,
+    source_task_id, version, status, created_at, updated_at
+FROM matter_artifacts
+"""
+
 # ── DML: review_findings 表 ───────────────────────────────────
 
 SELECT_FINDING_EXISTING = """
@@ -282,3 +344,17 @@ WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
 ORDER BY created_at DESC
 LIMIT ?
 """
+
+
+SCHEMA_STATEMENTS = (
+    CREATE_TABLE_MATTERS,
+    CREATE_TABLE_MATTER_ARTIFACTS,
+    CREATE_TABLE_REVIEW_FINDINGS,
+    CREATE_TABLE_MATTER_EVENTS,
+    CREATE_TABLE_ARTIFACT_VERSIONS,
+    CREATE_INDEX_MATTERS_USER_UPDATED,
+    CREATE_INDEX_MATTER_ARTIFACTS_MATTER,
+    CREATE_INDEX_REVIEW_FINDINGS_MATTER,
+    CREATE_INDEX_MATTER_EVENTS_MATTER,
+    CREATE_INDEX_ARTIFACT_VERSIONS_ARTIFACT,
+)

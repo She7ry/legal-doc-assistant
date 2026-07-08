@@ -6,11 +6,10 @@ from types import SimpleNamespace
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
+from doc_assistant.agent import LegalAgentService, clarification_questions_for_task
+from doc_assistant.agent.planner import plan_task_with_llm
+from doc_assistant.agent.schemas import AgentPlanStep, AgentStepResult
 from doc_assistant.schemas.citation import Citation, QAAnswer
-from doc_assistant.services.agent._constants import clarification_questions_for_task
-from doc_assistant.services.agent._helpers import _CitationRegistry
-from doc_assistant.services.agent.schemas import AgentPlanStep
-from doc_assistant.services.agent_service import LegalAgentService
 from doc_assistant.services.qa_service import DocumentQAService
 
 
@@ -174,6 +173,27 @@ class ReactEvidenceRepairQAService:
         )
 
 
+def test_llm_planner_uses_message_model_without_qa_private_methods() -> None:
+    class PlannerModel:
+        def invoke_messages(self, _messages, tools=None, tool_choice="auto"):
+            del tools, tool_choice
+            return {
+                "content": (
+                    '[{"step_id":"profile","title":"Profile","purpose":"Profile",'
+                    '"tool":"document_qa","arguments":{}}]'
+                )
+            }
+
+    plan = plan_task_with_llm(
+        PlannerModel(),
+        objective="Review the agreement.",
+        focus_areas=[],
+        max_steps=3,
+    )
+
+    assert [step.tool for step in plan] == ["document_qa", "synthesize_report"]
+
+
 def test_legal_agent_runs_planned_clause_review_with_citation_trace() -> None:
     vector_store = StaticVectorStore()
     qa_service = DocumentQAService(
@@ -281,7 +301,13 @@ def test_legal_agent_react_repairs_uncited_clause_review_with_followup_evidence(
 
     assert len(qa_service.ask_calls) == 2
     assert "Observed evidence gap" in qa_service.ask_calls[1]
+    assert [item["action"]["tool"] for item in react_trace] == [
+        "document_qa",
+        "finalize_report",
+    ]
     assert react_trace[0]["action"]["tool"] == "document_qa"
+    assert react_trace[0]["result"]["step_id"] == "review_1_react_1"
+    assert react_trace[1]["result"] == {}
     assert review_step.citations[0].source_id == "S2"
     assert not any(
         item.startswith("No cited document evidence was found")
@@ -291,8 +317,25 @@ def test_legal_agent_react_repairs_uncited_clause_review_with_followup_evidence(
     assert result.findings[0].support_level == "direct"
 
 
+def test_parallel_clause_reviews_each_run_graph_native_react() -> None:
+    qa_service = ReactEvidenceRepairQAService()
+    agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
+
+    result = agent.run_task(
+        objective="Review payment and termination risks in the SaaS agreement.",
+        focus_areas=["payment", "termination"],
+        user_role="lawyer",
+        max_steps=5,
+    )
+
+    review_steps = [step for step in result.steps if step.tool == "review_clause"]
+    assert len(review_steps) == 2
+    assert all(step.output["react_trace"][0]["action"]["tool"] == "document_qa" for step in review_steps)
+    assert all(step.citations for step in review_steps)
+
+
 def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) -> None:
-    from doc_assistant.services.agent import _planning
+    from doc_assistant.agent import _planning
 
     monkeypatch.setattr(
         _planning,
@@ -322,13 +365,58 @@ def test_legal_agent_runs_independent_clause_reviews_in_parallel(monkeypatch) ->
     ]
 
 
-def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
-    from doc_assistant.services.agent import _react
+def test_checkpoint_step_dict_rehydrates_existing_result_model(monkeypatch) -> None:
+    from doc_assistant.agent import _react
+    from doc_assistant.agent.graph import _rehydrate_step_result, _route_after_step
 
     monkeypatch.setattr(
         _react,
         "settings",
-        SimpleNamespace(agent_react_enabled=False),
+        SimpleNamespace(agent_react_enabled=True, agent_react_max_iterations=2),
+    )
+    raw_step = {
+        "step_id": "review_1",
+        "title": "Review termination",
+        "tool": "review_clause",
+        "status": "completed",
+        "summary": "Supported conclusion [S1].",
+        "citations": [
+            {
+                "source_id": "S1",
+                "file_name": "agreement.pdf",
+                "preview": "Supported conclusion.",
+            }
+        ],
+        "guard_warnings": [],
+        "output": {},
+    }
+
+    restored = _rehydrate_step_result(raw_step)
+    route = _route_after_step(
+        {
+            "plan": [
+                {
+                    "step_id": "review_1",
+                    "tool": "review_clause",
+                }
+            ],
+            "_exec_plan_index": 0,
+            "_exec_step_result": raw_step,
+        }
+    )
+
+    assert isinstance(restored, AgentStepResult)
+    assert isinstance(restored.citations[0], Citation)
+    assert route == "advance_step"
+
+
+def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
+    from doc_assistant.agent import _react, workflow
+
+    monkeypatch.setattr(
+        _react,
+        "settings",
+        SimpleNamespace(agent_react_enabled=False, agent_react_max_iterations=0),
     )
     qa_service = RecordingAgentQAService()
     agent = LegalAgentService(qa_service)  # type: ignore[arg-type]
@@ -349,14 +437,10 @@ def test_legal_agent_passes_step_history_between_qa_steps(monkeypatch) -> None:
         ),
     ]
 
-    agent._execute_plan_steps(
-        plan,
+    monkeypatch.setattr(workflow, "plan_task", lambda _chat_model, **_kwargs: plan)
+    agent.run_task(
         objective="Review key dates.",
-        user_id=None,
-        conversation_id=None,
         task_id="task-a",
-        citation_registry=_CitationRegistry(),
-        progress_callback=None,
     )
 
     assert qa_service.calls[0]["chat_history"][0]["content"] == "Agent objective: Review key dates."

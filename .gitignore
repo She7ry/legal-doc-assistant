@@ -50,6 +50,7 @@ data/eval/vector_store/*
 data/eval/latest_report.json
 
 # IDE / OS
+.claude/
 .idea/
 .vscode/
 *.swp

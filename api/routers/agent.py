@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 import logging
+from collections.abc import Iterator
 from time import sleep
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
+from langgraph.errors import GraphInterrupt
 
 from api.agent_tasks import AgentTaskRecord, AgentTaskStatus, AgentTaskStore
 from api.dependencies import (
@@ -21,10 +22,8 @@ from api.schemas.requests import AgentTaskRequest, AgentTaskResumeRequest
 from api.schemas.responses import AgentTaskRecordResponse, AgentTaskResponse
 from api.sse import SSE_HEADERS, format_sse
 from api.task_queue import submit_background_task
-from doc_assistant.services.agent._constants import clarification_questions_for_task
-from doc_assistant.services.agent_service import LegalAgentService
+from doc_assistant.agent import LegalAgentService, clarification_questions_for_task
 from doc_assistant.matter.store import MatterStore
-from langgraph.errors import GraphInterrupt
 
 logger = logging.getLogger(__name__)
 
