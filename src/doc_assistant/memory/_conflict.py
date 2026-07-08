@@ -65,7 +65,6 @@ def _is_equivalent_memory(
     content: str,
     value_json: dict | None,
     visibility: str,
-    permissions: tuple[str, ...],
     task_id: str | None,
     expires_at: object | None,
 ) -> bool:
@@ -73,7 +72,6 @@ def _is_equivalent_memory(
         memory.content == content.strip()
         and _visible_value_json(memory.value_json) == _visible_value_json(value_json)
         and memory.visibility == visibility
-        and memory.permissions == permissions
         and memory.task_id == task_id
         and memory.expires_at == expires_at
     )
@@ -88,21 +86,3 @@ def _visible_value_json(value_json: dict | None) -> dict | None:
         if not str(key).startswith("_superseded_")
     }
     return visible or None
-
-
-def _normalize_feedback_rating(rating: int | str) -> int:
-    if isinstance(rating, str):
-        normalized = rating.strip().casefold()
-        if normalized in {"positive", "+1", "1", "up", "thumbs_up"}:
-            return 1
-        if normalized in {"negative", "-1", "down", "thumbs_down"}:
-            return -1
-    if rating == 1:
-        return 1
-    if rating == -1:
-        return -1
-    raise ValueError("Feedback rating must be positive/negative or 1/-1.")
-
-
-def _clamp_confidence(value: float) -> float:
-    return max(0.0, min(1.0, value))

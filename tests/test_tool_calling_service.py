@@ -5,6 +5,7 @@ import json
 from langchain_core.documents import Document
 
 from doc_assistant.memory import service as memory_service_module
+from doc_assistant.memory.schemas import MemoryCandidate
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.services import tool_calling_service as tool_calling_module
@@ -164,7 +165,7 @@ def test_tool_calling_service_executes_web_search_when_enabled() -> None:
 
 def test_tool_calling_service_uses_memory_context(tmp_path) -> None:
     memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
-    memory_service.create_memory(
+    memory = memory_service.create_memory(
         tenant_id="default",
         user_id="user-a",
         scope="user",
@@ -172,6 +173,19 @@ def test_tool_calling_service_uses_memory_context(tmp_path) -> None:
         key="answer_style",
         content="Prefer concise answers.",
     )
+
+    class StaticMemoryVectorStore:
+        def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
+            del query, tenant_id, user_id, k
+            return [MemoryCandidate(memory=memory, score=0.95, retrieval_source="vector")]
+
+        def upsert_memory(self, candidate) -> str:
+            return candidate.memory_id
+
+        def delete_memory(self, memory_id: str) -> None:
+            del memory_id
+
+    memory_service.vector_store = StaticMemoryVectorStore()  # type: ignore[assignment]
     model = MemoryAwareToolModel()
     qa_service = DocumentQAService(
         vector_store=SingleDocumentVectorStore(),

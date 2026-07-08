@@ -6,35 +6,15 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
+from doc_assistant.review.taxonomy import allowed_conflict_type_keys
 from doc_assistant.schemas.citation import Citation
-from doc_assistant.services.review_taxonomy import allowed_conflict_type_keys
+from doc_assistant.utils.json import extract_json_object as _extract_json_object
+from doc_assistant.utils.text import optional_text
 
-
-def extract_json_object(content: str) -> dict[str, Any] | None:
-    text = (content or "").strip()
-    if not text:
-        return None
-
-    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    candidates = [fenced_match.group(1)] if fenced_match else []
-    candidates.append(text)
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if 0 <= first_brace < last_brace:
-        candidates.append(text[first_brace : last_brace + 1])
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+extract_json_object = _extract_json_object
 
 
 def as_str(value: Any, default: str = "") -> str:
@@ -47,9 +27,7 @@ def as_str(value: Any, default: str = "") -> str:
     return default
 
 
-def optional_str(value: Any) -> str | None:
-    text = as_str(value)
-    return text or None
+optional_str = optional_text
 
 
 def as_list_str(value: Any) -> list[str]:

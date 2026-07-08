@@ -10,6 +10,7 @@ from statistics import mean
 from typing import Any
 
 from doc_assistant.evaluation.constants import DEFAULT_REFUSAL_TERMS
+from doc_assistant.utils.text import optional_text as _optional_str
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ def score_generation_case(
     case: dict[str, Any],
     answer: str,
     citations: list[SourceCandidate],
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, float | None]:
     answer_type = case.get("answer_type", "answerable")
     gold_sources = list(case.get("gold_sources") or [])
@@ -110,6 +112,9 @@ def score_generation_case(
             "faithfulness": refusal,
             "citation_accuracy": None,
             "refusal_accuracy": refusal,
+            "unsupported_claim_count": _unsupported_claim_count(metadata),
+            "skill_selection_accuracy": _skill_selection_accuracy(case, metadata),
+            "skill_token_cost": _skill_token_cost(metadata),
         }
 
     answer_correct = _contains_all(answer_text, case.get("required_answer_terms") or [])
@@ -131,7 +136,47 @@ def score_generation_case(
         ),
         "citation_accuracy": _citation_accuracy(answer_text, citations, gold_sources),
         "refusal_accuracy": None,
+        "unsupported_claim_count": _unsupported_claim_count(metadata),
+        "skill_selection_accuracy": _skill_selection_accuracy(case, metadata),
+        "skill_token_cost": _skill_token_cost(metadata),
     }
+
+
+def _unsupported_claim_count(metadata: dict[str, Any] | None) -> float | None:
+    if not isinstance(metadata, dict):
+        return None
+    checks = metadata.get("citation_support")
+    if not isinstance(checks, list):
+        return None
+    return float(
+        sum(
+            1
+            for check in checks
+            if isinstance(check, dict) and check.get("status") == "unsupported"
+        )
+    )
+
+
+def _skill_selection_accuracy(
+    case: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> float | None:
+    expected = case.get("expected_skills")
+    if not isinstance(expected, list) or not isinstance(metadata, dict):
+        return None
+    selected = metadata.get("selected_skills")
+    if not isinstance(selected, list):
+        return 0.0
+    return 1.0 if set(map(str, selected)) == set(map(str, expected)) else 0.0
+
+
+def _skill_token_cost(metadata: dict[str, Any] | None) -> float | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get("skill_token_cost")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 
 def aggregate_scores(
@@ -225,12 +270,6 @@ def _contains_any(text: str, terms: list[str]) -> bool:
 def _contains_refusal(text: str, case: dict[str, Any]) -> bool:
     refusal_terms = case.get("required_refusal_terms") or DEFAULT_REFUSAL_TERMS
     return _contains_any(text, list(refusal_terms))
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
 
 
 def _int_mapping_value(values: dict[str, Any], key: str) -> int | None:

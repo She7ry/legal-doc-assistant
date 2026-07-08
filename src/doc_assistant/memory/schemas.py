@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Final, Literal, get_args
 
 MemoryScope = Literal["user", "org", "session", "task"]
-MemoryType = Literal["preference", "fact", "task_state", "feedback", "correction"]
+MemoryType = Literal["preference", "fact", "task_state", "correction"]
 MemorySource = Literal["explicit", "inferred", "imported", "system_generated"]
 MemoryStatus = Literal["active", "stale", "deleted"]
 MemoryVisibility = Literal["private", "team", "org"]
@@ -82,15 +82,11 @@ class MemoryRecord:
     updated_at: datetime
     expires_at: datetime | None = None
     visibility: MemoryVisibility = "private"
-    permissions: tuple[str, ...] = ("read", "write", "delete")
-    embedding_id: str | None = None
     supersedes_id: str | None = None
     status: MemoryStatus = "active"
     source_message_id: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
-    last_accessed_at: datetime | None = None
-    access_count: int = 0
     superseded_conflicting: bool = False
     superseded_from_content: str | None = None
 
@@ -136,36 +132,8 @@ class MemoryUsage:
     confidence: float
     scope: MemoryScope
     score: float | None = None
-    last_accessed_at: datetime | None = None
-    access_count: int = 0
     superseded_conflicting: bool = False
     superseded_from_content: str | None = None
-
-
-@dataclass(frozen=True)
-class FeedbackEventRecord:
-    """用户对某次回答的 thumbs up/down 反馈，可联动调整相关记忆的置信度。"""
-
-    feedback_id: str
-    tenant_id: str
-    user_id: str
-    rating: int
-    created_at: datetime
-    conversation_id: str | None = None
-    message_id: str | None = None
-    memory_ids: tuple[str, ...] = ()
-    comment: str | None = None
-
-
-@dataclass(frozen=True)
-class FeedbackMemoryAdjustment:
-    """用户反馈触发后，对单条记忆置信度/状态的调整记录。"""
-
-    memory_id: str
-    status: str
-    previous_confidence: float | None = None
-    new_confidence: float | None = None
-    memory: MemoryRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -179,5 +147,4 @@ class MemoryUpdate:
     confidence: float | None = None
     expires_at: datetime | None | _UnsetType = UNSET
     visibility: MemoryVisibility | None = None
-    permissions: tuple[str, ...] | None = None
     status: MemoryStatus | None = None

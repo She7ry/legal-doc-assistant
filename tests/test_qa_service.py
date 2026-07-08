@@ -136,6 +136,34 @@ def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
     assert answer.content == "Termination requires 30 days written notice [S1]."
 
 
+def test_complex_question_uses_multi_query_retrieval_and_records_skill_metadata() -> None:
+    vector_store = StaticVectorStore(
+        [
+            Document(
+                page_content=(
+                    "Payment is due within 30 days. Termination requires 10 days written notice."
+                ),
+                metadata={"file_name": "contract.pdf", "page": 0, "chunk_id": 1},
+            )
+        ]
+    )
+    service = DocumentQAService(
+        vector_store=vector_store,
+        chat_model=FakeListChatModel(
+            responses=["Payment is due within 30 days [S1]. Termination requires 10 days notice [S1]."]
+        ),
+    )
+
+    answer = service.ask("Compare payment terms; identify the termination notice period.")
+
+    assert len(vector_store.queries) >= 2
+    assert "decompose-retrieval-query" in answer.metadata["selected_skills"]
+    assert answer.metadata["skill_token_cost"] > 0
+    assert len(answer.metadata["retrieval_queries"]) >= 2
+    assert answer.metadata["evidence_sufficiency"]["status"] == "sufficient"
+    assert all(check["status"] == "supported" for check in answer.metadata["citation_support"])
+
+
 def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
     class CountingChatModel:
         def __init__(self) -> None:

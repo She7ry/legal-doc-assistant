@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 
-from doc_assistant.matter._utils import _datetime_from_db, _utc_now
 from doc_assistant.matter.schemas import (
     MatterArtifactRecord,
     MatterEventRecord,
@@ -25,8 +25,12 @@ def _row_to_matter(row: sqlite3.Row) -> MatterRecord:
         matter_profile=json.loads(row["matter_profile_json"] or "{}"),
         source_task_id=row["source_task_id"],
         latest_task_id=row["latest_task_id"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
+        created_at=datetime.fromisoformat(row["created_at"])
+        if row["created_at"]
+        else datetime.now(timezone.utc),
+        updated_at=datetime.fromisoformat(row["updated_at"])
+        if row["updated_at"]
+        else datetime.now(timezone.utc),
     )
 
 
@@ -46,8 +50,12 @@ def _row_to_artifact(row: sqlite3.Row) -> MatterArtifactRecord:
         source_task_id=row["source_task_id"],
         version=int(row["version"]),
         status=row["status"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
+        created_at=datetime.fromisoformat(row["created_at"])
+        if row["created_at"]
+        else datetime.now(timezone.utc),
+        updated_at=datetime.fromisoformat(row["updated_at"])
+        if row["updated_at"]
+        else datetime.now(timezone.utc),
     )
 
 
@@ -74,8 +82,12 @@ def _row_to_finding(row: sqlite3.Row) -> MatterFindingRecord:
         status=row["status"],
         metadata=json.loads(row["metadata_json"] or "{}"),
         source_task_id=row["source_task_id"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
-        updated_at=_datetime_from_db(row["updated_at"]) or _utc_now(),
+        created_at=datetime.fromisoformat(row["created_at"])
+        if row["created_at"]
+        else datetime.now(timezone.utc),
+        updated_at=datetime.fromisoformat(row["updated_at"])
+        if row["updated_at"]
+        else datetime.now(timezone.utc),
     )
 
 
@@ -91,7 +103,9 @@ def _row_to_event(row: sqlite3.Row) -> MatterEventRecord:
         old_value=_json_value(row["old_value_json"]),
         new_value=_json_value(row["new_value_json"]),
         actor=row["actor"],
-        created_at=_datetime_from_db(row["created_at"]) or _utc_now(),
+        created_at=datetime.fromisoformat(row["created_at"])
+        if row["created_at"]
+        else datetime.now(timezone.utc),
     )
 
 

@@ -5,7 +5,6 @@ import type {
   MemoryListResponse,
   MemoryMaintenanceResponse,
   MemoryRecord,
-  MemoryStatsResponse,
   MemoryUpdateRequest,
 } from "./types";
 
@@ -13,13 +12,6 @@ export function listMemories(): Promise<MemoryListResponse> {
   return apiRequest<MemoryListResponse>({
     method: "GET",
     url: "/api/v1/memories",
-  });
-}
-
-export function getMemoryStats(): Promise<MemoryStatsResponse> {
-  return apiRequest<MemoryStatsResponse>({
-    method: "GET",
-    url: "/api/v1/memories/stats",
   });
 }
 

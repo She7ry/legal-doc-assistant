@@ -8,5 +8,8 @@ Objective:
 Focus areas:
 {focus_areas}
 
+Selected runtime skill guidance:
+{skill_instructions}
+
 Output a JSON array of steps. Each step must include step_id, title, purpose, tool, and arguments.
 Only use tools from the available tools list. Keep the plan under {max_steps} steps and include synthesize_report as the final step.

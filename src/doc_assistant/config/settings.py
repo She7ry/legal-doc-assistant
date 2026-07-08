@@ -109,12 +109,26 @@ class StorageSettings:
 
     project_root: Path = PROJECT_ROOT
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
-    vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
+    vector_store_dir: Path = field(
+        default_factory=lambda: _path_env(
+            "DOC_ASSISTANT_VECTOR_STORE_DIR",
+            PROJECT_ROOT / "data" / "vector_store",
+        )
+    )
     memory_vector_store_dir: Path = field(
         default_factory=lambda: _path_env(
             "DOC_ASSISTANT_MEMORY_VECTOR_STORE_DIR",
             PROJECT_ROOT / "data" / "memory_vector_store",
         )
+    )
+    qdrant_url: str = field(
+        default_factory=lambda: os.getenv("DOC_ASSISTANT_QDRANT_URL", "").strip()
+    )
+    qdrant_api_key: _SecretStr = field(
+        default_factory=lambda: _secret_env("DOC_ASSISTANT_QDRANT_API_KEY")
+    )
+    qdrant_prefer_grpc: bool = field(
+        default_factory=lambda: _bool_env("DOC_ASSISTANT_QDRANT_PREFER_GRPC", False)
     )
     ingest_jobs_db_path: Path = field(
         default_factory=lambda: _path_env(
@@ -188,17 +202,60 @@ class RetrievalSettings:
     retrieval_mode: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_RETRIEVAL_MODE", "hybrid"))
     retrieval_fetch_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_FETCH_K", 40))
     retrieval_min_relevance: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE", 0.0))
-    retrieval_rrf_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_RRF_K", 60))
-    retrieval_dense_weight: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_DENSE_WEIGHT", 1.0))
-    retrieval_bm25_weight: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_BM25_WEIGHT", 1.0))
-    retrieval_rerank_mode: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_RETRIEVAL_RERANK_MODE", "lexical"))
-    retrieval_rerank_weight: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_RERANK_WEIGHT", 0.25))
     retrieval_mmr_lambda: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_MMR_LAMBDA", 0.85))
+    retrieval_bm25_k1: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_BM25_K1", 1.5))
+    retrieval_bm25_b: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_BM25_B", 0.75))
+    retrieval_bm25_average_length: float = field(
+        default_factory=lambda: _float_env("DOC_ASSISTANT_RETRIEVAL_BM25_AVERAGE_LENGTH", 256.0)
+    )
     retrieval_cache_ttl_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_TTL_SECONDS", 300))
     retrieval_cache_max_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_RETRIEVAL_CACHE_MAX_SIZE", 128))
     query_rewrite_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_QUERY_REWRITE_ENABLED", True))
     chunk_size: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_SIZE", 900))
     chunk_overlap: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHUNK_OVERLAP", 120))
+
+
+@dataclass(frozen=True)
+class SkillSettings:
+    """只读运行时 Skill 的启用名单与资源限制。"""
+
+    skills_enabled: bool = field(
+        default_factory=lambda: _bool_env("DOC_ASSISTANT_SKILLS_ENABLED", True)
+    )
+    skills_root: Path = field(
+        default_factory=lambda: _path_env("DOC_ASSISTANT_SKILLS_ROOT", PROJECT_ROOT / "skills")
+    )
+    skills_allowlist: tuple[str, ...] = field(
+        default_factory=lambda: _csv_env(
+            "DOC_ASSISTANT_SKILLS_ALLOWLIST",
+            "grounded-rag-answer,verify-citation-support,"
+            "decompose-retrieval-query,assess-evidence-sufficiency",
+        )
+    )
+    skill_max_catalog_size: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_CATALOG_SIZE", 32)
+    )
+    skill_max_file_bytes: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_FILE_BYTES", 65_536)
+    )
+    skill_max_reference_files: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_REFERENCE_FILES", 16)
+    )
+    skill_max_reference_bytes: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_REFERENCE_BYTES", 131_072)
+    )
+    skill_max_loaded_tokens: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_LOADED_TOKENS", 4_000)
+    )
+    skill_max_selected: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_SELECTED", 4)
+    )
+    skill_query_decomposition_enabled: bool = field(
+        default_factory=lambda: _bool_env("DOC_ASSISTANT_SKILL_QUERY_DECOMPOSITION_ENABLED", True)
+    )
+    skill_max_retrieval_queries: int = field(
+        default_factory=lambda: _int_env("DOC_ASSISTANT_SKILL_MAX_RETRIEVAL_QUERIES", 4)
+    )
 
 
 @dataclass(frozen=True)
@@ -302,6 +359,7 @@ class Settings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
+    skill: SkillSettings = field(default_factory=SkillSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
@@ -316,7 +374,7 @@ class Settings:
     def __getattr__(self, name: str) -> Any:
         """向后兼容：``settings.top_k`` 自动委托到对应子配置。"""
         for sub in (
-            "storage", "llm", "embedding", "retrieval",
+            "storage", "llm", "embedding", "retrieval", "skill",
             "agent", "memory", "web_search", "security",
         ):
             sub_obj = object.__getattribute__(self, sub)
@@ -337,11 +395,27 @@ class Settings:
             raise ValueError("retrieval_mode must be one of: hybrid, dense, vector, bm25, sparse.")
         _validate_positive("top_k", r.top_k)
         _validate_positive("retrieval_fetch_k", r.retrieval_fetch_k)
-        _validate_positive("retrieval_rrf_k", r.retrieval_rrf_k)
         if not 0 <= r.retrieval_mmr_lambda <= 1:
             raise ValueError("retrieval_mmr_lambda must be between 0 and 1.")
+        if r.retrieval_bm25_k1 <= 0:
+            raise ValueError("retrieval_bm25_k1 must be greater than 0.")
+        if not 0 <= r.retrieval_bm25_b <= 1:
+            raise ValueError("retrieval_bm25_b must be between 0 and 1.")
+        if r.retrieval_bm25_average_length <= 0:
+            raise ValueError("retrieval_bm25_average_length must be greater than 0.")
         if r.retrieval_min_relevance < 0:
             raise ValueError("retrieval_min_relevance must be greater than or equal to 0.")
+        skill = self.skill
+        for name in (
+            "skill_max_catalog_size",
+            "skill_max_file_bytes",
+            "skill_max_reference_files",
+            "skill_max_reference_bytes",
+            "skill_max_loaded_tokens",
+            "skill_max_selected",
+            "skill_max_retrieval_queries",
+        ):
+            _validate_positive(name, getattr(skill, name))
         a = self.agent
         if a.agent_step_max_retries < 0:
             raise ValueError("agent_step_max_retries must be greater than or equal to 0.")
@@ -375,7 +449,7 @@ class Settings:
         sub_mapping: dict[str, str] = {}
         sub_fields: dict[str, dict[str, Any]] = {}
         for sub_name in (
-            "storage", "llm", "embedding", "retrieval",
+            "storage", "llm", "embedding", "retrieval", "skill",
             "agent", "memory", "web_search", "security",
         ):
             sub_obj = getattr(self, sub_name)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from doc_assistant.services.review_taxonomy import resolve_clause_profile
+from doc_assistant.review.taxonomy import resolve_clause_profile
 
 
 def test_resolve_clause_profile_matches_chinese_alias() -> None:

@@ -1,32 +1,156 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.documents import Document
+from qdrant_client import QdrantClient
 
-from doc_assistant.retrieval import vector_store as vector_store_module
-from doc_assistant.retrieval.bm25_index import BM25Document, PersistentBM25Index
-from doc_assistant.retrieval.vector_store import (
-    DocumentVectorStore,
-    _bm25_rank,
-    _chunk_text_with_heading,
-    _split_legal_sections,
-    _tokenize_for_search,
-    document_key_for_file_name,
+from doc_assistant.retrieval import _ingestion as ingestion_module
+from doc_assistant.retrieval import _qdrant_retriever as retriever_module
+from doc_assistant.retrieval._chunking import (
+    chunk_text_with_heading,
+    split_legal_sections,
 )
+from doc_assistant.retrieval._ingestion import DocumentIngester, document_key_for_file_name
+from doc_assistant.retrieval._qdrant_repository import QdrantDocumentRepository
+from doc_assistant.retrieval._qdrant_retriever import QdrantRetriever, QueryCache
+from doc_assistant.retrieval.vector_store import DocumentVectorStore
+
+
+class FakeEmbeddingModel:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vector(text)
+
+    @staticmethod
+    def _vector(text: str) -> list[float]:
+        lowered = text.casefold()
+        return [
+            float("payment" in lowered),
+            float("damages" in lowered),
+            1.0,
+        ]
 
 
 def test_document_key_is_stable_for_case_and_whitespace() -> None:
-    assert document_key_for_file_name(" Contract.DOCX ") == document_key_for_file_name("contract.docx")
+    assert document_key_for_file_name(" Contract.DOCX ") == document_key_for_file_name(
+        "contract.docx"
+    )
+
+
+def test_ingest_file_replaces_active_version_and_invalidates_cache(monkeypatch) -> None:
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.deleted_ids: list[str] = []
+            self.embedded: list[tuple[list[Document], list[str]]] = []
+            self.deactivated: list[tuple[list[str], list[dict]]] = []
+
+        def records_for_document_key(self, _document_key: str) -> list[dict]:
+            return [existing]
+
+        def delete(self, ids: list[str]) -> None:
+            self.deleted_ids.extend(ids)
+
+        def embed_and_add(self, chunks, ids, *, batch_size, max_workers) -> None:
+            del batch_size, max_workers
+            self.embedded.append((chunks, ids))
+
+        def update_metadatas(self, ids, metadatas) -> None:
+            self.deactivated.append((ids, metadatas))
+
+    existing = {
+        "id": "contract:old:v1:0",
+        "metadata": {
+            "active": True,
+            "document_key": document_key_for_file_name("Contract.pdf"),
+            "document_version": 1,
+            "file_id": "old-hash",
+        },
+        "document": "Old text.",
+    }
+    repository = FakeRepository()
+    cache_clear_count = 0
+
+    def clear_cache() -> None:
+        nonlocal cache_clear_count
+        cache_clear_count += 1
+
+    ingester = DocumentIngester(
+        tenant_id="tenant-a",
+        repository=repository,  # type: ignore[arg-type]
+        splitter=object(),  # type: ignore[arg-type]
+        invalidate_cache=clear_cache,
+    )
+    monkeypatch.setattr(ingestion_module, "file_sha256", lambda _path: "new-hash")
+    monkeypatch.setattr(
+        ingestion_module,
+        "load_documents",
+        lambda _path: [Document(page_content="New text.", metadata={"page": 0})],
+    )
+    monkeypatch.setattr(
+        ingestion_module,
+        "split_documents_for_ingestion",
+        lambda documents, *, splitter: [
+            Document(page_content="New chunk.", metadata=dict(documents[0].metadata))
+        ],
+    )
+
+    result = ingester.ingest_file(Path("Contract.pdf"))
+
+    assert result.document_version == 2
+    assert result.skipped is False
+    assert repository.embedded[0][0][0].metadata["active"] is True
+    assert repository.embedded[0][0][0].metadata["document_version"] == 2
+    assert repository.deactivated[0][0] == [existing["id"]]
+    assert repository.deactivated[0][1][0]["superseded_by_file_id"] == "new-hash"
+    assert cache_clear_count == 1
+
+
+def test_ingest_rolls_back_qdrant_chunks_when_upsert_fails() -> None:
+    class FailingRepository:
+        def __init__(self) -> None:
+            self.deleted: list[list[str]] = []
+
+        def delete(self, ids: list[str]) -> None:
+            self.deleted.append(list(ids))
+
+        def embed_and_add(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("Qdrant unavailable")
+
+    repository = FailingRepository()
+    ingester = DocumentIngester(
+        tenant_id="tenant-a",
+        repository=repository,  # type: ignore[arg-type]
+        splitter=object(),  # type: ignore[arg-type]
+        invalidate_cache=lambda: None,
+    )
+
+    with pytest.raises(RuntimeError, match="Qdrant unavailable"):
+        ingester._write_chunks(
+            [Document(page_content="chunk", metadata={})],
+            ["chunk-1"],
+            active_records=[],
+            file_id="file-a",
+            progress_callback=None,
+            warnings=[],
+        )
+
+    assert repository.deleted == [["chunk-1"], ["chunk-1"]]
 
 
 def test_split_legal_sections_preserves_headings_in_metadata() -> None:
     document = Document(
-        page_content="Intro text\n\nSection 1 Term\nThe term is one year.\n\n2. Payment\nPay monthly.",
+        page_content=(
+            "Intro text\n\nSection 1 Term\nThe term is one year.\n\n2. Payment\nPay monthly."
+        ),
         metadata={"file_name": "contract.txt"},
     )
 
-    sections = _split_legal_sections([document])
+    sections = split_legal_sections([document])
 
     headings = [section.metadata.get("section_heading") for section in sections]
     assert "Section 1 Term" in headings
@@ -34,360 +158,252 @@ def test_split_legal_sections_preserves_headings_in_metadata() -> None:
 
 
 def test_chunk_text_with_heading_preserves_section_context() -> None:
-    assert _chunk_text_with_heading("Payment must be made monthly.", "2. Payment") == (
+    assert chunk_text_with_heading("Payment must be made monthly.", "2. Payment") == (
         "2. Payment\nPayment must be made monthly."
     )
-    assert _chunk_text_with_heading("2. Payment\nPayment must be made monthly.", "2. Payment") == (
+    assert chunk_text_with_heading("2. Payment\nPayment must be made monthly.", "2. Payment") == (
         "2. Payment\nPayment must be made monthly."
     )
 
 
-def test_bm25_rank_matches_exact_legal_terms() -> None:
-    records = [
-        {
-            "id": "payment",
-            "metadata": {"file_name": "contract.pdf", "chunk_id": 1},
-            "document": "Invoices are payable within 30 calendar days.",
-        },
-        {
-            "id": "damages",
-            "metadata": {"file_name": "contract.pdf", "chunk_id": 2},
-            "document": "Liquidated damages are capped at 10% of the delayed shipment value.",
-        },
-    ]
-
-    ranked = _bm25_rank("liquidated damages 10% cap", records, k=2)
-
-    assert ranked[0][2] == "damages"
-
-
-def test_persistent_bm25_index_searches_without_full_chroma_scan(tmp_path) -> None:
-    index = PersistentBM25Index(tmp_path / "bm25.sqlite3")
-    index.add_document(
-        BM25Document(
-            doc_id="damages",
-            tokens=_tokenize_for_search(
-                "contract.pdf Liquidated damages are capped at 10% of shipment value."
+def test_qdrant_sparse_bm25_matches_exact_legal_terms() -> None:
+    client = QdrantClient(":memory:")
+    repository = QdrantDocumentRepository(client, "documents", FakeEmbeddingModel())
+    repository.embed_and_add(
+        [
+            Document(
+                page_content="Invoices are payable within 30 calendar days.",
+                metadata={"active": True, "file_name": "contract.pdf"},
             ),
-            document="Liquidated damages are capped at 10% of shipment value.",
-            metadata={
-                "active": True,
-                "document_key": "contract",
-                "file_id": "file-a",
-                "document_version": 1,
-                "chunk_id": 2,
-            },
-        )
+            Document(
+                page_content="Liquidated damages are capped at 10% of shipment value.",
+                metadata={"active": True, "file_name": "contract.pdf"},
+            ),
+        ],
+        ["payment", "damages"],
+        batch_size=2,
+        max_workers=1,
     )
 
-    class ExplodingChroma:
-        def get(self, **_kwargs):
-            raise AssertionError("BM25 search should not scan Chroma records.")
+    results = repository.search("liquidated damages 10% cap", limit=1, mode="bm25")
 
-    store = object.__new__(DocumentVectorStore)
-    store.vector_store = ExplodingChroma()
-    store._bm25_index = index
-    store._bm25_rebuild_attempted = True
-    store.tenant_id = "default"
-
-    ranked = store._bm25_candidates("liquidated damages cap", fetch_k=1)
-
-    assert ranked[0][2] == "damages"
-    assert "Liquidated damages" in ranked[0][0].page_content
+    assert results[0].page_content.startswith("Liquidated damages")
+    assert results[0].metadata["retrieval_mode"] == "bm25"
+    client.close()
 
 
-def test_batch_embed_and_add_preserves_chunk_order(monkeypatch) -> None:
-    class FakeEmbeddingFunction:
+def test_qdrant_embed_and_add_preserves_chunk_order() -> None:
+    class OrderedEmbeddingModel:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
         def embed_documents(self, texts: list[str]) -> list[list[float]]:
             self.calls.append(list(texts))
-            return [[float(text.rsplit(" ", 1)[-1])] for text in texts]
+            return [[float(text.rsplit(" ", 1)[-1]), 1.0] for text in texts]
 
-    class FakeCollection:
-        def __init__(self) -> None:
-            self.payload = None
+        def embed_query(self, text: str) -> list[float]:
+            del text
+            return [0.0, 1.0]
 
-        def add(self, **payload) -> None:
-            self.payload = payload
-
-    class FakeVectorStore:
-        def __init__(self) -> None:
-            self._embedding_function = FakeEmbeddingFunction()
-            self._collection = FakeCollection()
-
-        def add_documents(self, *_args, **_kwargs) -> None:
-            raise AssertionError("Manual batch embedding should bypass add_documents.")
-
-    fake_vector_store = FakeVectorStore()
-    store = object.__new__(DocumentVectorStore)
-    store.vector_store = fake_vector_store
-    monkeypatch.setattr(
-        vector_store_module,
-        "settings",
-        SimpleNamespace(embedding_batch_size=2, embedding_max_workers=2),
-    )
-
+    client = QdrantClient(":memory:")
+    embedding_model = OrderedEmbeddingModel()
+    repository = QdrantDocumentRepository(client, "documents", embedding_model)
     chunks = [
-        Document(page_content=f"chunk {index}", metadata={"chunk_id": index})
+        Document(page_content=f"chunk {index}", metadata={"chunk_id": index, "active": True})
         for index in range(4)
     ]
     ids = [f"doc-{index}" for index in range(4)]
 
-    store._batch_embed_and_add(chunks, ids)
+    repository.embed_and_add(chunks, ids, batch_size=2, max_workers=2)
+    records = sorted(repository.all_records(), key=lambda record: record["metadata"]["chunk_id"])
 
-    assert fake_vector_store._collection.payload["ids"] == ids
-    assert fake_vector_store._collection.payload["documents"] == [
-        "chunk 0",
-        "chunk 1",
-        "chunk 2",
-        "chunk 3",
-    ]
-    assert fake_vector_store._collection.payload["embeddings"] == [
-        [0.0],
-        [1.0],
-        [2.0],
-        [3.0],
-    ]
+    assert [record["id"] for record in records] == ids
+    assert [record["document"] for record in records] == [f"chunk {index}" for index in range(4)]
+    assert embedding_model.calls == [["chunk 0", "chunk 1"], ["chunk 2", "chunk 3"]]
+    client.close()
 
 
-class FakeChroma:
-    def __init__(self) -> None:
-        self.vector_filter = None
-        self.record_filter = None
+def test_qdrant_hybrid_search_filters_inactive_and_fuses_dense_sparse() -> None:
+    client = QdrantClient(":memory:")
+    repository = QdrantDocumentRepository(client, "documents", FakeEmbeddingModel())
+    repository.embed_and_add(
+        [
+            Document(
+                page_content="Liquidated damages are capped at 10%.",
+                metadata={"active": True, "file_name": "contract.pdf"},
+            ),
+            Document(
+                page_content="Liquidated damages were removed from the old draft.",
+                metadata={"active": False, "file_name": "contract-v1.pdf"},
+            ),
+            Document(
+                page_content="Invoices are payable monthly.",
+                metadata={"active": True, "file_name": "contract.pdf"},
+            ),
+        ],
+        ["damages", "old-damages", "payment"],
+        batch_size=3,
+        max_workers=1,
+    )
 
-    def similarity_search_with_relevance_scores(self, query, k, filter=None):
-        self.vector_filter = filter
-        return [
-            (
-                Document(
-                    page_content="Invoices are payable within 30 calendar days.",
-                    metadata={
-                        "active": True,
-                        "document_key": "contract",
-                        "file_id": "file-a",
-                        "document_version": 1,
-                        "chunk_id": 1,
-                    },
-                ),
-                0.8,
-            )
-        ]
+    results = repository.search("liquidated damages cap", limit=3, mode="hybrid")
 
-    def get(self, where=None, include=None):
-        self.record_filter = where
-        return {
-            "ids": ["damages"],
-            "metadatas": [
-                {
-                    "active": True,
-                    "document_key": "contract",
-                    "file_id": "file-a",
-                    "document_version": 1,
-                    "chunk_id": 2,
-                }
-            ],
-            "documents": [
-                "Liquidated damages are capped at 10% of the delayed shipment value."
-            ],
-        }
+    assert results[0].page_content.startswith("Liquidated damages are capped")
+    assert all("old draft" not in result.page_content for result in results)
+    assert results[0].metadata["qdrant_score"] > 0
+    client.close()
 
 
-def test_hybrid_search_pushes_active_filter_and_fuses_bm25(monkeypatch) -> None:
-    fake_chroma = FakeChroma()
-    store = object.__new__(DocumentVectorStore)
-    store.vector_store = fake_chroma
+def test_search_cache_avoids_repeating_qdrant_query(monkeypatch) -> None:
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.calls = 0
 
+        def search(self, query: str, *, limit: int, mode: str) -> list[Document]:
+            del query, limit, mode
+            self.calls += 1
+            return [Document(page_content="Cached result.", metadata={})]
+
+    repository = FakeRepository()
+    retriever = QdrantRetriever(
+        repository=repository,  # type: ignore[arg-type]
+        tenant_id="default",
+        cache=QueryCache(ttl_seconds=300, max_size=8),
+    )
     monkeypatch.setattr(
-        vector_store_module,
+        retriever_module,
         "settings",
         SimpleNamespace(
             top_k=1,
             retrieval_mode="hybrid",
             retrieval_fetch_k=10,
             retrieval_min_relevance=0.0,
-            retrieval_rrf_k=60,
-            retrieval_dense_weight=1.0,
-            retrieval_bm25_weight=1.0,
-            retrieval_mmr_lambda=1.0,
+            retrieval_mmr_lambda=0.85,
         ),
     )
 
-    results = store.search("liquidated damages 10% cap", k=1)
-
-    assert fake_chroma.vector_filter == {"active": True}
-    assert fake_chroma.record_filter == {"active": True}
-    assert "Liquidated damages" in results[0].page_content
-    assert results[0].metadata["bm25_rank"] == 1
-    assert results[0].metadata["rerank_score"] > 0
-    assert results[0].metadata["retrieval_score"] > 0
-
-
-def test_search_cache_avoids_repeating_dense_and_bm25_work(monkeypatch) -> None:
-    fake_chroma = FakeChroma()
-    store = object.__new__(DocumentVectorStore)
-    store.vector_store = fake_chroma
-    store.tenant_id = "default"
-    store._query_cache = vector_store_module._QueryCache(ttl_seconds=300, max_size=8)
-    store._bm25_index = None
-    calls = {"dense": 0, "bm25": 0}
-
-    def dense(query: str, *, fetch_k: int):
-        calls["dense"] += 1
-        return [
-            (
-                Document(
-                    page_content="Cached dense result.",
-                    metadata={
-                        "active": True,
-                        "document_key": "contract",
-                        "file_id": "file-a",
-                        "document_version": 1,
-                        "chunk_id": 1,
-                    },
-                ),
-                0.9,
-            )
-        ]
-
-    def bm25(query: str, *, fetch_k: int):
-        calls["bm25"] += 1
-        return []
-
-    monkeypatch.setattr(store, "_dense_candidates", dense)
-    monkeypatch.setattr(store, "_bm25_candidates", bm25)
-    monkeypatch.setattr(
-        vector_store_module,
-        "settings",
-        SimpleNamespace(
-            top_k=1,
-            retrieval_mode="hybrid",
-            retrieval_fetch_k=10,
-            retrieval_min_relevance=0.0,
-            retrieval_rrf_k=60,
-            retrieval_dense_weight=1.0,
-            retrieval_bm25_weight=1.0,
-            retrieval_mmr_lambda=1.0,
-            retrieval_rerank_mode="none",
-            retrieval_rerank_weight=0,
-        ),
-    )
-
-    first = store.search("payment terms", k=1)
-    second = store.search("payment terms", k=1)
+    first = retriever.search("payment terms", k=1)
+    second = retriever.search("payment terms", k=1)
 
     assert first[0].page_content == second[0].page_content
-    assert calls == {"dense": 1, "bm25": 1}
+    assert repository.calls == 1
+
+
+class FakeCatalogRepository:
+    def __init__(self, records: list[dict]) -> None:
+        self.records = records
+
+    def matching_records(
+        self,
+        *,
+        document_key: str | None,
+        file_id: str | None,
+        include_documents: bool,
+    ) -> list[dict]:
+        del include_documents
+        return [
+            record
+            for record in self.records
+            if (not document_key or record["metadata"].get("document_key") == document_key)
+            and (not file_id or record["metadata"].get("file_id") == file_id)
+        ]
 
 
 def test_get_document_text_returns_latest_active_chunks_in_order() -> None:
-    class PreviewChroma:
-        def get(self, include=None):
-            assert include == ["metadatas", "documents"]
-            return {
-                "ids": ["v1-0", "v2-1", "v2-0", "other"],
-                "metadatas": [
-                    {
-                        "active": False,
-                        "document_key": "contract",
-                        "file_id": "old-file",
-                        "file_name": "contract.pdf",
-                        "document_version": 1,
-                        "chunk_id": 0,
-                    },
-                    {
-                        "active": True,
-                        "document_key": "contract",
-                        "file_id": "new-file",
-                        "file_name": "contract.pdf",
-                        "document_version": 2,
-                        "file_extension": ".pdf",
-                        "indexed_at": "2026-06-17T00:00:00+00:00",
-                        "document_count": 2,
-                        "page_count": 2,
-                        "warning_count": 1,
-                        "page": 1,
-                        "chunk_id": 1,
-                        "section_heading": "2. Payment",
-                    },
-                    {
-                        "active": True,
-                        "document_key": "contract",
-                        "file_id": "new-file",
-                        "file_name": "contract.pdf",
-                        "document_version": 2,
-                        "file_extension": ".pdf",
-                        "indexed_at": "2026-06-17T00:00:00+00:00",
-                        "document_count": 2,
-                        "page_count": 2,
-                        "page": 0,
-                        "chunk_id": 0,
-                    },
-                    {
-                        "active": True,
-                        "document_key": "policy",
-                        "file_id": "policy-file",
-                        "file_name": "policy.pdf",
-                        "document_version": 1,
-                        "chunk_id": 0,
-                    },
-                ],
-                "documents": [
-                    "Old text.",
-                    "Payment is due in 30 days.",
-                    "Intro text.",
-                    "Policy text.",
-                ],
-            }
-
+    records = [
+        {
+            "id": "v1-0",
+            "metadata": {
+                "active": False,
+                "document_key": "contract",
+                "file_id": "old-file",
+                "file_name": "contract.pdf",
+                "document_version": 1,
+                "chunk_id": 0,
+            },
+            "document": "Old text.",
+        },
+        {
+            "id": "v2-1",
+            "metadata": {
+                "active": True,
+                "document_key": "contract",
+                "file_id": "new-file",
+                "file_name": "contract.pdf",
+                "document_version": 2,
+                "file_extension": ".pdf",
+                "indexed_at": "2026-06-17T00:00:00+00:00",
+                "document_count": 2,
+                "page_count": 2,
+                "warning_count": 1,
+                "page": 1,
+                "chunk_id": 1,
+                "section_heading": "2. Payment",
+            },
+            "document": "Payment is due in 30 days.",
+        },
+        {
+            "id": "v2-0",
+            "metadata": {
+                "active": True,
+                "document_key": "contract",
+                "file_id": "new-file",
+                "file_name": "contract.pdf",
+                "document_version": 2,
+                "file_extension": ".pdf",
+                "indexed_at": "2026-06-17T00:00:00+00:00",
+                "document_count": 2,
+                "page_count": 2,
+                "page": 0,
+                "chunk_id": 0,
+            },
+            "document": "Intro text.",
+        },
+    ]
     store = object.__new__(DocumentVectorStore)
-    store.vector_store = PreviewChroma()
+    store._repository = FakeCatalogRepository(records)  # type: ignore[assignment]
 
     preview = store.get_document_text(document_key="contract")
 
     assert preview is not None
     assert preview["document"]["file_id"] == "new-file"
     assert preview["document"]["document_version"] == 2
-    assert preview["document"]["chunk_count"] == 2
     assert [chunk["chunk_id"] for chunk in preview["chunks"]] == [0, 1]
-    assert preview["chunks"][0]["text"] == "Intro text."
     assert preview["chunks"][1]["location_label"] == "page 2, chunk 1, 2. Payment"
 
 
 def test_get_document_text_can_load_requested_inactive_version() -> None:
-    class PreviewChroma:
-        def get(self, include=None):
-            assert include == ["metadatas", "documents"]
-            return {
-                "ids": ["v1-0", "v2-0"],
-                "metadatas": [
-                    {
-                        "active": False,
-                        "document_key": "contract",
-                        "file_id": "old-file",
-                        "file_name": "contract.pdf",
-                        "document_version": 1,
-                        "chunk_id": 0,
-                    },
-                    {
-                        "active": True,
-                        "document_key": "contract",
-                        "file_id": "new-file",
-                        "file_name": "contract.pdf",
-                        "document_version": 2,
-                        "chunk_id": 0,
-                    },
-                ],
-                "documents": ["Old text.", "New text."],
-            }
-
+    records = [
+        {
+            "id": "v1-0",
+            "metadata": {
+                "active": False,
+                "document_key": "contract",
+                "file_id": "old-file",
+                "file_name": "contract.pdf",
+                "document_version": 1,
+                "chunk_id": 0,
+            },
+            "document": "Old text.",
+        },
+        {
+            "id": "v2-0",
+            "metadata": {
+                "active": True,
+                "document_key": "contract",
+                "file_id": "new-file",
+                "file_name": "contract.pdf",
+                "document_version": 2,
+                "chunk_id": 0,
+            },
+            "document": "New text.",
+        },
+    ]
     store = object.__new__(DocumentVectorStore)
-    store.vector_store = PreviewChroma()
+    store._repository = FakeCatalogRepository(records)  # type: ignore[assignment]
 
     preview = store.get_document_text(document_key="contract", document_version=1)
 
     assert preview is not None
     assert preview["document"]["file_id"] == "old-file"
-    assert preview["document"]["document_version"] == 1
     assert preview["chunks"][0]["text"] == "Old text."

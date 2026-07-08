@@ -16,7 +16,6 @@ from api.schemas.responses import (
     MemoryListResponse,
     MemoryMaintenanceResponse,
     MemoryOut,
-    MemoryStatsResponse,
 )
 from doc_assistant.memory.schemas import UNSET, MemoryUpdate
 
@@ -71,15 +70,6 @@ def list_memories(
         offset=offset,
         limit=limit,
     )
-
-
-@router.get("/stats", response_model=MemoryStatsResponse, summary="Get memory system statistics")
-def memory_stats(
-    memory_service: MemoryServiceDep,
-    tenant_id: TenantIdDep,
-    user_id: UserIdDep,
-) -> MemoryStatsResponse:
-    return MemoryStatsResponse(**memory_service.get_memory_stats(tenant_id, user_id))
 
 
 @router.post("", response_model=MemoryOut, status_code=status.HTTP_201_CREATED, summary="Create memory")

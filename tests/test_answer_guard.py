@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from doc_assistant.grounding.guard import validate_answer
 from doc_assistant.schemas.citation import Citation
-from doc_assistant.services.answer_guard import validate_answer
 
 
 def _citation(source_id: str = "S1", preview: str = "Payment is due within 30 days.") -> Citation:

@@ -7,7 +7,6 @@ MemoryService 在 QA / ToolCalling 提问前注入相关记忆，在回答后提
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Lock
@@ -15,10 +14,8 @@ from uuid import uuid4
 
 from doc_assistant.config.settings import settings
 from doc_assistant.memory._conflict import (
-    _clamp_confidence,
     _is_conflicting_memory_update,
     _is_equivalent_memory,
-    _normalize_feedback_rating,
     _with_supersede_conflict_metadata,
 )
 from doc_assistant.memory._prompt import (
@@ -31,8 +28,11 @@ from doc_assistant.memory._retrieval import (
     _filter_memory_candidates,
     _is_semantic_duplicate_memory,
     _memory_similarity_query,
-    _rrf_fuse_memory_candidates,
     _vector_candidate_needs_hydration,
+)
+from doc_assistant.memory.maintenance import (
+    _default_expires_at,
+    _memory_retention_rank,
 )
 from doc_assistant.memory.policy import (
     extract_memory_write_intents,
@@ -40,18 +40,12 @@ from doc_assistant.memory.policy import (
 )
 from doc_assistant.memory.schemas import (
     ConversationRecord,
-    FeedbackEventRecord,
-    FeedbackMemoryAdjustment,
     MemoryCandidate,
     MemoryRecord,
     MemoryUpdate,
     MemoryUsage,
     MemoryWriteIntent,
     MessageRecord,
-)
-from doc_assistant.memory.maintenance import (
-    _default_expires_at,
-    _memory_retention_rank,
 )
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.summarization import (
@@ -63,8 +57,6 @@ from doc_assistant.memory.summarization import (
 from doc_assistant.memory.vector_store import MemoryVectorStore
 
 logger = logging.getLogger(__name__)
-_POSITIVE_FEEDBACK_CONFIDENCE_DELTA = 0.03
-_NEGATIVE_FEEDBACK_CONFIDENCE_DELTA = -0.08
 _RECENT_HISTORY_WITH_SUMMARY_LIMIT = 8
 
 
@@ -434,7 +426,6 @@ class MemoryService:
         confidence: float = 0.95,
         expires_at: datetime | None = None,
         visibility: str = "private",
-        permissions: tuple[str, ...] = ("read", "write", "delete"),
         conversation_id: str | None = None,
         source_message_id: str | None = None,
         task_id: str | None = None,
@@ -463,7 +454,6 @@ class MemoryService:
             content=content,
             value_json=value_json,
             visibility=visibility,
-            permissions=permissions,
             task_id=task_id,
             expires_at=expires_at,
         ):
@@ -489,7 +479,6 @@ class MemoryService:
             confidence=confidence,
             expires_at=expires_at,
             visibility=visibility,
-            permissions=permissions,
             supersedes_id=previous.memory_id if previous else None,
             source_message_id=source_message_id,
             conversation_id=conversation_id,
@@ -499,11 +488,7 @@ class MemoryService:
             self.store.mark_memory_status(tenant_id, user_id, previous.memory_id, "stale")
             self._delete_vector(previous.memory_id)
 
-        if self._upsert_vector(memory):
-            self.store.update_memory_embedding_id(tenant_id, user_id, memory.memory_id, memory.memory_id)
-            refreshed = self.store.get_memory(tenant_id, user_id, memory.memory_id)
-            if refreshed:
-                memory = refreshed
+        self._upsert_vector(memory)
         self._run_maintenance_if_due(
             tenant_id,
             user_id,
@@ -557,10 +542,7 @@ class MemoryService:
         if updated is None:
             return None
         if updated.status == "active" and not updated.is_expired():
-            if self._upsert_vector(updated):
-                self.store.update_memory_embedding_id(tenant_id, user_id, memory_id, memory_id)
-                refreshed = self.store.get_memory(tenant_id, user_id, memory_id)
-                return refreshed or updated
+            self._upsert_vector(updated)
         else:
             self._delete_vector(memory_id)
         return updated
@@ -599,7 +581,7 @@ class MemoryService:
             active,
             key=lambda memory: (
                 _memory_retention_rank(memory),
-                memory.last_accessed_at or memory.updated_at,
+                memory.updated_at,
                 memory.created_at,
             ),
         )
@@ -622,7 +604,6 @@ class MemoryService:
         upserted = 0
         for memory in self.store.list_active_memories_for_user(tenant_id, user_id):
             if self._upsert_vector(memory):
-                self.store.update_memory_embedding_id(tenant_id, user_id, memory.memory_id, memory.memory_id)
                 upserted += 1
         return {"deleted": deleted, "upserted": upserted}
 
@@ -641,116 +622,14 @@ class MemoryService:
             lambda: self.cleanup_expired_memories(tenant_id, user_id),
         )
         search_limit = limit or settings.memory_top_k
-        vector_candidates = _filter_memory_candidates(
+        return _filter_memory_candidates(
             self._hydrate_vector_candidates(
                 tenant_id,
                 user_id,
                 self._vector_search(tenant_id, user_id, query, search_limit),
             ),
             user_id,
-        )
-        lexical_candidates = _filter_memory_candidates(
-            self.store.search_memories_lexical(
-                tenant_id,
-                user_id,
-                query,
-                limit=search_limit,
-                min_confidence=settings.memory_min_confidence,
-            ),
-            user_id,
-        )
-        selected = _rrf_fuse_memory_candidates(
-            vector_candidates,
-            lexical_candidates,
-            limit=search_limit,
-        )
-        self.store.touch_memories(
-            tenant_id,
-            user_id,
-            [candidate.memory.memory_id for candidate in selected if candidate.memory.user_id == user_id],
-        )
-        return selected
-
-    def log_retrieval(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        conversation_id: str | None,
-        query: str,
-        document_count: int,
-        memories: list[MemoryCandidate],
-    ) -> None:
-        self.store.log_retrieval(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            query=query,
-            document_count=document_count,
-            memory_count=len(memories),
-            selected_memory_ids=[candidate.memory.memory_id for candidate in memories],
-            selected_memory_sources=dict(
-                Counter(candidate.retrieval_source or "unknown" for candidate in memories)
-            ),
-        )
-
-    def get_memory_stats(self, tenant_id: str, user_id: str) -> dict[str, object]:
-        return self.store.get_memory_stats(tenant_id, user_id)
-
-    def record_feedback(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        rating: int | str,
-        conversation_id: str | None = None,
-        message_id: str | None = None,
-        memory_ids: list[str] | tuple[str, ...] = (),
-        comment: str | None = None,
-    ) -> tuple[FeedbackEventRecord, list[FeedbackMemoryAdjustment]]:
-        normalized_rating = _normalize_feedback_rating(rating)
-        unique_memory_ids = tuple(dict.fromkeys(memory_id.strip() for memory_id in memory_ids if memory_id.strip()))
-        event = self.store.record_feedback_event(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            message_id=message_id,
-            rating=normalized_rating,
-            memory_ids=unique_memory_ids,
-            comment=comment,
-        )
-        adjustments: list[FeedbackMemoryAdjustment] = []
-        delta = (
-            _POSITIVE_FEEDBACK_CONFIDENCE_DELTA
-            if normalized_rating > 0
-            else _NEGATIVE_FEEDBACK_CONFIDENCE_DELTA
-        )
-        for memory_id in unique_memory_ids:
-            memory = self.store.get_memory(tenant_id, user_id, memory_id)
-            if memory is None or memory.user_id != user_id:
-                adjustments.append(FeedbackMemoryAdjustment(memory_id=memory_id, status="not_found"))
-                continue
-            previous_confidence = memory.confidence
-            new_confidence = round(_clamp_confidence(previous_confidence + delta), 6)
-            updated = self.update_memory(
-                tenant_id,
-                user_id,
-                memory_id,
-                MemoryUpdate(confidence=new_confidence),
-            )
-            if updated is None:
-                adjustments.append(FeedbackMemoryAdjustment(memory_id=memory_id, status="not_found"))
-                continue
-            adjustments.append(
-                FeedbackMemoryAdjustment(
-                    memory_id=memory_id,
-                    status="adjusted",
-                    previous_confidence=previous_confidence,
-                    new_confidence=updated.confidence,
-                    memory=updated,
-                )
-            )
-        return event, adjustments
+        )[:search_limit]
 
     def format_for_prompt(self, candidates: list[MemoryCandidate]) -> str:
         if not candidates:
@@ -811,8 +690,6 @@ class MemoryService:
                 confidence=candidate.memory.confidence,
                 scope=candidate.memory.scope,
                 score=candidate.score,
-                last_accessed_at=candidate.memory.last_accessed_at,
-                access_count=candidate.memory.access_count,
                 superseded_conflicting=candidate.memory.superseded_conflicting,
                 superseded_from_content=candidate.memory.superseded_from_content,
             )
@@ -831,7 +708,7 @@ class MemoryService:
         try:
             return self.vector_store.search(query, tenant_id=tenant_id, user_id=user_id, k=limit)
         except Exception:
-            logger.warning("Memory vector search failed; falling back to structured search", exc_info=True)
+            logger.warning("Memory vector search failed", exc_info=True)
             return []
 
     def _hydrate_vector_candidates(

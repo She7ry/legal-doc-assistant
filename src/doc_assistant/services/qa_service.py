@@ -23,6 +23,8 @@ from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
 
 from doc_assistant.config.settings import settings
+from doc_assistant.grounding.evidence import build_evidence_profile
+from doc_assistant.grounding.guard import AnswerGuardResult, validate_answer
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.models.language_model import (
@@ -34,8 +36,15 @@ from doc_assistant.models.language_model import (
 )
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
-from doc_assistant.services.answer_guard import AnswerGuardResult, validate_answer
-from doc_assistant.services.evidence import build_evidence_profile
+from doc_assistant.skills import SkillEngine, build_skill_engine_from_settings
+from doc_assistant.skills.models import EvidenceSufficiencyResult, SkillRuntimeContext
+from doc_assistant.skills.runtime import (
+    assess_evidence_sufficiency,
+    decompose_retrieval_query,
+    fuse_retrieval_results,
+    is_complex_retrieval_query,
+    render_evidence_assessment,
+)
 from doc_assistant.utils.coercion import (
     optional_str,
 )
@@ -86,6 +95,9 @@ class PreparedQAAnswer:
     user_message_recorded: bool
     task_id: str | None = None
     has_retrieved_documents: bool = True
+    skill_context: SkillRuntimeContext | None = None
+    retrieval_queries: tuple[str, ...] = ()
+    evidence_sufficiency: EvidenceSufficiencyResult | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +129,7 @@ class DocumentQAService:
         chat_model=None,
         memory_service: MemoryService | None = None,
         tenant_id: str | None = None,
+        skill_engine: SkillEngine | None = None,
     ) -> None:
         self.vector_store = vector_store or DocumentVectorStore()
         self.tenant_id = tenant_id or getattr(self.vector_store, "tenant_id", settings.default_tenant_id)
@@ -128,6 +141,7 @@ class DocumentQAService:
         self.answer_repair_prompt = PromptTemplate.from_template(load_prompt("answer_repair.txt"))
         self.chat_model = chat_model or build_chat_model()
         self.memory_service = memory_service
+        self.skill_engine = skill_engine if skill_engine is not None else build_skill_engine_from_settings()
 
     def ask(
         self,
@@ -137,6 +151,7 @@ class DocumentQAService:
         conversation_id: str | None = None,
         task_id: str | None = None,
         merge_persisted_history: bool = True,
+        skill_names: tuple[str, ...] | None = None,
     ) -> QAAnswer:
         """同步问答：检索 → 组 prompt → 调 LLM → guard 校验（可自动 repair）。"""
         prepared = self.prepare_answer(
@@ -146,6 +161,7 @@ class DocumentQAService:
             conversation_id=conversation_id,
             task_id=task_id,
             merge_persisted_history=merge_persisted_history,
+            skill_names=skill_names,
         )
         content = self._invoke_chat_messages(prepared.messages)
         return self.finalize_prepared_answer(prepared, content)
@@ -158,6 +174,7 @@ class DocumentQAService:
         conversation_id: str | None = None,
         task_id: str | None = None,
         merge_persisted_history: bool = True,
+        skill_names: tuple[str, ...] | None = None,
     ) -> QAAnswer:
         """异步版 ``ask``，适合 FastAPI 等 async 路由。"""
         prepared = await self.aprepare_answer(
@@ -167,6 +184,7 @@ class DocumentQAService:
             conversation_id=conversation_id,
             task_id=task_id,
             merge_persisted_history=merge_persisted_history,
+            skill_names=skill_names,
         )
         content = await self._ainvoke_chat_messages(prepared.messages)
         return self.finalize_prepared_answer(prepared, content)
@@ -183,6 +201,7 @@ class DocumentQAService:
             content,
             prepared.citations,
             has_retrieved_documents=prepared.has_retrieved_documents,
+            verify_citation_semantics=self._citation_verification_enabled(prepared),
         )
         if repair and guard_result.needs_repair:
             content = self._repair_answer(content, guard_result, prepared)
@@ -190,21 +209,38 @@ class DocumentQAService:
                 content,
                 prepared.citations,
                 has_retrieved_documents=prepared.has_retrieved_documents,
+                verify_citation_semantics=self._citation_verification_enabled(prepared),
             )
         self.record_prepared_answer(prepared, content)
+        metadata: dict[str, Any] = {
+            "evidence": build_evidence_profile(
+                content,
+                prepared.citations,
+                guard_result.issues,
+            ),
+            "retrieval_queries": list(prepared.retrieval_queries),
+        }
+        if prepared.skill_context is not None:
+            metadata.update(prepared.skill_context.metadata_payload())
+        if prepared.evidence_sufficiency is not None:
+            metadata["evidence_sufficiency"] = prepared.evidence_sufficiency.as_dict()
+        if guard_result.citation_support is not None:
+            metadata["citation_support"] = [
+                {
+                    "claim": check.claim,
+                    "citation_ids": list(check.citation_ids),
+                    "status": check.status,
+                    "reason": check.reason,
+                }
+                for check in guard_result.citation_support.checks
+            ]
         return QAAnswer(
             content=content,
             citations=prepared.citations,
             memories_used=prepared.memories_used,
             confidence=guard_result.confidence,
             guard_warnings=guard_result.issues,
-            metadata={
-                "evidence": build_evidence_profile(
-                    content,
-                    prepared.citations,
-                    guard_result.issues,
-                )
-            },
+            metadata=metadata,
         )
 
     # ── 记忆富化（同步，供 prepare / aprepare 共享） ──────────────────────
@@ -286,30 +322,32 @@ class DocumentQAService:
         question: str,
         enrichment: _MemoryEnrichment,
         chat_history_text: str,
-        retrieval_query: str,
         documents: list[Document],
         task_id: str | None,
         user_id: str | None,
+        skill_context: SkillRuntimeContext,
+        retrieval_queries: list[str],
     ) -> PreparedQAAnswer:
         """从记忆富化结果 + 检索结果组装最终的 PreparedQAAnswer。"""
-        self._log_retrieval(
-            question=retrieval_query,
-            user_id=user_id,
-            conversation_id=enrichment.resolved_conversation_id,
-            document_count=len(documents),
-            memory_candidates=enrichment.memory_candidates,
-        )
         memories_used = (
             self.memory_service.usages_from_candidates(enrichment.memory_candidates)
             if self.memory_service
             else []
         )
+        evidence_assessment = (
+            assess_evidence_sufficiency(question, documents)
+            if "assess-evidence-sufficiency" in skill_context.selected_skills
+            else None
+        )
+        runtime_guidance = self._runtime_guidance(skill_context, evidence_assessment)
         if not documents:
             task_prompt = self.general_prompt.format(
                 question=question,
                 chat_history=chat_history_text,
                 user_memory=enrichment.memory_context,
             )
+            if runtime_guidance:
+                task_prompt = f"{task_prompt}\n\n{runtime_guidance}"
             return PreparedQAAnswer(
                 messages=self._build_messages(task_prompt),
                 citations=[],
@@ -319,6 +357,9 @@ class DocumentQAService:
                 user_message_recorded=enrichment.user_message_recorded,
                 task_id=task_id,
                 has_retrieved_documents=False,
+                skill_context=skill_context,
+                retrieval_queries=tuple(retrieval_queries),
+                evidence_sufficiency=evidence_assessment,
             )
 
         context, citations = self._format_context(documents)
@@ -328,6 +369,8 @@ class DocumentQAService:
             chat_history=chat_history_text,
             user_memory=enrichment.memory_context,
         )
+        if runtime_guidance:
+            task_prompt = f"{task_prompt}\n\n{runtime_guidance}"
         return PreparedQAAnswer(
             messages=self._build_messages(task_prompt),
             citations=citations,
@@ -337,6 +380,9 @@ class DocumentQAService:
             user_message_recorded=enrichment.user_message_recorded,
             task_id=task_id,
             has_retrieved_documents=True,
+            skill_context=skill_context,
+            retrieval_queries=tuple(retrieval_queries),
+            evidence_sufficiency=evidence_assessment,
         )
 
     def prepare_answer(
@@ -347,6 +393,7 @@ class DocumentQAService:
         conversation_id: str | None = None,
         task_id: str | None = None,
         merge_persisted_history: bool = True,
+        skill_names: tuple[str, ...] | None = None,
     ) -> PreparedQAAnswer:
         """问答准备阶段：加载记忆与历史 → 改写检索 query → 向量检索 → 组装 prompt。
 
@@ -367,9 +414,13 @@ class DocumentQAService:
             max_messages=settings.chat_history_window,
         )
         retrieval_query = self._rewrite_query(question, chat_history_text)
-        documents = self.vector_store.search(retrieval_query)
+        skill_context = self._prepare_skill_context(question, selected_names=skill_names)
+        retrieval_queries = self._retrieval_queries(retrieval_query, skill_context)
+        result_sets = [self.vector_store.search(query) for query in retrieval_queries]
+        documents = fuse_retrieval_results(result_sets, top_k=settings.top_k)
         return self._finalize_preparation(
-            question, enrichment, chat_history_text, retrieval_query, documents, task_id, user_id,
+            question, enrichment, chat_history_text, documents, task_id, user_id,
+            skill_context, retrieval_queries,
         )
 
     async def aprepare_answer(
@@ -380,6 +431,7 @@ class DocumentQAService:
         conversation_id: str | None = None,
         task_id: str | None = None,
         merge_persisted_history: bool = True,
+        skill_names: tuple[str, ...] | None = None,
     ) -> PreparedQAAnswer:
         """异步版 prepare_answer：记忆富化与向量检索通过线程池执行。"""
         enrichment = await asyncio.to_thread(
@@ -397,10 +449,78 @@ class DocumentQAService:
             max_messages=settings.chat_history_window,
         )
         retrieval_query = self._rewrite_query(question, chat_history_text)
-        documents = await asyncio.to_thread(self.vector_store.search, retrieval_query)
-        return self._finalize_preparation(
-            question, enrichment, chat_history_text, retrieval_query, documents, task_id, user_id,
+        skill_context = self._prepare_skill_context(question, selected_names=skill_names)
+        retrieval_queries = self._retrieval_queries(retrieval_query, skill_context)
+        result_sets = await asyncio.gather(
+            *(asyncio.to_thread(self.vector_store.search, query) for query in retrieval_queries)
         )
+        documents = fuse_retrieval_results(result_sets, top_k=settings.top_k)
+        return self._finalize_preparation(
+            question, enrichment, chat_history_text, documents, task_id, user_id,
+            skill_context, retrieval_queries,
+        )
+
+    def _prepare_skill_context(
+        self,
+        question: str,
+        *,
+        selected_names: tuple[str, ...] | None = None,
+        phase: str = "qa",
+    ) -> SkillRuntimeContext:
+        if self.skill_engine is None:
+            return SkillRuntimeContext()
+        purpose = ""
+        if _looks_like_document_question(question):
+            purpose = "evidence grounded RAG answer citation support evidence sufficiency"
+            if settings.skill_query_decomposition_enabled and is_complex_retrieval_query(question):
+                purpose += " complex compound multi-hop retrieval subqueries"
+        return self.skill_engine.prepare(
+            question,
+            phase=phase,
+            purpose=purpose,
+            selected_names=selected_names,
+        )
+
+    def prepare_skill_guidance(
+        self,
+        question: str,
+        documents: list[Document],
+        *,
+        phase: str = "executor",
+    ) -> tuple[SkillRuntimeContext, EvidenceSufficiencyResult | None, str]:
+        """Select relevant skills and run the pre-generation evidence audit."""
+        context = self._prepare_skill_context(question, phase=phase)
+        assessment = (
+            assess_evidence_sufficiency(question, documents)
+            if "assess-evidence-sufficiency" in context.selected_skills
+            else None
+        )
+        return context, assessment, self._runtime_guidance(context, assessment)
+
+    @staticmethod
+    def _retrieval_queries(
+        retrieval_query: str,
+        skill_context: SkillRuntimeContext,
+    ) -> list[str]:
+        if (
+            settings.skill_query_decomposition_enabled
+            and "decompose-retrieval-query" in skill_context.selected_skills
+        ):
+            return decompose_retrieval_query(
+                retrieval_query,
+                max_queries=settings.skill_max_retrieval_queries,
+            )
+        return [retrieval_query]
+
+    @staticmethod
+    def _runtime_guidance(
+        skill_context: SkillRuntimeContext,
+        evidence_assessment: EvidenceSufficiencyResult | None,
+    ) -> str:
+        blocks = [skill_context.rendered_instructions]
+        if evidence_assessment is not None:
+            blocks.append(render_evidence_assessment(evidence_assessment))
+        return "\n\n".join(block for block in blocks if block)
 
     def stream_prepared_answer(self, prepared: PreparedQAAnswer) -> Iterator[str]:
         yield from self._stream_chat_messages(prepared.messages)
@@ -414,6 +534,14 @@ class DocumentQAService:
             content,
             prepared.citations,
             has_retrieved_documents=prepared.has_retrieved_documents,
+            verify_citation_semantics=self._citation_verification_enabled(prepared),
+        )
+
+    @staticmethod
+    def _citation_verification_enabled(prepared: PreparedQAAnswer) -> bool:
+        return bool(
+            prepared.skill_context
+            and "verify-citation-support" in prepared.skill_context.selected_skills
         )
 
     def record_prepared_answer(self, prepared: PreparedQAAnswer, content: str) -> None:
@@ -505,7 +633,7 @@ class DocumentQAService:
                     {"role": "user", "content": prompt},
                 ]
             ).strip()
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError):
             logger.debug(
                 "Query rewrite failed; using original question.",
                 extra={"tenant_id": self.tenant_id},
@@ -668,34 +796,6 @@ class DocumentQAService:
             )
             return
 
-    def _log_retrieval(
-        self,
-        *,
-        question: str,
-        user_id: str | None,
-        conversation_id: str | None,
-        document_count: int,
-        memory_candidates: list[MemoryCandidate],
-    ) -> None:
-        if not (self.memory_service and user_id):
-            return
-        try:
-            self.memory_service.log_retrieval(
-                tenant_id=self.tenant_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                query=question,
-                document_count=document_count,
-                memories=memory_candidates,
-            )
-        except (OSError, RuntimeError, ValueError):
-            logger.warning(
-                "Retrieval logging failed.",
-                extra={"tenant_id": self.tenant_id, "user_id": user_id},
-                exc_info=True,
-            )
-            return
-
     @staticmethod
     def _format_chat_history(messages: list[dict[str, object]], max_messages: int = 12) -> str:
         system_parts = []
@@ -755,6 +855,41 @@ class DocumentQAService:
 
 def _is_conversation_summary_context(content: str) -> bool:
     return content.strip().casefold().startswith("conversation summary:")
+
+
+def _looks_like_document_question(question: str) -> bool:
+    normalized = " ".join(question.split()).strip().casefold()
+    if normalized in {
+        "hello",
+        "hi",
+        "hey",
+        "你好",
+        "您好",
+        "谢谢",
+        "thanks",
+        "thank you",
+    }:
+        return False
+    return (
+        "?" in normalized
+        or "？" in normalized
+        or len(normalized) >= 12
+        or any(
+            term in normalized
+            for term in (
+                "contract",
+                "document",
+                "clause",
+                "agreement",
+                "policy",
+                "合同",
+                "文档",
+                "条款",
+                "协议",
+                "政策",
+            )
+        )
+    )
 
 
 def _try_lightweight_repair(

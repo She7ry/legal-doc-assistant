@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from io import BytesIO
 import time
+from io import BytesIO
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 
-from api.agent_tasks import AgentTaskStore
 from api import dependencies
+from api.agent_tasks import AgentTaskStore
 from api.main import app
-from doc_assistant.matter.store import MatterStore
-from doc_assistant.services.agent.schemas import (
+from doc_assistant.agent.schemas import (
     AgentArtifact,
     AgentConfirmationGate,
     AgentTaskResult,
     MatterProfile,
 )
+from doc_assistant.matter.store import MatterStore
 
 
 class FastAgentService:

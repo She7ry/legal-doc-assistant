@@ -58,7 +58,30 @@ def test_generation_metrics_score_answer_and_citation() -> None:
         "faithfulness": 1.0,
         "citation_accuracy": 1.0,
         "refusal_accuracy": None,
+        "unsupported_claim_count": None,
+        "skill_selection_accuracy": None,
+        "skill_token_cost": None,
     }
+
+
+def test_generation_metrics_score_unsupported_claims_and_skill_selection() -> None:
+    scores = score_generation_case(
+        {"answer_type": "answerable", "expected_skills": ["ground-answer"]},
+        "A claim [S1].",
+        [],
+        {
+            "selected_skills": ["ground-answer"],
+            "skill_token_cost": 321,
+            "citation_support": [
+                {"claim": "A claim", "status": "unsupported"},
+                {"claim": "Another claim", "status": "supported"},
+            ],
+        },
+    )
+
+    assert scores["unsupported_claim_count"] == 1.0
+    assert scores["skill_selection_accuracy"] == 1.0
+    assert scores["skill_token_cost"] == 321.0
 
 
 def test_refusal_accuracy_scores_unanswerable_case() -> None:

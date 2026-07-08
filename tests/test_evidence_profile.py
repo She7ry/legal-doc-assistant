@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from doc_assistant.grounding.evidence import build_evidence_profile
 from doc_assistant.schemas.citation import Citation
-from doc_assistant.services.evidence import build_evidence_profile
 
 
 def _citation(source_id: str = "S1", text: str = "") -> Citation:
