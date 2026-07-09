@@ -6,42 +6,65 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from threading import Lock
+from typing import Annotated, Any
 
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain.tools import tool
+from langchain_core.messages.utils import convert_to_messages
+from langchain_core.tools import BaseTool, InjectedToolCallId
+from pydantic import BaseModel, Field, field_validator
 
+from doc_assistant.agent._helpers import _remap_metadata, _remap_source_refs
 from doc_assistant.config.settings import settings
 from doc_assistant.graphs.tool_calling import build_tool_calling_graph
 from doc_assistant.grounding.evidence import build_evidence_profile
 from doc_assistant.grounding.guard import validate_answer
+from doc_assistant.memory.history import merge_chat_history
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
-from doc_assistant.models.langchain_adapter import ChatOpenAICompatible
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.qa_service import DocumentQAService
-from doc_assistant.tools.document_search import (
-    SEARCH_DOCUMENTS_TOOL_SCHEMA,
-    DocumentSearchTool,
-)
+from doc_assistant.tools.document_search import DocumentSearchTool, SearchDocumentsInput
 from doc_assistant.tools.web_search import (
-    DisabledWebSearchClient,
     WebSearchClient,
-    WebSearchResult,
+    WebSearchInput,
+    WebSearchTool,
+    WebSource,
     build_web_search_client,
+    web_source,
+    web_source_citations,
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
 logger = logging.getLogger(__name__)
+
+
+class ReviewClauseInput(BaseModel):
+    clause_type: str = Field(min_length=1, max_length=120)
+    top_k: int | None = Field(default=None, ge=1, le=10)
+    tool_call_id: Annotated[str, InjectedToolCallId] = ""
+
+    @field_validator("clause_type")
+    @classmethod
+    def clean_clause_type(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("clause_type is required")
+        return value
+
+
+class CheckConflictInput(BaseModel):
+    contract_query: str = Field(min_length=1, max_length=500)
+    policy_query: str = Field(min_length=1, max_length=500)
+    top_k: int | None = Field(default=None, ge=1, le=10)
+    tool_call_id: Annotated[str, InjectedToolCallId] = ""
+
+    @field_validator("contract_query", "policy_query")
+    @classmethod
+    def clean_query(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("query is required")
+        return value
 
 
 def build_tool_system_prompt(user_memory: str | None = None) -> str:
@@ -50,18 +73,6 @@ def build_tool_system_prompt(user_memory: str | None = None) -> str:
     if user_memory:
         prompt = f"{prompt}\n\n<user_memory>\n{user_memory}\n</user_memory>"
     return prompt
-
-
-@dataclass(frozen=True)
-class WebSource:
-    """网页搜索工具返回的单条外部来源（对应答案中的 [W1] 等编号）。"""
-
-    source_id: str
-    title: str
-    url: str
-    snippet: str = ""
-    published_at: str | None = None
-    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,13 +107,14 @@ class ToolCallingAnswer:
 class _ToolExecutionState:
     """一次 ask() 调用内的可变状态：累积引用、网页来源、tool 调用轨迹。
 
-    仅在 LangGraph 的 execute_tools 回调中读写；每次 ask 新建实例。
+    仅在 LangGraph ToolNode 调用的工具中读写；每次 ask 新建实例。
     """
 
     citations: list[Citation] = field(default_factory=list)
     web_sources: list[WebSource] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
     document_source_ids: dict[str, str] = field(default_factory=dict)
+    lock: Lock = field(default_factory=Lock)
 
 
 @dataclass
@@ -135,19 +147,16 @@ class ToolCallingChatService:
     ) -> None:
         self.qa_service = qa_service
         self.chat_model = qa_service.chat_model
-        from doc_assistant.models.language_model import MessageChatModelProtocol
-
-        if not isinstance(self.chat_model, MessageChatModelProtocol):
-            raise ValueError("The configured chat model does not support tool calling.")
-        self.invoke_messages = self.chat_model.invoke_messages
-        self._lc_chat_model = ChatOpenAICompatible(client=self.chat_model)
         self.vector_store = qa_service.vector_store
         self.document_search_tool = DocumentSearchTool(
             self.vector_store,
             default_top_k=settings.top_k,
         )
         self.web_search_client = web_search_client or build_web_search_client()
-        self._tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-call")
+        self.web_search_tool = WebSearchTool(
+            self.web_search_client,
+            default_max_results=settings.web_search_max_results,
+        )
 
     def ask(
         self,
@@ -169,7 +178,7 @@ class ToolCallingChatService:
             conversation_id=conversation_id,
             task_id=task_id,
         )
-        tool_schemas = self._tool_schemas(enable_web_search=enable_web_search)
+        tools = self._build_tools(exec_state, enable_web_search=enable_web_search)
         messages = self._initial_messages(
             question,
             memory_context.chat_history,
@@ -181,30 +190,13 @@ class ToolCallingChatService:
             maximum=10,
         )
 
-        def execute_tools_node(graph_state: dict) -> dict:
-            last_message = graph_state["messages"][-1]
-            tool_messages: list[ToolMessage] = []
-            for tc in last_message.tool_calls:
-                openai_tc = _lc_tool_call_to_openai(tc)
-                result = self._execute_tool_call(openai_tc, exec_state, enable_web_search)
-                tool_messages.append(
-                    ToolMessage(
-                        content=json.dumps(result, ensure_ascii=False),
-                        tool_call_id=tc["id"],
-                        name=tc["name"],
-                    )
-                )
-            return {"messages": tool_messages, "iteration": graph_state["iteration"] + 1}
-
         graph = build_tool_calling_graph(
-            llm=self._lc_chat_model,
-            tool_schemas=tool_schemas,
-            execute_tools=execute_tools_node,
+            llm=self.chat_model,
+            tools=tools,
         )
 
-        lc_messages = [_dict_to_lc_message(m) for m in messages]
         result = graph.invoke(
-            {"messages": lc_messages, "iteration": 0, "max_iterations": iterations},
+            {"messages": convert_to_messages(messages), "iteration": 0, "max_iterations": iterations},
             config={"recursion_limit": iterations * 2 + 5},
         )
 
@@ -218,7 +210,7 @@ class ToolCallingChatService:
         memory_context: _ToolMemoryContext,
         question: str,
     ) -> ToolCallingAnswer:
-        guard_citations = state.citations + _web_source_citations(state.web_sources)
+        guard_citations = state.citations + web_source_citations(state.web_sources)
         guard_result = validate_answer(
             content,
             guard_citations,
@@ -331,7 +323,7 @@ class ToolCallingChatService:
             context.user_message_recorded = True
             context.memory_candidates = memory_candidates
             context.memory_context = memory_service.format_for_prompt(memory_candidates)
-            context.chat_history = DocumentQAService._merge_chat_history(
+            context.chat_history = merge_chat_history(
                 persisted_history,
                 chat_history,
                 max_messages=settings.tool_call_history_window,
@@ -339,7 +331,11 @@ class ToolCallingChatService:
         except Exception:
             logger.warning(
                 "Memory context preparation failed; continuing without memory.",
-                extra={"tenant_id": self.qa_service.tenant_id, "user_id": user_id, "memory_available": False},
+                extra={
+                    "tenant_id": self.qa_service.tenant_id,
+                    "user_id": user_id,
+                    "memory_available": False,
+                },
                 exc_info=True,
             )
             context.chat_history = chat_history
@@ -359,24 +355,11 @@ class ToolCallingChatService:
         ):
             return
         try:
-            message_id = memory_service.record_assistant_message(
+            memory_service.record_assistant_message(
                 tenant_id=self.qa_service.tenant_id,
                 user_id=memory_context.user_id,
                 conversation_id=memory_context.conversation_id,
                 content=content,
-            )
-            memory_service.write_memories_from_assistant_message(
-                tenant_id=self.qa_service.tenant_id,
-                user_id=memory_context.user_id,
-                conversation_id=memory_context.conversation_id,
-                message_id=message_id,
-                content=content,
-                task_id=memory_context.task_id,
-            )
-            memory_service.maybe_summarize_conversation(
-                tenant_id=self.qa_service.tenant_id,
-                user_id=memory_context.user_id,
-                conversation_id=memory_context.conversation_id,
             )
         except Exception:
             logger.warning(
@@ -386,143 +369,194 @@ class ToolCallingChatService:
             )
             return
 
-    def _tool_schemas(self, *, enable_web_search: bool) -> list[dict[str, Any]]:
-        return [schema for schema, _handler in self._enabled_tools(enable_web_search).values()]
-
-    def _execute_tool_call(
+    def _build_tools(
         self,
-        tool_call: dict[str, Any],
         state: _ToolExecutionState,
+        *,
         enable_web_search: bool,
-    ) -> dict[str, Any]:
-        name = tool_call["function"]["name"]
-        arguments = _parse_tool_arguments(tool_call)
-
-        future = None
-        try:
-            future = self._tool_executor.submit(
-                self._run_tool_call,
-                name,
+    ) -> list[BaseTool]:
+        @tool("search_documents", args_schema=SearchDocumentsInput)
+        def search_documents(
+            query: str,
+            tool_call_id: Annotated[str, InjectedToolCallId],
+            top_k: int | None = None,
+        ) -> dict[str, Any]:
+            """Search uploaded legal documents and return cited excerpts."""
+            arguments = {"query": query, "top_k": top_k}
+            return self._run_traced_tool(
+                tool_call_id,
+                "search_documents",
                 arguments,
                 state,
-                enable_web_search,
+                lambda: self._search_documents(arguments, state),
             )
-            result = future.result(timeout=max(1, settings.tool_call_timeout_seconds))
-        except FutureTimeoutError:
-            if future is not None:
-                future.cancel()
-            result = {
-                "error": f"Tool execution timed out after {settings.tool_call_timeout_seconds} seconds."
+
+        @tool("review_clause", args_schema=ReviewClauseInput)
+        def review_clause(
+            clause_type: str,
+            tool_call_id: Annotated[str, InjectedToolCallId],
+            top_k: int | None = None,
+        ) -> dict[str, Any]:
+            """Review a clause type in the uploaded legal documents."""
+            arguments = {"clause_type": clause_type, "top_k": top_k}
+            return self._run_traced_tool(
+                tool_call_id,
+                "review_clause",
+                arguments,
+                state,
+                lambda: self._review_clause(arguments, state),
+            )
+
+        @tool("check_conflict", args_schema=CheckConflictInput)
+        def check_conflict(
+            contract_query: str,
+            policy_query: str,
+            tool_call_id: Annotated[str, InjectedToolCallId],
+            top_k: int | None = None,
+        ) -> dict[str, Any]:
+            """Compare contract excerpts with policy or compliance excerpts."""
+            arguments = {
+                "contract_query": contract_query,
+                "policy_query": policy_query,
+                "top_k": top_k,
             }
-        except Exception as exc:
-            result = {"error": str(exc)}
-
-        state.tool_calls.append(
-            ToolCallTrace(
-                tool_call_id=tool_call["id"],
-                name=name,
-                arguments=arguments,
-                result=result,
+            return self._run_traced_tool(
+                tool_call_id,
+                "check_conflict",
+                arguments,
+                state,
+                lambda: self._check_conflict(arguments, state),
             )
-        )
-        return result
 
-    def _enabled_tools(self, enable_web_search: bool) -> dict[str, tuple[dict[str, Any], Any]]:
-        tools: dict[str, tuple[dict[str, Any], Any]] = {
-            "search_documents": (SEARCH_DOCUMENTS_TOOL_SCHEMA, self._search_documents),
-        }
+        tools: list[BaseTool] = [search_documents, review_clause, check_conflict]
         if enable_web_search:
-            tools["web_search"] = (WEB_SEARCH_TOOL_SCHEMA, self._web_search)
+
+            @tool("web_search", args_schema=WebSearchInput)
+            def web_search(
+                query: str,
+                tool_call_id: Annotated[str, InjectedToolCallId],
+                recency_days: int | None = None,
+                domains: list[str] | None = None,
+                max_results: int | None = None,
+            ) -> dict[str, Any]:
+                """Search public pages without exposing confidential document text."""
+                arguments = {
+                    "query": query,
+                    "recency_days": recency_days,
+                    "domains": domains or [],
+                    "max_results": max_results,
+                }
+                return self._run_traced_tool(
+                    tool_call_id,
+                    "web_search",
+                    arguments,
+                    state,
+                    lambda: self._web_search(arguments, state),
+                )
+
+            tools.append(web_search)
         return tools
 
-    def _run_tool_call(
-        self,
+    @staticmethod
+    def _run_traced_tool(
+        tool_call_id: str,
         name: str,
         arguments: dict[str, Any],
         state: _ToolExecutionState,
-        enable_web_search: bool,
+        handler,
     ) -> dict[str, Any]:
-        tools = self._enabled_tools(enable_web_search)
-        match = tools.get(name)
-        if match is None:
-            if name == "web_search":
-                raise RuntimeError("web_search was called but web search is not enabled.")
-            return {"error": f"Unknown tool: {name}"}
-        _schema, handler = match
-        return handler(arguments, state)
+        try:
+            result = handler()
+        except Exception as exc:
+            result = {"error": str(exc)}
+            with state.lock:
+                state.tool_calls.append(ToolCallTrace(tool_call_id, name, arguments, result))
+            raise
+        with state.lock:
+            state.tool_calls.append(ToolCallTrace(tool_call_id, name, arguments, result))
+        return result
 
     def _search_documents(
         self,
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        execution = self.document_search_tool.execute(arguments)
+        execution = self.document_search_tool.execute(arguments["query"], arguments.get("top_k"))
 
         results = []
         for hit in execution.hits:
-            source_id = state.document_source_ids.get(hit.identity)
-            is_new_source = source_id is None
-            if source_id is None:
-                source_id = f"D{len(state.citations) + 1}"
-                state.document_source_ids[hit.identity] = source_id
-            item = {"source_id": source_id, **hit.result}
-            if is_new_source:
-                state.citations.append(
-                    Citation(
-                        source_id=source_id,
-                        file_name=item["file_name"],
-                        page=item["page"],
-                        chunk_id=item["chunk_id"],
-                        preview=item["content"][:500],
-                        source_type="document",
-                        file_id=item["file_id"],
-                        document_key=item["document_key"],
-                        document_version=item["document_version"],
-                        page_label=item["page_label"],
-                        section_heading=item["section_heading"],
-                        exact_quote=item["content"][:1200],
-                        retrieval_score=item["retrieval_score"],
-                        retrieval_relevance=item["retrieval_relevance"],
+            with state.lock:
+                source_id = state.document_source_ids.get(hit.identity)
+                is_new_source = source_id is None
+                if source_id is None:
+                    source_id = f"D{len(state.citations) + 1}"
+                    state.document_source_ids[hit.identity] = source_id
+                item = {"source_id": source_id, **hit.result}
+                if is_new_source:
+                    state.citations.append(
+                        Citation(
+                            source_id=source_id,
+                            file_name=item["file_name"],
+                            page=item["page"],
+                            chunk_id=item["chunk_id"],
+                            preview=item["content"][:500],
+                            source_type="document",
+                            file_id=item["file_id"],
+                            document_key=item["document_key"],
+                            document_version=item["document_version"],
+                            page_label=item["page_label"],
+                            section_heading=item["section_heading"],
+                            exact_quote=item["content"][:1200],
+                            retrieval_score=item["retrieval_score"],
+                            retrieval_relevance=item["retrieval_relevance"],
+                        )
                     )
-                )
             results.append(item)
 
         return {"query": execution.query, "result_count": len(results), "results": results}
+
+    def _review_clause(
+        self,
+        arguments: dict[str, Any],
+        state: _ToolExecutionState,
+    ) -> dict[str, Any]:
+        answer = self.qa_service.review_clause(
+            str(arguments["clause_type"]),
+            top_k=arguments.get("top_k"),
+        )
+        content, citations, metadata = _append_qa_answer(answer, state)
+        return _qa_answer_tool_result(content, citations, answer.confidence, answer.guard_warnings, metadata)
+
+    def _check_conflict(
+        self,
+        arguments: dict[str, Any],
+        state: _ToolExecutionState,
+    ) -> dict[str, Any]:
+        answer = self.qa_service.check_conflict(
+            str(arguments["contract_query"]),
+            str(arguments["policy_query"]),
+            top_k=arguments.get("top_k"),
+        )
+        content, citations, metadata = _append_qa_answer(answer, state)
+        return _qa_answer_tool_result(content, citations, answer.confidence, answer.guard_warnings, metadata)
 
     def _web_search(
         self,
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        web_search_client = self.web_search_client
-        if isinstance(web_search_client, DisabledWebSearchClient):
-            raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
-
-        query = _required_string(arguments, "query", max_length=300)
-        top_k = _clamp_int(
-            int(arguments.get("max_results") or settings.web_search_max_results),
-            minimum=1,
-            maximum=10,
-        )
-        recency_days = arguments.get("recency_days")
-        if recency_days is not None:
-            recency_days = _clamp_int(int(recency_days), minimum=1, maximum=365)
-        domains = arguments.get("domains")
-        if domains is not None and not isinstance(domains, list):
-            raise ValueError("domains must be a list of domain strings.")
-        clean_domains = [str(domain).strip() for domain in domains or [] if str(domain).strip()]
-
-        search_results = web_search_client.search(
-            query,
-            max_results=top_k,
-            recency_days=recency_days,
-            domains=clean_domains,
+        execution = self.web_search_tool.execute(
+            arguments["query"],
+            max_results=arguments.get("max_results"),
+            recency_days=arguments.get("recency_days"),
+            domains=arguments.get("domains"),
         )
         results = []
-        for result in search_results:
-            source_id = f"W{len(state.web_sources) + 1}"
-            source = _web_source(source_id, result)
-            state.web_sources.append(source)
+        for result in execution.results:
+            with state.lock:
+                source_id = f"W{len(state.web_sources) + 1}"
+                source = web_source(source_id, result)
+                state.web_sources.append(source)
             results.append(
                 {
                     "source_id": source.source_id,
@@ -534,153 +568,55 @@ class ToolCallingChatService:
                 }
             )
 
-        return {"query": query, "result_count": len(results), "results": results}
+        return {"query": execution.query, "result_count": len(results), "results": results}
 
 
-WEB_SEARCH_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": (
-            "Search public web pages for recent or external context. Do not include confidential "
-            "contract excerpts in the query."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Public web search query.",
-                    "minLength": 1,
-                    "maxLength": 300,
-                },
-                "recency_days": {
-                    "type": "integer",
-                    "description": "Optional recency window in days.",
-                    "minimum": 1,
-                    "maximum": 365,
-                },
-                "domains": {
-                    "type": "array",
-                    "description": "Optional domain filters such as sec.gov or court.gov.",
-                    "items": {"type": "string"},
-                    "maxItems": 5,
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Number of web results to return.",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-
-def _normalise_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
-    tool_calls = message.get("tool_calls") or []
-    if tool_calls:
-        return [_normalise_tool_call(call, index) for index, call in enumerate(tool_calls, start=1)]
-
-    function_call = message.get("function_call")
-    if function_call:
-        return [
-            {
-                "id": "legacy_function_call_1",
-                "type": "function",
-                "function": function_call,
-            }
-        ]
-    return []
-
-
-def _normalise_tool_call(call: dict[str, Any], index: int) -> dict[str, Any]:
-    function = call.get("function") or {}
-    return {
-        "id": call.get("id") or f"tool_call_{index}",
-        "type": call.get("type") or "function",
-        "function": {
-            "name": function.get("name") or "",
-            "arguments": function.get("arguments") or "{}",
-        },
-    }
-
-
-def _parse_tool_arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
-    raw_arguments = tool_call["function"].get("arguments") or "{}"
-    if isinstance(raw_arguments, dict):
-        return raw_arguments
-    try:
-        arguments = json.loads(raw_arguments)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON arguments for {tool_call['function']['name']}.") from exc
-    if not isinstance(arguments, dict):
-        raise ValueError(f"Arguments for {tool_call['function']['name']} must be a JSON object.")
-    return arguments
-
-
-def _web_source(source_id: str, result: WebSearchResult) -> WebSource:
-    return WebSource(
-        source_id=source_id,
-        title=result.title,
-        url=result.url,
-        snippet=result.snippet,
-        published_at=result.published_at,
-        source=result.source,
+def _append_qa_answer(
+    answer,
+    state: _ToolExecutionState,
+) -> tuple[str, list[Citation], dict[str, Any]]:
+    mapping: dict[str, str] = {}
+    remapped_citations: list[Citation] = []
+    with state.lock:
+        for citation in answer.citations:
+            source_id = f"D{len(state.citations) + 1}"
+            mapping[str(citation.source_id).upper()] = source_id
+            remapped = replace(citation, source_id=source_id)
+            state.citations.append(remapped)
+            remapped_citations.append(remapped)
+    return (
+        _remap_source_refs(answer.content, mapping),
+        remapped_citations,
+        _remap_metadata(answer.metadata, mapping),
     )
 
 
-def _web_source_citations(sources: list[WebSource]) -> list[Citation]:
-    citations = []
-    for source in sources:
-        preview = source.snippet or source.title or source.url
-        citations.append(
-            Citation(
-                source_id=source.source_id,
-                file_name=source.title or source.url,
-                preview=preview,
-                source_type="web",
-                exact_quote=preview,
-            )
-        )
-    return citations
-
-
-def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:
-    value = str(arguments.get(name) or "").strip()
-    if not value:
-        raise ValueError(f"{name} is required.")
-    if len(value) > max_length:
-        raise ValueError(f"{name} must be {max_length} characters or fewer.")
-    return value
+def _qa_answer_tool_result(
+    content: str,
+    citations: list[Citation],
+    confidence: str | None,
+    guard_warnings: list[str],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "content": content,
+        "citation_count": len(citations),
+        "citations": [
+            {
+                "source_id": citation.source_id,
+                "file_name": citation.file_name,
+                "page": citation.page,
+                "preview": citation.preview,
+            }
+            for citation in citations
+        ],
+        "confidence": confidence,
+        "guard_warnings": guard_warnings,
+        "metadata": metadata,
+    }
 
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-def _dict_to_lc_message(msg: dict[str, Any]) -> BaseMessage:
-    """Convert an OpenAI-style message dict to a LangChain BaseMessage."""
-    role = msg.get("role", "user")
-    content = str(msg.get("content") or "")
-    if role == "system":
-        return SystemMessage(content=content)
-    if role == "assistant":
-        return AIMessage(content=content)
-    return HumanMessage(content=content)
-
-
-def _lc_tool_call_to_openai(tc: dict[str, Any]) -> dict[str, Any]:
-    """Convert a LangChain ToolCall dict back to OpenAI wire format."""
-    args = tc.get("args", {})
-    return {
-        "id": tc["id"],
-        "type": "function",
-        "function": {
-            "name": tc["name"],
-            "arguments": json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args),
-        },
-    }

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from pathlib import Path
 import zipfile
-from xml.etree import ElementTree
+from pathlib import Path
 from uuid import uuid4
+from xml.etree import ElementTree
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
@@ -122,8 +122,8 @@ def _load_pdf_documents(path: Path) -> list[Document]:
 
 def _ocr_pdf_pages(path: Path, pages: list[int]) -> tuple[dict[int, str], list[str]]:
     try:
-        from pdf2image import convert_from_path
         import pytesseract
+        from pdf2image import convert_from_path
     except ImportError:
         return {}, [
             "OCR fallback was requested, but pdf2image and pytesseract are not installed."

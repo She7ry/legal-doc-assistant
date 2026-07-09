@@ -7,7 +7,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +21,7 @@ from api.dependencies import (
     _memory_service,
     _qa_service,
     _vector_store,
+    require_api_key,
 )
 from api.middleware.rate_limit import SlidingWindowRateLimiter
 from api.routers import agent, chat, documents, matters, memories, review
@@ -75,12 +76,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(documents.router, prefix="/api/v1")
-app.include_router(chat.router, prefix="/api/v1")
-app.include_router(agent.router, prefix="/api/v1")
-app.include_router(matters.router, prefix="/api/v1")
-app.include_router(review.router, prefix="/api/v1")
-app.include_router(memories.router, prefix="/api/v1")
+api_router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_key)])
+api_router.include_router(documents.router)
+api_router.include_router(chat.router)
+api_router.include_router(agent.router)
+api_router.include_router(matters.router)
+api_router.include_router(review.router)
+api_router.include_router(memories.router)
+app.include_router(api_router)
 
 
 def _recover_background_work() -> None:

@@ -13,7 +13,6 @@ from api.jobs import IngestJobStore
 from doc_assistant.agent import LegalAgentService
 from doc_assistant.config.settings import settings
 from doc_assistant.matter.store import MatterStore
-from doc_assistant.memory.extraction import build_memory_extractor
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.vector_store import MemoryVectorStore
@@ -102,7 +101,6 @@ def _memory_service(tenant_id: str | None = None) -> MemoryService:
     return MemoryService(
         store=_memory_store,
         vector_store=_memory_vector_store(tenant_id),
-        memory_extractor=build_memory_extractor(),
     )
 
 

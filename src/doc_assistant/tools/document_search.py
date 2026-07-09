@@ -8,39 +8,27 @@ responsibility of the calling service.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 
 from langchain_core.documents import Document
+from langchain_core.tools import InjectedToolCallId
+from pydantic import BaseModel, Field, field_validator
 
 from doc_assistant.retrieval.document_identity import document_identity
 from doc_assistant.utils.text import optional_text
 
-SEARCH_DOCUMENTS_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "search_documents",
-        "description": "Search uploaded/indexed legal documents and return cited excerpts.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Focused search query for uploaded documents.",
-                    "minLength": 1,
-                    "maxLength": 500,
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "Number of document excerpts to retrieve.",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    },
-}
+
+class SearchDocumentsInput(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int | None = Field(default=None, ge=1, le=10)
+    tool_call_id: Annotated[str, InjectedToolCallId] = ""
+
+    @field_validator("query")
+    @classmethod
+    def clean_query(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("query is required")
+        return value
 
 
 class DocumentSearchBackend(Protocol):
@@ -68,19 +56,12 @@ class DocumentSearchExecution:
 class DocumentSearchTool:
     """Execute the ``search_documents`` tool against an injected vector store."""
 
-    schema = SEARCH_DOCUMENTS_TOOL_SCHEMA
-
     def __init__(self, backend: DocumentSearchBackend, *, default_top_k: int) -> None:
         self.backend = backend
         self.default_top_k = default_top_k
 
-    def execute(self, arguments: dict[str, Any]) -> DocumentSearchExecution:
-        query = _required_string(arguments, "query", max_length=500)
-        top_k = _clamp_int(
-            int(arguments.get("top_k") or self.default_top_k),
-            minimum=1,
-            maximum=10,
-        )
+    def execute(self, query: str, top_k: int | None = None) -> DocumentSearchExecution:
+        top_k = top_k or self.default_top_k
         documents = self.backend.search(query, k=top_k)
         hits = tuple(
             DocumentSearchHit(
@@ -123,23 +104,10 @@ def _document_result(document: Document) -> dict[str, Any]:
     }
 
 
-def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:
-    value = str(arguments.get(name) or "").strip()
-    if not value:
-        raise ValueError(f"{name} is required.")
-    if len(value) > max_length:
-        raise ValueError(f"{name} must be {max_length} characters or fewer.")
-    return value
-
-
-def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
-    return max(minimum, min(maximum, value))
-
-
 __all__ = [
-    "SEARCH_DOCUMENTS_TOOL_SCHEMA",
     "DocumentSearchBackend",
     "DocumentSearchExecution",
     "DocumentSearchHit",
     "DocumentSearchTool",
+    "SearchDocumentsInput",
 ]

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
-from api.dependencies import QAServiceDep, require_api_key
+from api.dependencies import QAServiceDep
 from api.schemas.requests import ClauseReviewRequest, ConflictCheckRequest
 from api.schemas.responses import CitationOut, ClauseReviewResponse, ConflictCheckResponse
 
-router = APIRouter(prefix="/review", tags=["review"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/review", tags=["review"])
 
 
 @router.post(

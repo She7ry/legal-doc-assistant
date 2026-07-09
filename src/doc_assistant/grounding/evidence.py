@@ -147,9 +147,7 @@ def _looks_material(text: str) -> bool:
     lowered = text.casefold()
     if len(text) < 28:
         return False
-    if lowered.startswith(("confidence:", "answer:", "assistant:", "note:")):
-        return False
-    return True
+    return not lowered.startswith(("confidence:", "answer:", "assistant:", "note:"))
 
 
 def _source_ids(text: str) -> list[str]:

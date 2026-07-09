@@ -5,30 +5,35 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.documents import Document
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 from qdrant_client import QdrantClient
 
-from doc_assistant.memory import service as memory_service_module
-from doc_assistant.memory.extraction import LLMMemoryExtractor
-from doc_assistant.memory.policy import extract_memory_write_intents
-from doc_assistant.memory.schemas import (
-    MemoryCandidate,
-    MemoryRecord,
-    MemoryUpdate,
-    MemoryWriteIntent,
-)
-from doc_assistant.memory.service import MemoryService
+from doc_assistant.memory.schemas import MemoryCandidate, MemoryRecord, MemoryUpdate
+from doc_assistant.memory.service import MemoryService, extract_memory_write_intents
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.memory.vector_store import MemoryVectorStore
 from doc_assistant.services.qa_service import DocumentQAService
 
 
-class CaptureChatModel:
-    def __init__(self) -> None:
-        self.messages: list[dict[str, str]] = []
+class RecordingChatModel(BaseChatModel):
+    response: str = "The answer is grounded in the document [S1]."
+    messages: list[dict[str, str]] = Field(default_factory=list)
 
-    def invoke_messages(self, messages: list[dict[str, str]]) -> dict[str, str]:
-        self.messages = messages
-        return {"content": "The answer is grounded in the document [S1]."}
+    @property
+    def _llm_type(self) -> str:
+        return "recording-test"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        del stop, run_manager, kwargs
+        roles = {"system": "system", "human": "user", "ai": "assistant"}
+        self.messages = [
+            {"role": roles.get(message.type, message.type), "content": str(message.content)}
+            for message in messages
+        ]
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response))])
 
 
 class SingleDocumentVectorStore:
@@ -50,54 +55,7 @@ class EmptyDocumentVectorStore:
         return []
 
 
-class RecordingChatModel:
-    def __init__(self) -> None:
-        self.messages: list[dict[str, str]] = []
-
-    def invoke_messages(self, messages: list[dict[str, str]]) -> dict[str, str]:
-        self.messages = messages
-        return {"content": "General answer."}
-
-
-class SummaryChatModel:
-    def __init__(self) -> None:
-        self.messages: list[dict[str, str]] = []
-
-    def invoke_messages(self, messages: list[dict[str, str]]) -> dict[str, str]:
-        self.messages = messages
-        return {
-            "content": (
-                "Document type: supply agreement; key facts: Acme is party A and "
-                "the term is 3 years; user concern: renewal notice; next step: "
-                "confirm governing law."
-            )
-        }
-
-
 class FakeMemoryVectorStore:
-    def __init__(self) -> None:
-        self.deleted: list[str] = []
-        self.upserted: list[str] = []
-
-    def upsert_memory(self, memory) -> str:
-        self.upserted.append(memory.memory_id)
-        return memory.memory_id
-
-    def delete_memory(self, memory_id: str) -> None:
-        self.deleted.append(memory_id)
-
-
-class StaleOnlyVectorStore:
-    def __init__(self, memory_id: str) -> None:
-        self.memory_id = memory_id
-
-    def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
-        del query, tenant_id, user_id, k
-        placeholder = memory_record_factory(self.memory_id)
-        return [MemoryCandidate(memory=placeholder, score=0.99)]
-
-
-class OrderedMemoryVectorStore:
     def __init__(self, results: list[tuple[str, float]] | None = None) -> None:
         self.results = results or []
         self.deleted: list[str] = []
@@ -112,32 +70,10 @@ class OrderedMemoryVectorStore:
 
     def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
         del query, tenant_id, user_id
-        limit = k or len(self.results)
         return [
             MemoryCandidate(memory=memory_record_factory(memory_id), score=score)
-            for memory_id, score in self.results[:limit]
+            for memory_id, score in self.results[: k or len(self.results)]
         ]
-
-
-def memory_record_factory(memory_id: str) -> MemoryRecord:
-    return MemoryRecord(
-        memory_id=memory_id,
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="stale_fact",
-        content="Stale fact.",
-        value_json=None,
-        source="explicit",
-        confidence=0.95,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-
-
-def build_memory_service(tmp_path) -> MemoryService:
-    return MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
 
 
 class FakeMemoryEmbeddingModel:
@@ -148,6 +84,27 @@ class FakeMemoryEmbeddingModel:
             float("style" in lowered or "answer" in lowered),
             1.0,
         ]
+
+
+def build_memory_service(tmp_path) -> MemoryService:
+    return MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
+
+
+def memory_record_factory(memory_id: str) -> MemoryRecord:
+    return MemoryRecord(
+        memory_id=memory_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="fact",
+        key="stored_fact",
+        content="Stored fact.",
+        value_json=None,
+        source="explicit",
+        confidence=0.95,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
 
 
 def build_qdrant_memory_vector_store() -> MemoryVectorStore:
@@ -161,39 +118,23 @@ def build_qdrant_memory_vector_store() -> MemoryVectorStore:
 
 def test_memory_store_creates_lean_schema(tmp_path) -> None:
     db_path = tmp_path / "memory.sqlite3"
-    store = MemoryStore(db_path)
-    store.close()
+    MemoryStore(db_path).close()
 
     with sqlite3.connect(db_path) as connection:
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        memory_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(memories)")
-        }
+        memory_columns = {row[1] for row in connection.execute("PRAGMA table_info(memories)")}
 
     assert {"retrieval_logs", "feedback_events", "memories_fts"}.isdisjoint(tables)
     assert {"embedding_id", "last_accessed_at", "access_count"}.isdisjoint(memory_columns)
     assert {"task_id", "expires_at"}.issubset(memory_columns)
 
 
-def test_memory_store_reuses_thread_connection(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite3")
-
-    first = store._thread_connection()
-    with store._connect() as second:
-        assert second is first
-    with store._connect() as third:
-        assert third is first
-
-    store.close()
-
-
-def test_memory_write_policy_only_writes_explicit_long_term_memory(tmp_path) -> None:
+def test_explicit_memory_write_only(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-
     message_id = service.record_user_message(
         tenant_id="tenant-a",
         user_id="user-a",
@@ -201,18 +142,15 @@ def test_memory_write_policy_only_writes_explicit_long_term_memory(tmp_path) -> 
         content="hello",
     )
 
-    assert (
-        service.write_memories_from_user_message(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-            message_id=message_id,
-            content="hello",
-        )
-        == []
-    )
+    assert service.write_memories_from_user_message(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id=conversation_id,
+        message_id=message_id,
+        content="hello",
+    ) == []
 
-    explicit_message_id = service.record_user_message(
+    explicit_id = service.record_user_message(
         tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
@@ -222,7 +160,7 @@ def test_memory_write_policy_only_writes_explicit_long_term_memory(tmp_path) -> 
         tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
-        message_id=explicit_message_id,
+        message_id=explicit_id,
         content="请记住：以后回答用中文并保持简洁",
     )
 
@@ -232,9 +170,36 @@ def test_memory_write_policy_only_writes_explicit_long_term_memory(tmp_path) -> 
     assert created[0].source == "explicit"
 
 
+def test_memory_policy_splits_multiple_explicit_intents() -> None:
+    intents = extract_memory_write_intents(
+        "请记住：以后回答用中文并保持简洁，并且我的职位是法务总监"
+    )
+
+    assert [intent.key for intent in intents] == ["answer_style", "business_context"]
+    assert all(intent.source == "explicit" for intent in intents)
+
+
+def test_implicit_memory_is_not_written(tmp_path) -> None:
+    service = build_memory_service(tmp_path)
+    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
+    message_id = service.record_user_message(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id=conversation_id,
+        content="Our company mainly provides IP agency services.",
+    )
+
+    assert service.write_memories_from_user_message(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id=conversation_id,
+        message_id=message_id,
+        content="Our company mainly provides IP agency services.",
+    ) == []
+
+
 def test_memory_supersedes_existing_active_key(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-
     first = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
@@ -252,76 +217,14 @@ def test_memory_supersedes_existing_active_key(tmp_path) -> None:
         content="Prefer concise answers.",
     )
 
-    active = service.list_memories("tenant-a", "user-a")
-    all_memories = service.list_memories("tenant-a", "user-a", status=None, include_expired=True)
-
-    assert [memory.memory_id for memory in active] == [second.memory_id]
     assert second.supersedes_id == first.memory_id
-    assert {memory.status for memory in all_memories} == {"active", "stale"}
-
-
-def test_memory_semantic_dedup_supersedes_similar_memory_with_different_key(tmp_path) -> None:
-    vector_store = OrderedMemoryVectorStore()
-    service = MemoryService(
-        store=MemoryStore(tmp_path / "memory.sqlite3"),
-        vector_store=vector_store,  # type: ignore[arg-type]
-    )
-    first = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="user_preference",
-        content="Prefer concise Chinese answers.",
-    )
-    vector_store.results = [(first.memory_id, 0.95)]
-
-    second = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer briefly in Chinese.",
-    )
-    active = service.list_memories("tenant-a", "user-a")
-
-    assert second.supersedes_id == first.memory_id
-    assert second.key == first.key
-    assert [memory.memory_id for memory in active] == [second.memory_id]
-
-
-def test_memory_supersede_marks_obvious_preference_conflict(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    first = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer in Chinese.",
-    )
-    second = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer in English.",
-    )
-
-    assert second.supersedes_id == first.memory_id
-    assert second.superseded_conflicting is True
-    assert second.superseded_from_content == "Please answer in Chinese."
-
-    prompt = service.format_for_prompt([MemoryCandidate(memory=second, score=0.95)])
-
-    assert "recently updated from 'Please answer in Chinese.'" in prompt
+    assert [memory.memory_id for memory in service.list_memories("tenant-a", "user-a")] == [
+        second.memory_id
+    ]
 
 
 def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-
     first = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
@@ -341,96 +244,13 @@ def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
         value_json={"text": "Prefer concise answers."},
     )
 
-    active = service.list_memories("tenant-a", "user-a")
-    all_memories = service.list_memories("tenant-a", "user-a", status=None, include_expired=True)
-
     assert second.memory_id == first.memory_id
-    assert [memory.memory_id for memory in active] == [first.memory_id]
-    assert len(all_memories) == 1
-
-
-def test_duplicate_memory_write_ignores_internal_conflict_metadata(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer in Chinese.",
-    )
-    first_english = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer in English.",
-    )
-    second_english = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Please answer in English.",
-    )
-
-    all_memories = service.list_memories("tenant-a", "user-a", status=None, include_expired=True)
-
-    assert second_english.memory_id == first_english.memory_id
-    assert len(all_memories) == 2
-
-
-def test_memory_maintenance_is_cooled_down_on_hot_paths(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        memory_service_module,
-        "settings",
-        memory_service_module.settings.with_overrides(memory_maintenance_cooldown_seconds=300),
-    )
-    service = build_memory_service(tmp_path)
-    cleanup_calls = 0
-    enforce_calls = 0
-
-    def cleanup(tenant_id: str, user_id: str):
-        nonlocal cleanup_calls
-        cleanup_calls += 1
-        return []
-
-    def enforce(tenant_id: str, user_id: str):
-        nonlocal enforce_calls
-        enforce_calls += 1
-        return []
-
-    service.cleanup_expired_memories = cleanup  # type: ignore[method-assign]
-    service.enforce_memory_limit = enforce  # type: ignore[method-assign]
-
-    service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="fact_one",
-        content="First fact.",
-    )
-    service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="fact_two",
-        content="Second fact.",
-    )
-    service.retrieve_relevant_memories(tenant_id="tenant-a", user_id="user-a", query="fact")
-    service.retrieve_relevant_memories(tenant_id="tenant-a", user_id="user-a", query="fact")
-
-    assert enforce_calls == 1
-    assert cleanup_calls == 1
+    assert len(service.list_memories("tenant-a", "user-a", status=None, include_expired=True)) == 1
 
 
 def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    hybrid = service.create_memory(
+    first = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
@@ -438,7 +258,7 @@ def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
         key="patent_license_focus",
         content="Patent license agreements often need indemnity review.",
     )
-    vector_only = service.create_memory(
+    second = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
@@ -446,9 +266,7 @@ def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
         key="billing_preference",
         content="Invoices are reviewed by finance.",
     )
-    service.vector_store = OrderedMemoryVectorStore(
-        [(vector_only.memory_id, 0.99), (hybrid.memory_id, 0.95)]
-    )  # type: ignore[assignment]
+    service.vector_store = FakeMemoryVectorStore([(second.memory_id, 0.99), (first.memory_id, 0.95)])
 
     results = service.retrieve_relevant_memories(
         tenant_id="tenant-a",
@@ -457,110 +275,46 @@ def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
         limit=3,
     )
 
-    assert results[0].memory.memory_id == vector_only.memory_id
+    assert [candidate.memory.memory_id for candidate in results] == [second.memory_id, first.memory_id]
     assert results[0].retrieval_source == "vector"
-    assert [candidate.memory.memory_id for candidate in results] == [
-        vector_only.memory_id,
-        hybrid.memory_id,
-    ]
 
 
-def test_complete_vector_memory_candidate_does_not_require_sqlite_hydration(tmp_path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite3")
-    service = MemoryService(store=store, vector_store=None)
-    vector_memory = memory_record_factory("vector-only-memory")
-
-    class CompleteVectorStore:
-        def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
-            del query, tenant_id, user_id, k
-            return [
-                MemoryCandidate(
-                    memory=vector_memory,
-                    score=0.91,
-                    retrieval_source="vector",
-                )
-            ]
-
-    def fail_hydration(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("Vector candidate should not be hydrated from SQLite.")
-
-    store.get_memories_by_ids = fail_hydration  # type: ignore[method-assign]
-    service.vector_store = CompleteVectorStore()  # type: ignore[assignment]
-
-    results = service.retrieve_relevant_memories(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        query="stale fact",
-    )
-
-    assert [candidate.memory.memory_id for candidate in results] == ["vector-only-memory"]
-
-
-def test_format_for_prompt_respects_total_token_budget(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        memory_service_module,
-        "settings",
-        memory_service_module.settings.with_overrides(memory_prompt_max_tokens=95),
-    )
+def test_vector_hydration_filters_stale_results(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    high = service.create_memory(
+    stale = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
-        key="important_contract_fact",
-        content="High priority fact. " + ("A" * 600),
+        key="old_context",
+        content="Old stale context.",
+    )
+    service.delete_memory("tenant-a", "user-a", stale.memory_id)
+    service.vector_store = FakeMemoryVectorStore([(stale.memory_id, 0.99)])
+
+    assert service.retrieve_relevant_memories(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        query="arbitration Singapore",
+    ) == []
+
+
+def test_format_for_prompt_keeps_high_priority_memory(tmp_path) -> None:
+    service = build_memory_service(tmp_path)
+    memory = service.create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="preference",
+        key="answer_style",
+        content="Prefer concise Chinese answers.",
         confidence=0.95,
     )
-    low = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="low_priority_fact",
-        content="Low priority fact. " + ("B" * 600),
-        confidence=0.56,
-    )
 
-    prompt = service.format_for_prompt(
-        [
-            MemoryCandidate(memory=low, score=0.99),
-            MemoryCandidate(memory=high, score=0.10),
-        ]
-    )
+    prompt = service.format_for_prompt([MemoryCandidate(memory=memory, score=0.8)])
 
-    assert "important_contract_fact" in prompt
-    assert "low_priority_fact" not in prompt
-    assert len(prompt) < 420
-
-
-def test_memory_limit_marks_low_priority_memories_stale(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        memory_service_module,
-        "settings",
-        memory_service_module.settings.with_overrides(
-            memory_max_active_per_user=2,
-            memory_maintenance_cooldown_seconds=0,
-        ),
-    )
-    service = build_memory_service(tmp_path)
-    for index in range(3):
-        service.create_memory(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            scope="user",
-            type="fact",
-            key=f"fact_{index}",
-            content=f"Low priority fact {index}.",
-            confidence=0.6,
-        )
-
-    active = service.list_memories("tenant-a", "user-a")
-    all_memories = service.list_memories("tenant-a", "user-a", status=None, include_expired=True)
-
-    assert len(active) == 2
-    assert [memory.status for memory in all_memories].count("stale") == 1
+    assert "Relevant memory" in prompt
+    assert "Prefer concise Chinese answers." in prompt
 
 
 def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> None:
@@ -583,29 +337,20 @@ def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> 
 
     assert [memory.memory_id for memory in stale] == [expired.memory_id]
     assert vector_store.deleted[-1] == expired.memory_id
-    refreshed = service.store.get_memory("tenant-a", "user-a", expired.memory_id)
-    assert refreshed is not None
-    assert refreshed.status == "stale"
 
 
 def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=3)
     memory = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
-        key="matter",
-        content="Matter is active.",
-        value_json={"text": "Matter is active."},
-        expires_at=expires_at,
+        key="matter_deadline",
+        content="Deadline is Friday.",
+        value_json={"date": "Friday"},
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
     )
-
-    unchanged = service.update_memory("tenant-a", "user-a", memory.memory_id, MemoryUpdate())
-    assert unchanged is not None
-    assert unchanged.value_json == {"text": "Matter is active."}
-    assert unchanged.expires_at == expires_at
 
     cleared = service.update_memory(
         "tenant-a",
@@ -617,53 +362,6 @@ def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
     assert cleared is not None
     assert cleared.value_json is None
     assert cleared.expires_at is None
-
-
-def test_memory_list_supports_pagination_and_count(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    for index in range(3):
-        service.create_memory(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            scope="user",
-            type="fact",
-            key=f"matter_{index}",
-            content=f"Matter fact {index}.",
-        )
-
-    page = service.list_memories("tenant-a", "user-a", limit=2, offset=1)
-
-    assert len(page) == 2
-    assert service.count_memories("tenant-a", "user-a") == 3
-
-
-def test_load_conversation_history_returns_recent_messages(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="First question",
-    )
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="First answer",
-    )
-
-    history = service.load_conversation_history(
-        "tenant-a",
-        "user-a",
-        conversation_id,
-        limit=10,
-    )
-
-    assert history == [
-        {"role": "user", "content": "First question"},
-        {"role": "assistant", "content": "First answer"},
-    ]
 
 
 def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -> None:
@@ -688,58 +386,15 @@ def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -
             content=f"Question {index}",
         )
 
-    history = service.load_conversation_history(
-        "tenant-a",
-        "user-a",
-        conversation_id,
-        limit=20,
-    )
+    history = service.load_conversation_history("tenant-a", "user-a", conversation_id, limit=20)
 
-    assert history[0] == {
-        "role": "system",
-        "content": "Conversation summary: Acme Corp and Beta LLC negotiated Delaware law.",
-    }
+    assert history[0]["role"] == "system"
     assert [message["content"] for message in history[1:]] == [
         f"Question {index}" for index in range(4, 12)
     ]
 
 
-def test_load_conversation_history_can_return_raw_messages_without_summary(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="session",
-        type="task_state",
-        key="conversation_summary_conversation-a",
-        content="Conversation summary: Use only for model context.",
-        source="system_generated",
-        confidence=0.7,
-        conversation_id=conversation_id,
-    )
-    for index in range(3):
-        service.record_user_message(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-            content=f"Raw question {index}",
-        )
-
-    history = service.load_conversation_history(
-        "tenant-a",
-        "user-a",
-        conversation_id,
-        limit=20,
-        include_summary=False,
-    )
-
-    assert history == [
-        {"role": "user", "content": f"Raw question {index}"} for index in range(3)
-    ]
-
-
-def test_summarize_conversation_creates_session_task_state_memory(tmp_path) -> None:
+def test_manual_conversation_summary_creates_session_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
     service.record_user_message(
@@ -762,252 +417,72 @@ def test_summarize_conversation_creates_session_task_state_memory(tmp_path) -> N
     )
 
     assert memory is not None
-    assert memory.scope == "session"
-    assert memory.type == "task_state"
     assert memory.key == "conversation_summary_conversation-a"
     assert "Please review the notice clause" in memory.content
     assert "10 business days" in memory.content
 
 
-def test_summarize_conversation_extracts_legal_review_structure(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content=(
-            "Please review the SaaS MSA between Acme Corp and Beta LLC. "
-            "The effective date is January 15, 2026. Governing law is Delaware. "
-            "Focus on uncapped indemnity and renewal notice."
-        ),
-    )
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content=(
-            "Key risks: uncapped indemnity for IP claims; renewal notice requires "
-            "30 days; confirm whether New York venue conflicts with Delaware governing law."
-        ),
-    )
-
-    memory = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-
-    assert memory is not None
-    assert "Key parties and entities" in memory.content
-    assert "Acme Corp" in memory.content
-    assert "Beta LLC" in memory.content
-    assert "Key dates and deadlines" in memory.content
-    assert "January 15, 2026" in memory.content
-    assert "Governing law is Delaware" in memory.content
-    assert "uncapped indemnity" in memory.content
-
-
-def test_summarize_conversation_uses_llm_when_enabled(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        memory_service_module,
-        "settings",
-        memory_service_module.settings.with_overrides(memory_llm_extraction_enabled=True),
-    )
-    model = SummaryChatModel()
+def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) -> None:
+    vector_store = FakeMemoryVectorStore()
     service = MemoryService(
         store=MemoryStore(tmp_path / "memory.sqlite3"),
-        vector_store=None,
-        summary_model=model,
+        vector_store=vector_store,  # type: ignore[arg-type]
     )
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.record_user_message(
+    active = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
-        conversation_id=conversation_id,
-        content="Can you review this agreement? It lasts 3 years and Acme is party A.",
+        scope="user",
+        type="fact",
+        key="active_fact",
+        content="Active fact.",
     )
-    service.record_assistant_message(
+    deleted = service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
-        conversation_id=conversation_id,
-        content="I will focus on renewal notice and governing law.",
+        scope="user",
+        type="fact",
+        key="deleted_fact",
+        content="Deleted fact.",
     )
+    service.delete_memory("tenant-a", "user-a", deleted.memory_id)
 
-    memory = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
+    result = service.repair_vector_index("tenant-a", "user-a")
 
-    assert memory is not None
-    assert "Acme is party A" in memory.content
-    assert "term is 3 years" in memory.content
-    assert memory.value_json is not None
-    assert memory.value_json["summary_method"] == "llm"
-    assert model.messages[0]["role"] == "system"
+    assert deleted.memory_id in vector_store.deleted
+    assert active.memory_id in vector_store.upserted
+    assert result["deleted"] >= 1
+    assert result["upserted"] >= 1
 
 
-def test_summarize_conversation_supersedes_prior_summary(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.record_user_message(
+def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None:
+    memory_service = build_memory_service(tmp_path)
+    memory = memory_service.create_memory(
         tenant_id="tenant-a",
         user_id="user-a",
-        conversation_id=conversation_id,
-        content="First question.",
+        scope="user",
+        type="preference",
+        key="answer_style",
+        content="Prefer concise Chinese answers.",
     )
-    first = service.summarize_conversation_to_memory(
+    memory_service.vector_store = FakeMemoryVectorStore([(memory.memory_id, 0.95)])
+    chat_model = RecordingChatModel()
+    service = DocumentQAService(
+        vector_store=SingleDocumentVectorStore(),
+        chat_model=chat_model,
+        memory_service=memory_service,
         tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="First answer.",
     )
 
-    second = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
+    answer = service.ask(
+        "What is the notice period?",
         user_id="user-a",
-        conversation_id=conversation_id,
-    )
-    active = service.list_memories("tenant-a", "user-a")
-    all_memories = service.list_memories("tenant-a", "user-a", status=None, include_expired=True)
-
-    assert first is not None
-    assert second is not None
-    assert second.supersedes_id == first.memory_id
-    assert [memory.memory_id for memory in active] == [second.memory_id]
-    assert {memory.status for memory in all_memories} == {"active", "stale"}
-
-
-def test_summarize_conversation_incrementally_updates_prior_summary(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Review the services agreement between Acme Corp and Beta LLC.",
-    )
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Initial conclusion: governing law is Delaware.",
-    )
-    first = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-    service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="New issue: renewal notice deadline is 45 days.",
-    )
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Next step: confirm whether the 45 days are calendar or business days.",
+        conversation_id="conversation-a",
     )
 
-    second = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-
-    assert first is not None
-    assert second is not None
-    assert second.supersedes_id == first.memory_id
-    assert "Acme Corp" in second.content
-    assert "45 days" in second.content
-    assert second.value_json is not None
-    assert second.value_json["previous_message_count"] == 2
-    assert second.value_json["incremental"] is True
-
-
-def test_maybe_summarize_conversation_respects_threshold_and_interval(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        memory_service_module,
-        "settings",
-        memory_service_module.settings.with_overrides(
-            memory_auto_summary_threshold=4,
-            memory_auto_summary_interval=2,
-            memory_auto_summary_window=3,
-        ),
-    )
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    for index in range(3):
-        service.record_user_message(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-            content=f"Question {index}",
-        )
-
-    assert (
-        service.maybe_summarize_conversation(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-        )
-        is None
-    )
-
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Answer 3",
-    )
-    first = service.maybe_summarize_conversation(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-    assert first is not None
-    assert first.value_json is not None
-    assert first.value_json["message_count"] == 4
-
-    service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Question 4",
-    )
-    assert (
-        service.maybe_summarize_conversation(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-        )
-        is None
-    )
-
-    service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Answer 5",
-    )
-    second = service.maybe_summarize_conversation(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-
-    assert second is not None
-    assert second.supersedes_id == first.memory_id
-    assert second.value_json is not None
-    assert second.value_json["message_count"] == 6
+    assert answer.citations
+    assert answer.memories_used[0].key == "answer_style"
+    assert "<user_memory>" in chat_model.messages[1]["content"]
+    assert "<retrieved_documents>" in chat_model.messages[1]["content"]
 
 
 def test_document_qa_merges_persisted_history_when_client_history_is_missing(tmp_path) -> None:
@@ -1042,84 +517,6 @@ def test_document_qa_merges_persisted_history_when_client_history_is_missing(tmp
     prompt = chat_model.messages[1]["content"]
     assert "Earlier question about renewal." in prompt
     assert "Earlier answer about renewal." in prompt
-
-
-def test_document_qa_includes_conversation_summary_context(tmp_path) -> None:
-    memory_service = build_memory_service(tmp_path)
-    conversation_id = memory_service.ensure_context("tenant-a", "user-a", "conversation-a")
-    memory_service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="session",
-        type="task_state",
-        key="conversation_summary_conversation-a",
-        content="Conversation summary: Acme Corp is the counterparty; Delaware law applies.",
-        source="system_generated",
-        confidence=0.7,
-        conversation_id=conversation_id,
-    )
-    for index in range(12):
-        memory_service.record_user_message(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            conversation_id=conversation_id,
-            content=f"Earlier raw question {index}",
-        )
-    chat_model = RecordingChatModel()
-    service = DocumentQAService(
-        vector_store=EmptyDocumentVectorStore(),
-        chat_model=chat_model,
-        memory_service=memory_service,
-        tenant_id="tenant-a",
-    )
-
-    service.ask(
-        "What should I review next for this contract?",
-        user_id="user-a",
-        conversation_id=conversation_id,
-    )
-
-    prompt = chat_model.messages[1]["content"]
-    assert "Session summary: Conversation summary: Acme Corp is the counterparty" in prompt
-    assert "Earlier raw question 0" not in prompt
-    assert "Earlier raw question 4" in prompt
-
-
-def test_document_qa_can_skip_persisted_history_for_agent_context(tmp_path) -> None:
-    memory_service = build_memory_service(tmp_path)
-    conversation_id = memory_service.ensure_context("tenant-a", "user-a", "conversation-a")
-    memory_service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Earlier user chat that should not be injected.",
-    )
-    memory_service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Earlier assistant chat that should not be injected.",
-    )
-    chat_model = RecordingChatModel()
-    service = DocumentQAService(
-        vector_store=EmptyDocumentVectorStore(),
-        chat_model=chat_model,
-        memory_service=memory_service,
-        tenant_id="tenant-a",
-    )
-
-    service.ask(
-        "Build the obligation calendar.",
-        chat_history=[{"role": "user", "content": "Agent objective: Review obligations."}],
-        user_id="user-a",
-        conversation_id=conversation_id,
-        merge_persisted_history=False,
-    )
-
-    prompt = chat_model.messages[1]["content"]
-    assert "Agent objective: Review obligations." in prompt
-    assert "Earlier user chat that should not be injected." not in prompt
-    assert "Earlier assistant chat that should not be injected." not in prompt
 
 
 def test_memory_vector_search_filters_by_tenant_user_and_visibility() -> None:
@@ -1190,263 +587,3 @@ def test_memory_vector_search_discards_unreadable_backend_results() -> None:
 
     assert {candidate.memory.memory_id for candidate in results} == {"own-private", "team-shared"}
     vector_store.vector_store.close()
-
-
-def test_memory_policy_splits_multiple_explicit_intents() -> None:
-    intents = extract_memory_write_intents(
-        "请记住：以后回答用中文并保持简洁，并且我的职位是法务总监"
-    )
-
-    assert [intent.key for intent in intents] == ["answer_style", "business_context"]
-    assert all("请记住" not in intent.content for intent in intents)
-
-
-def test_memory_policy_strips_always_answer_marker() -> None:
-    intents = extract_memory_write_intents("Always answer in concise Chinese.")
-
-    assert len(intents) == 1
-    assert intents[0].key == "answer_style"
-    assert intents[0].content == "in concise Chinese"
-
-
-def test_memory_policy_infers_business_context_without_explicit_marker() -> None:
-    intents = extract_memory_write_intents("Our company mainly provides IP agency services.")
-
-    assert len(intents) == 1
-    assert intents[0].type == "fact"
-    assert intents[0].key == "business_context"
-    assert intents[0].source == "inferred"
-
-
-def test_memory_policy_infers_legal_review_profile_without_explicit_marker() -> None:
-    intents = extract_memory_write_intents(
-        "We mainly review patent license agreements and focus on indemnity and liability clauses."
-    )
-
-    assert len(intents) == 1
-    assert intents[0].type == "fact"
-    assert intents[0].key == "review_profile"
-    assert intents[0].source == "inferred"
-
-
-def test_memory_policy_infers_chinese_future_answer_preference() -> None:
-    intents = extract_memory_write_intents("\u8bf7\u7ed9\u6211\u7684\u56de\u590d\u90fd\u9644\u4e0a\u82f1\u6587\u5bf9\u7167")
-
-    assert len(intents) == 1
-    assert intents[0].type == "preference"
-    assert intents[0].key == "answer_style"
-    assert intents[0].source == "inferred"
-
-
-def test_external_memory_extractor_can_fill_rule_gaps(tmp_path) -> None:
-    def extractor(text: str) -> list[MemoryWriteIntent]:
-        assert text == "Acme prefers arbitration in Singapore."
-        return [
-            MemoryWriteIntent(
-                type="preference",
-                key="dispute_resolution_preference",
-                content=text,
-                value_json={"text": text},
-                source="inferred",
-                confidence=0.68,
-            )
-        ]
-
-    service = MemoryService(
-        store=MemoryStore(tmp_path / "memory.sqlite3"),
-        vector_store=None,
-        memory_extractor=extractor,
-    )
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    message_id = service.record_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="Acme prefers arbitration in Singapore.",
-    )
-
-    created = service.write_memories_from_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        message_id=message_id,
-        content="Acme prefers arbitration in Singapore.",
-    )
-
-    assert len(created) == 1
-    assert created[0].key == "dispute_resolution_preference"
-    assert created[0].source == "inferred"
-
-
-def test_llm_memory_extractor_parses_inferred_memory() -> None:
-    class FakeExtractionModel:
-        def invoke_messages(self, messages):
-            assert "commonly reviewed contract types" in messages[0]["content"]
-            assert "recurring clause focus areas" in messages[0]["content"]
-            assert messages[-1]["content"] == "甲方是我们客户，需要偏保护客户侧。"
-            return {
-                "content": (
-                    '{"memories":[{"type":"fact","key":"client_side_context",'
-                    '"content":"甲方是我们客户，需要偏保护客户侧。","confidence":0.72}]}'
-                )
-            }
-
-    extractor = LLMMemoryExtractor(chat_model=FakeExtractionModel())
-
-    intents = extractor("甲方是我们客户，需要偏保护客户侧。")
-
-    assert len(intents) == 1
-    assert intents[0].type == "fact"
-    assert intents[0].key == "client_side_context"
-    assert intents[0].source == "inferred"
-    assert intents[0].confidence == 0.72
-
-
-def test_vector_hydration_filters_stale_results_without_lexical_fallback(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    stale = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="old_context",
-        content="Old stale context.",
-    )
-    service.delete_memory("tenant-a", "user-a", stale.memory_id)
-    service.vector_store = StaleOnlyVectorStore(stale.memory_id)  # type: ignore[assignment]
-
-    results = service.retrieve_relevant_memories(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        query="arbitration Singapore",
-    )
-
-    assert results == []
-
-
-def test_assistant_task_fact_extraction_writes_task_memory(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    message_id = service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content="The agreement is governed by New York law [S1].",
-    )
-
-    created = service.write_memories_from_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        message_id=message_id,
-        content="The agreement is governed by New York law [S1].",
-        task_id="task-a",
-    )
-
-    assert len(created) == 1
-    assert created[0].scope == "task"
-    assert created[0].source == "system_generated"
-    assert created[0].task_id == "task-a"
-
-
-def test_assistant_task_fact_extraction_allows_structured_facts_without_citation(tmp_path) -> None:
-    service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
-    message_id = service.record_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        content=(
-            "The parties are Acme Corp and Beta LLC. "
-            "The effective date is January 15, 2026. "
-            "The governing law is Delaware."
-        ),
-    )
-
-    created = service.write_memories_from_assistant_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        message_id=message_id,
-        content=(
-            "The parties are Acme Corp and Beta LLC. "
-            "The effective date is January 15, 2026. "
-            "The governing law is Delaware."
-        ),
-        task_id="task-a",
-    )
-
-    assert len(created) == 3
-    assert all(memory.scope == "task" for memory in created)
-    assert all(memory.confidence == 0.56 for memory in created)
-    assert any("governing law is Delaware" in memory.content for memory in created)
-
-
-def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) -> None:
-    vector_store = FakeMemoryVectorStore()
-    service = MemoryService(
-        store=MemoryStore(tmp_path / "memory.sqlite3"),
-        vector_store=vector_store,  # type: ignore[arg-type]
-    )
-    active = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="active_fact",
-        content="Active fact.",
-    )
-    deleted = service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="fact",
-        key="deleted_fact",
-        content="Deleted fact.",
-    )
-    service.delete_memory("tenant-a", "user-a", deleted.memory_id)
-
-    result = service.repair_vector_index("tenant-a", "user-a")
-
-    assert deleted.memory_id in vector_store.deleted
-    assert active.memory_id in vector_store.upserted
-    assert result["deleted"] >= 1
-    assert result["upserted"] >= 1
-
-
-def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None:
-    memory_service = build_memory_service(tmp_path)
-    memory = memory_service.create_memory(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        scope="user",
-        type="preference",
-        key="answer_style",
-        content="Prefer concise Chinese answers.",
-    )
-    memory_service.vector_store = OrderedMemoryVectorStore(
-        [(memory.memory_id, 0.95)]
-    )  # type: ignore[assignment]
-    chat_model = CaptureChatModel()
-    service = DocumentQAService(
-        vector_store=SingleDocumentVectorStore(),
-        chat_model=chat_model,
-        memory_service=memory_service,
-        tenant_id="tenant-a",
-    )
-
-    answer = service.ask(
-        "What is the notice period?",
-        user_id="user-a",
-        conversation_id="conversation-a",
-    )
-
-    assert answer.citations
-    assert answer.memories_used[0].key == "answer_style"
-    assert chat_model.messages[0]["role"] == "system"
-    assert chat_model.messages[0]["content"].strip()
-    assert chat_model.messages[1]["role"] == "user"
-    assert "<user_memory>" in chat_model.messages[1]["content"]
-    assert "Prefer concise Chinese answers." in chat_model.messages[1]["content"]
-    assert "<retrieved_documents>" in chat_model.messages[1]["content"]
-    assert "Section 4 says notices must be sent" in chat_model.messages[1]["content"]

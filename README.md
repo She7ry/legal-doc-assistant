@@ -43,25 +43,17 @@
 
 ### Agent 工作流
 
-基于 LangGraph 的六阶段法律审查 Agent：
+基于 Tool Calling 的 ReAct-only 法律审查 Agent：
 
 ```
-Plan → Execute → Collect Findings → Build Deliverables → Synthesize Report → Finalize
+Model → Tools → Observe → Model → Grounded Report
 ```
 
-- **LLM Planner**：根据用户目标与文档内容自动规划审查步骤
-- **并行执行**：支持多步骤并行执行，含指数退避重试
-- **ReAct 循环**：执行阶段可启用受控 ReAct 循环，自动补充弱证据
-- **Confirmation Gates**：关键事实需用户确认后才写入正式报告
-- **Matter 管理**：审查结果持久化为 Matter 记录，含 findings、artifacts、risk matrix
+- **ReAct 工具调用**：模型按需调用 `search_documents`、`review_clause`、`check_conflict`
+- **引用重编号**：多个工具返回的引用统一重编号为 `D1/D2/...`，避免来源冲突
+- **Answer Guard**：二次校验引用有效性、过强法律结论和证据缺失
+- **Matter 管理**：审查报告和引用轨迹持久化为 Matter 记录
 - **SSE 实时推送**：任务进度通过 Server-Sent Events 流式推送
-
-生成的交付物包括：
-- 风险矩阵（Risk Matrix）
-- 律师问题清单（Lawyer Questions）
-- 谈判 Checklist
-- 义务日历（Obligation Calendar）
-- 正式审查报告（Formal Report）
 
 ### 条款审查与冲突检测
 
@@ -116,13 +108,10 @@ legal_doc_assistant/
 │   ├── ingestion/                # 文档加载、哈希、持久化
 │   ├── retrieval/                # Qdrant Dense/Sparse 混合检索
 │   ├── skills/                   # 只读 Skill catalog/selector/loader/renderer
-│   ├── agent/                    # 法律 Agent 子系统
+│   ├── agent/                    # ReAct Agent 子系统
 │   │   ├── service.py            # Agent 对外入口
-│   │   ├── planner.py            # LLM 规划器
-│   │   ├── executor.py           # 单步执行器
-│   │   ├── graph.py              # LangGraph 状态与路由
-│   │   ├── workflow.py           # 工作流编排入口
-│   │   └── schemas.py            # Agent 领域模型
+│   │   ├── react_task.py         # ReAct task adapter
+│   │   └── schemas.py            # Agent API 兼容模型
 │   ├── grounding/                # 引用、证据与答案校验
 │   ├── review/                   # 条款分类、审查与冲突规则
 │   ├── services/
@@ -296,16 +285,7 @@ DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
 
 ### Agent 配置
 
-```env
-DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS=3
-DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES=2
-DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS=2,5
-DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED=true
-DOC_ASSISTANT_AGENT_REACT_ENABLED=true
-DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS=2
-```
-
-当 `REACT_ENABLED=true` 时，Agent 执行阶段会在计划 tool call 后运行受控 ReAct 循环：观测缺失引用、guard 警告和弱证据，然后使用白名单内的文档操作（如 `document_qa`、`build_evidence_profile`）修补证据。
+Agent 任务入口复用 Tool Calling 配置。请求里的 `max_steps` 会作为本次 ReAct 工具调用轮次上限传入，默认工具轮次仍由 `DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS` 控制。
 
 ### 记忆配置
 
@@ -480,7 +460,6 @@ $headers = @{
 | `clause_review.txt` | 条款审查与风险评级 |
 | `conflict_check.txt` | 合同/政策冲突检测 |
 | `tool_calling_system.txt` | Tool 使用策略 |
-| `agent_planner.txt` | Agent 规划器指令 |
 | `answer_repair.txt` | 引用不合格时的二次修复 |
 | `legal_issue_spotting.txt` | 法律争点识别 |
 | `lawyer_work_product.txt` | 律师工作底稿生成 |
@@ -490,7 +469,7 @@ $headers = @{
 ### Skill 执行链
 
 ```text
-用户任务 → metadata-only selector → bounded loader → Planner/QA
+用户任务 → metadata-only selector → bounded loader → ReAct/QA
         → 多查询检索与证据充分性检查 → 生成 → AnswerGuard 引用支持校验
 ```
 
@@ -598,21 +577,12 @@ npm.cmd run build
 
 ### Agent 工作流设计
 
-Agent 基于 LangGraph 状态图编排，六个线性节点：
-
-1. **Plan**：LLM Planner 分析目标与文档，生成审查计划
-2. **Execute Steps**：并行执行计划步骤，每步调用 tool registry 中的工具
-3. **Collect Findings**：汇总发现，审计证据完整性
-4. **Build Deliverables**：生成 Matter Profile、artifacts 和 confirmation gates
-5. **Synthesize Report**：综合报告并通过 Answer Guard 校验
-6. **Finalize Result**：确定最终状态（`completed` / `needs_human_review`）
-
-ReAct 循环在 Execute Steps 内部运行，不改变图的拓扑结构。
+Agent 任务入口直接调用 Tool Calling ReAct 循环。模型先判断是否需要工具，再在白名单工具内调用文档检索、条款审查或冲突检测；工具返回的引用统一重编号，最终报告经过 Answer Guard 与证据画像校验后返回。前端展示报告、引用、证据画像和 tool trace，不再展示计划、结构化 findings、artifacts 或人工 gates。
 
 ### 引用与证据链
 
-- 全局 `_CitationRegistry` 管理 `[S1]`、`[S2]` 编号
-- 每条 finding 关联 evidence coverage、support level 和原文位置
+- QA 引用使用 `[S1]`、`[S2]` 编号；Agent ReAct 工具引用统一重编号为 `[D1]`、`[D2]`
+- Evidence profile 将回答拆成可审计主张，并关联原文摘录、位置和支持等级
 - Answer Guard 校验引用有效性，不合格时触发 `answer_repair` 二次修复
 
 ---

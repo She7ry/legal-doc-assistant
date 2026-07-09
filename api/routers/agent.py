@@ -4,10 +4,9 @@ import logging
 from collections.abc import Iterator
 from time import sleep
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from langgraph.errors import GraphInterrupt
 
 from api.agent_tasks import AgentTaskRecord, AgentTaskStatus, AgentTaskStore
 from api.dependencies import (
@@ -16,7 +15,6 @@ from api.dependencies import (
     MatterStoreDep,
     TenantIdDep,
     UserIdDep,
-    require_api_key,
 )
 from api.schemas.requests import AgentTaskRequest, AgentTaskResumeRequest
 from api.schemas.responses import AgentTaskRecordResponse, AgentTaskResponse
@@ -27,7 +25,7 @@ from doc_assistant.matter.store import MatterStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/agent", tags=["agent"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 @router.post(
@@ -63,7 +61,7 @@ def create_agent_task(
     "/tasks/{task_id}/resume",
     response_model=AgentTaskRecordResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Resume an Agent task after required supplemental input is provided",
+    summary="Resume an Agent task after supplemental input",
 )
 def resume_agent_task(
     task_id: str,
@@ -80,7 +78,7 @@ def resume_agent_task(
     if record.status != AgentTaskStatus.NEEDS_INPUT:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Only Agent tasks in needs_input status can be resumed.",
+            detail="Only Agent tasks awaiting supplemental input can be resumed.",
         )
 
     clarification_answers = _clean_text_list(body.clarification_answers)
@@ -177,15 +175,9 @@ def _run_agent_task(
             task_id=task_id,
             matter_id=record.matter_id,
             progress_callback=progress_callback,
-            thread_id=task_id,  # P1-1: checkpoint thread
         )
         response = AgentTaskResponse.from_result(result)
         encoded_response = jsonable_encoder(response)
-    except GraphInterrupt as interrupt_exc:
-        # P1-1: 图在 finalize_result 因确认闸门而中断
-        interrupt_data = interrupt_exc.args[0] if interrupt_exc.args else {}
-        task_store.mark_interrupted(task_id, interrupt_data)
-        return
     except Exception as exc:
         logger.exception("Agent task failed", extra={"task_id": task_id})
         task_store.mark_failed(task_id, f"Failed to run Agent task: {exc}")
@@ -284,6 +276,7 @@ def _agent_task_event_stream(
         record = task_store.get(task_id, tenant_id, user_id)
         if record is None or record.status in {
             AgentTaskStatus.NEEDS_INPUT,
+            AgentTaskStatus.INTERRUPTED,
             AgentTaskStatus.SUCCEEDED,
             AgentTaskStatus.FAILED,
         }:

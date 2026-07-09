@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessageChunk
+from langchain_core.runnables import RunnableLambda
+from langchain_deepseek import ChatDeepSeek
 
 from api.routers.chat import _stream_answer_events
 from doc_assistant.models import language_model
-from doc_assistant.models.language_model import OpenAICompatibleChatModel
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.qa_service import DocumentQAService
 
@@ -38,16 +41,18 @@ class SequentialVectorStore:
         return documents[: k or len(documents)]
 
 
-class StreamingChatModel:
-    def invoke_messages(self, messages):
-        return {"content": "Hello!"}
+class StreamingChatModel(FakeListChatModel):
+    responses: ClassVar[list[str]] = ["Hello!"]
 
-    def invoke(self, prompt=None, *, messages=None):
-        return "Hello!"
+    def stream(self, input, *args, **kwargs):
+        yield AIMessageChunk(content="Hel")
+        yield AIMessageChunk(content="lo!")
 
-    def stream(self, prompt=None, *, messages=None):
-        yield "Hel"
-        yield "lo!"
+
+class StructuredFakeListChatModel(FakeListChatModel):
+    def with_structured_output(self, schema, **kwargs):
+        del kwargs
+        return RunnableLambda(lambda messages: schema.model_validate_json(self.invoke(messages).content))
 
 
 def test_ask_uses_general_chat_when_no_documents_are_found() -> None:
@@ -89,7 +94,7 @@ def test_stream_prepared_answer_falls_back_for_langchain_model() -> None:
     )
     prepared = service.prepare_answer("hello")
 
-    assert list(service.stream_prepared_answer(prepared)) == ["Hello from LangChain."]
+    assert "".join(service.stream_prepared_answer(prepared)) == "Hello from LangChain."
 
 
 def test_stream_answer_events_emit_metadata_delta_and_done() -> None:
@@ -165,15 +170,7 @@ def test_complex_question_uses_multi_query_retrieval_and_records_skill_metadata(
 
 
 def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
-    class CountingChatModel:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def invoke_messages(self, messages):
-            self.calls += 1
-            return {"content": "initial"}
-
-    chat_model = CountingChatModel()
+    chat_model = FakeListChatModel(responses=["unused"])
     service = DocumentQAService(vector_store=EmptyVectorStore(), chat_model=chat_model)
     prepared = service.prepare_answer("hello")
     prepared = type(prepared)(
@@ -196,7 +193,6 @@ def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
 
     assert "[S9]" not in answer.content
     assert "[S1]" in answer.content
-    assert chat_model.calls == 0
 
 
 def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() -> None:
@@ -210,7 +206,7 @@ def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() 
     )
     service = DocumentQAService(
         vector_store=vector_store,
-        chat_model=FakeListChatModel(
+        chat_model=StructuredFakeListChatModel(
             responses=[
                 """
                 {
@@ -252,6 +248,20 @@ def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() 
     assert "[S1]" in answer.content
 
 
+def test_review_clause_fails_safe_on_invalid_structured_output() -> None:
+    service = DocumentQAService(
+        vector_store=StaticVectorStore(
+            [Document(page_content="Termination text.", metadata={"file_name": "contract.pdf"})]
+        ),
+        chat_model=StructuredFakeListChatModel(responses=["not json"]),
+    )
+
+    answer = service.review_clause("termination", top_k=1)
+
+    assert answer.metadata["needs_human_review"] is True
+    assert "structured_output_error" in answer.metadata
+
+
 def test_check_conflict_returns_structured_conflict_matrix() -> None:
     vector_store = SequentialVectorStore(
         [
@@ -271,7 +281,7 @@ def test_check_conflict_returns_structured_conflict_matrix() -> None:
     )
     service = DocumentQAService(
         vector_store=vector_store,
-        chat_model=FakeListChatModel(
+        chat_model=StructuredFakeListChatModel(
             responses=[
                 """
                 {
@@ -310,7 +320,7 @@ def test_check_conflict_returns_structured_conflict_matrix() -> None:
     assert "[P1]" in answer.content
 
 
-def test_deepseek_provider_uses_openai_compatible_defaults(monkeypatch) -> None:
+def test_deepseek_provider_uses_native_langchain_model(monkeypatch) -> None:
     monkeypatch.setattr(
         language_model,
         "settings",
@@ -332,82 +342,6 @@ def test_deepseek_provider_uses_openai_compatible_defaults(monkeypatch) -> None:
 
     model = language_model.build_chat_model()
 
-    assert isinstance(model, OpenAICompatibleChatModel)
-    assert model.provider == "DeepSeek"
-    assert model.model == "deepseek-v4-pro"
-    assert model.api_key == "test-key"
-    assert model.base_url == "https://api.deepseek.com"
-
-
-def test_openai_compatible_model_streams_openai_style_chunks(monkeypatch) -> None:
-    calls: list[dict] = []
-
-    class FakeResponse:
-        status_code = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback) -> None:
-            return None
-
-        def iter_lines(self, decode_unicode: bool):
-            return iter(
-                [
-                    'data: {"choices":[{"delta":{"content":"Hel"}}]}',
-                    'data: {"choices":[{"delta":{"content":"lo"}}]}',
-                    "data: [DONE]",
-                ]
-            )
-
-    def fake_post(*args, **kwargs):
-        calls.append(kwargs)
-        return FakeResponse()
-
-    monkeypatch.setattr(language_model.requests, "post", fake_post)
-    model = OpenAICompatibleChatModel(
-        provider="DeepSeek",
-        model="deepseek-v4-pro",
-        api_key="test-key",
-        base_url="https://example.test/v1",
-        temperature=0,
-    )
-
-    assert list(model.stream("prompt")) == ["Hel", "lo"]
-    assert calls[0]["json"]["messages"] == [{"role": "user", "content": "prompt"}]
-    assert calls[0]["json"]["stream"] is True
-    assert calls[0]["stream"] is True
-
-
-def test_openai_compatible_model_invokes_messages_with_tools(monkeypatch) -> None:
-    calls: list[dict] = []
-
-    class FakeResponse:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": "final"}}]}
-
-    def fake_post(*args, **kwargs):
-        calls.append(kwargs)
-        return FakeResponse()
-
-    monkeypatch.setattr(language_model.requests, "post", fake_post)
-    model = OpenAICompatibleChatModel(
-        provider="DeepSeek",
-        model="deepseek-v4-pro",
-        api_key="test-key",
-        base_url="https://example.test",
-        temperature=0,
-    )
-    tools = [{"type": "function", "function": {"name": "search_documents", "parameters": {}}}]
-
-    message = model.invoke_messages(
-        [{"role": "user", "content": "question"}],
-        tools=tools,
-    )
-
-    assert message == {"content": "final"}
-    assert calls[0]["json"]["tools"] == tools
-    assert calls[0]["json"]["tool_choice"] == "auto"
-    assert calls[0]["json"]["stream"] is False
+    assert isinstance(model, ChatDeepSeek)
+    assert model.model_name == "deepseek-v4-pro"
+    assert model.openai_api_base == "https://api.deepseek.com"

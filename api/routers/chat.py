@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
 from api.dependencies import (
@@ -11,7 +11,6 @@ from api.dependencies import (
     TenantIdDep,
     ToolCallingServiceDep,
     UserIdDep,
-    require_api_key,
 )
 from api.routers.helpers import get_fields_set
 from api.schemas.requests import (
@@ -36,7 +35,7 @@ from api.sse import SSE_HEADERS, format_sse
 from doc_assistant.config.settings import settings
 from doc_assistant.services.qa_service import DocumentQAService, PreparedQAAnswer
 
-router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 @router.get(

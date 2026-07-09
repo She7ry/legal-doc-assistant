@@ -223,9 +223,7 @@ def _looks_like_material_paragraph(paragraph: str) -> bool:
     lowered = paragraph.casefold()
     if lowered.startswith(("answer:", "assistant:", "note:")):
         return False
-    if len(paragraph) < 40:
-        return False
-    return True
+    return len(paragraph) >= 40
 
 
 def _fact_supported_nearby(

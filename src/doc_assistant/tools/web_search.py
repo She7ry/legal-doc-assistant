@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from html.parser import HTMLParser
 import re
 import time
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+from langchain_core.tools import InjectedToolCallId
+from pydantic import BaseModel, Field
 from requests.adapters import HTTPAdapter
 
 from doc_assistant.config.settings import settings
+from doc_assistant.schemas.citation import Citation
 
 DUCKDUCKGO_HTML_URL = "https://duckduckgo.com/html/"
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
@@ -29,6 +33,34 @@ class WebSearchResult:
     snippet: str = ""
     published_at: str | None = None
     source: str | None = None
+
+
+@dataclass(frozen=True)
+class WebSource:
+    """A web result after conversation-scoped source IDs are assigned."""
+
+    source_id: str
+    title: str
+    url: str
+    snippet: str = ""
+    published_at: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class WebSearchExecution:
+    """Validated query and raw web results produced by one tool execution."""
+
+    query: str
+    results: tuple[WebSearchResult, ...]
+
+
+class WebSearchInput(BaseModel):
+    query: str = Field(min_length=1, max_length=300)
+    recency_days: int | None = Field(default=None, ge=1, le=365)
+    domains: list[str] = Field(default_factory=list, max_length=5)
+    max_results: int | None = Field(default=None, ge=1, le=10)
+    tool_call_id: Annotated[str, InjectedToolCallId] = ""
 
 
 class WebSearchClient:
@@ -107,6 +139,45 @@ class DisabledWebSearchClient(WebSearchClient):
         domains: list[str] | None = None,
     ) -> list[WebSearchResult]:
         raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
+
+
+class WebSearchTool:
+    """Execute web_search against an injected search client."""
+
+    def __init__(self, client: WebSearchClient, *, default_max_results: int) -> None:
+        self.client = client
+        self.default_max_results = default_max_results
+
+    def execute(
+        self,
+        query: str,
+        *,
+        max_results: int | None = None,
+        recency_days: int | None = None,
+        domains: list[str] | None = None,
+    ) -> WebSearchExecution:
+        if isinstance(self.client, DisabledWebSearchClient):
+            raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
+
+        query = _required_string({"query": query}, "query", max_length=300)
+        top_k = _clamp_int(int(max_results or self.default_max_results), minimum=1, maximum=10)
+        if recency_days is not None:
+            recency_days = _clamp_int(int(recency_days), minimum=1, maximum=365)
+        if domains is not None and not isinstance(domains, list):
+            raise ValueError("domains must be a list of domain strings.")
+        clean_domains = [str(domain).strip() for domain in domains or [] if str(domain).strip()]
+
+        return WebSearchExecution(
+            query=query,
+            results=tuple(
+                self.client.search(
+                    query,
+                    max_results=top_k,
+                    recency_days=recency_days,
+                    domains=clean_domains,
+                )
+            ),
+        )
 
 
 class DuckDuckGoSearchClient(WebSearchClient):
@@ -273,6 +344,33 @@ def build_web_search_client() -> WebSearchClient:
     raise ValueError(f"Unsupported web search provider: {settings.web_search_provider}")
 
 
+def web_source(source_id: str, result: WebSearchResult) -> WebSource:
+    return WebSource(
+        source_id=source_id,
+        title=result.title,
+        url=result.url,
+        snippet=result.snippet,
+        published_at=result.published_at,
+        source=result.source,
+    )
+
+
+def web_source_citations(sources: list[WebSource]) -> list[Citation]:
+    citations = []
+    for source in sources:
+        preview = source.snippet or source.title or source.url
+        citations.append(
+            Citation(
+                source_id=source.source_id,
+                file_name=source.title or source.url,
+                preview=preview,
+                source_type="web",
+                exact_quote=preview,
+            )
+        )
+    return citations
+
+
 class _DuckDuckGoHTMLParser(HTMLParser):
     """解析 DuckDuckGo HTML 搜索结果页，提取 title / url / snippet。"""
 
@@ -380,6 +478,19 @@ def _get_with_retries(
     if last_error:
         raise last_error
     raise RuntimeError("Search request failed without a response.")
+
+
+def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:
+    value = str(arguments.get(name) or "").strip()
+    if not value:
+        raise ValueError(f"{name} is required.")
+    if len(value) > max_length:
+        raise ValueError(f"{name} must be {max_length} characters or fewer.")
+    return value
+
+
+def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
 
 
 def _duckduckgo_recency_filter(recency_days: int | None) -> str | None:
