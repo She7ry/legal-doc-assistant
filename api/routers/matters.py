@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
-from api.dependencies import MatterStoreDep, TenantIdDep, UserIdDep, require_api_key
+from api.dependencies import MatterStoreDep, TenantIdDep, UserIdDep
 from api.routers.helpers import get_fields_set, require_found
 from api.schemas.requests import (
     MatterArtifactUpdateRequest,
@@ -22,13 +22,13 @@ from doc_assistant.matter.export import (
     artifact_docx_filename,
     artifact_markdown_filename,
     artifact_pdf_filename,
-    render_artifacts_zip,
     render_artifact_docx,
     render_artifact_markdown,
     render_artifact_pdf,
+    render_artifacts_zip,
 )
 
-router = APIRouter(prefix="/matters", tags=["matters"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/matters", tags=["matters"])
 
 _MATTER_404 = "Matter not found."
 
@@ -37,6 +37,14 @@ def _get_matter(matter_store, matter_id, tenant_id, user_id, **kwargs):
     return require_found(
         matter_store.get(matter_id, tenant_id, user_id, **kwargs),
         _MATTER_404,
+    )
+
+
+def _download_response(content: bytes | str, media_type: str, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -281,11 +289,7 @@ def export_matter_artifacts(
 
     content = render_artifacts_zip(matter=matter, artifacts=artifacts, export_format=format)
     filename = artifact_bundle_filename(matter_id, format)
-    return Response(
-        content=content,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return _download_response(content, "application/zip", filename)
 
 
 @router.get(
@@ -313,25 +317,17 @@ def export_matter_artifact(
     if format == "docx":
         content = render_artifact_docx(matter=matter, artifact=artifact)
         filename = artifact_docx_filename(matter_id, artifact_id, artifact.version)
-        return Response(
-            content=content,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        return _download_response(
+            content,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename,
         )
 
     if format == "pdf":
         content = render_artifact_pdf(matter=matter, artifact=artifact)
         filename = artifact_pdf_filename(matter_id, artifact_id, artifact.version)
-        return Response(
-            content=content,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        return _download_response(content, "application/pdf", filename)
 
     content = render_artifact_markdown(matter=matter, artifact=artifact)
     filename = artifact_markdown_filename(matter_id, artifact_id, artifact.version)
-    return Response(
-        content=content,
-        media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return _download_response(content, "text/markdown; charset=utf-8", filename)

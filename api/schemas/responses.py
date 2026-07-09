@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class _AttrModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True, use_enum_values=True)
 
 
 class CitationOut(BaseModel):
@@ -26,7 +30,7 @@ class CitationOut(BaseModel):
     retrieval_relevance: float | None = None
 
     @classmethod
-    def from_citation(cls, citation) -> "CitationOut":
+    def from_citation(cls, citation) -> CitationOut:
         return cls(
             source_id=citation.source_id,
             file_name=citation.file_name,
@@ -48,7 +52,7 @@ class CitationOut(BaseModel):
         )
 
 
-class MemoryUsageOut(BaseModel):
+class MemoryUsageOut(_AttrModel):
     memory_id: str
     type: str
     key: str
@@ -61,19 +65,8 @@ class MemoryUsageOut(BaseModel):
     superseded_from_content: str | None = None
 
     @classmethod
-    def from_usage(cls, usage) -> "MemoryUsageOut":
-        return cls(
-            memory_id=usage.memory_id,
-            type=usage.type,
-            key=usage.key,
-            content=usage.content,
-            source=usage.source,
-            confidence=usage.confidence,
-            scope=usage.scope,
-            score=usage.score,
-            superseded_conflicting=getattr(usage, "superseded_conflicting", False),
-            superseded_from_content=getattr(usage, "superseded_from_content", None),
-        )
+    def from_usage(cls, usage) -> MemoryUsageOut:
+        return cls.model_validate(usage)
 
 
 class AskResponse(BaseModel):
@@ -85,7 +78,7 @@ class AskResponse(BaseModel):
     evidence: dict[str, Any] | None = None
 
 
-class WebSourceOut(BaseModel):
+class WebSourceOut(_AttrModel):
     source_id: str
     title: str
     url: str
@@ -94,31 +87,19 @@ class WebSourceOut(BaseModel):
     source: str | None = None
 
     @classmethod
-    def from_source(cls, source) -> "WebSourceOut":
-        return cls(
-            source_id=source.source_id,
-            title=source.title,
-            url=source.url,
-            snippet=source.snippet,
-            published_at=source.published_at,
-            source=source.source,
-        )
+    def from_source(cls, source) -> WebSourceOut:
+        return cls.model_validate(source)
 
 
-class ToolCallOut(BaseModel):
+class ToolCallOut(_AttrModel):
     tool_call_id: str
     name: str
     arguments: dict[str, Any]
     result: dict[str, Any]
 
     @classmethod
-    def from_trace(cls, trace) -> "ToolCallOut":
-        return cls(
-            tool_call_id=trace.tool_call_id,
-            name=trace.name,
-            arguments=trace.arguments,
-            result=trace.result,
-        )
+    def from_trace(cls, trace) -> ToolCallOut:
+        return cls.model_validate(trace)
 
 
 class ToolChatResponse(AskResponse):
@@ -126,7 +107,7 @@ class ToolChatResponse(AskResponse):
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
 
 
-class ConversationOut(BaseModel):
+class ConversationOut(_AttrModel):
     conversation_id: str
     title: str | None = None
     status: str
@@ -135,15 +116,8 @@ class ConversationOut(BaseModel):
     message_count: int = 0
 
     @classmethod
-    def from_conversation(cls, conversation) -> "ConversationOut":
-        return cls(
-            conversation_id=conversation.conversation_id,
-            title=conversation.title,
-            status=conversation.status,
-            created_at=conversation.created_at,
-            updated_at=conversation.updated_at,
-            message_count=conversation.message_count,
-        )
+    def from_conversation(cls, conversation) -> ConversationOut:
+        return cls.model_validate(conversation)
 
 
 class ConversationListResponse(BaseModel):
@@ -163,26 +137,6 @@ class ConversationMessagesResponse(BaseModel):
     messages: list[ConversationMessageOut] = Field(default_factory=list)
 
 
-class AgentPlanStepOut(BaseModel):
-    step_id: str
-    title: str
-    purpose: str
-    tool: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    requires_confirmation: bool = False
-
-    @classmethod
-    def from_step(cls, step) -> "AgentPlanStepOut":
-        return cls(
-            step_id=step.step_id,
-            title=step.title,
-            purpose=step.purpose,
-            tool=step.tool,
-            arguments=step.arguments,
-            requires_confirmation=step.requires_confirmation,
-        )
-
-
 class AgentStepResultOut(BaseModel):
     step_id: str
     title: str
@@ -195,7 +149,7 @@ class AgentStepResultOut(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_step(cls, step) -> "AgentStepResultOut":
+    def from_step(cls, step) -> AgentStepResultOut:
         return cls(
             step_id=step.step_id,
             title=step.title,
@@ -213,7 +167,7 @@ class AgentStepResultOut(BaseModel):
 # Shared Finding / Artifact bases to avoid field duplication
 # ------------------------------------------------------------------
 
-class _FindingBase(BaseModel):
+class _FindingBase(_AttrModel):
     finding_id: str
     category: str
     severity: str
@@ -232,32 +186,6 @@ class _FindingBase(BaseModel):
     status: str = "open"
 
 
-class AgentFindingOut(_FindingBase):
-    evidence: list[dict[str, Any]] = Field(default_factory=list)
-
-    @classmethod
-    def from_finding(cls, finding) -> "AgentFindingOut":
-        return cls(
-            finding_id=finding.finding_id,
-            category=finding.category,
-            severity=finding.severity,
-            summary=finding.summary,
-            citations=finding.citations,
-            recommended_action=finding.recommended_action,
-            needs_human_review=finding.needs_human_review,
-            source_step_id=finding.source_step_id,
-            clause_reference=getattr(finding, "clause_reference", ""),
-            evidence_coverage=getattr(finding, "evidence_coverage", "missing"),
-            support_level=getattr(finding, "support_level", "missing"),
-            unsupported_reason=getattr(finding, "unsupported_reason", ""),
-            source_quote=getattr(finding, "source_quote", ""),
-            location_label=getattr(finding, "location_label", ""),
-            human_review_status=getattr(finding, "human_review_status", "pending"),
-            status=getattr(finding, "status", "open"),
-            evidence=getattr(finding, "evidence", []),
-        )
-
-
 class MatterFindingRecordOut(_FindingBase):
     matter_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -266,67 +194,11 @@ class MatterFindingRecordOut(_FindingBase):
     updated_at: datetime
 
     @classmethod
-    def from_record(cls, finding) -> "MatterFindingRecordOut":
-        return cls(
-            finding_id=finding.finding_id,
-            matter_id=finding.matter_id,
-            category=finding.category,
-            severity=finding.severity,
-            summary=finding.summary,
-            recommended_action=finding.recommended_action,
-            citations=finding.citations,
-            source_step_id=finding.source_step_id,
-            clause_reference=finding.clause_reference,
-            evidence_coverage=finding.evidence_coverage,
-            support_level=finding.support_level,
-            unsupported_reason=finding.unsupported_reason,
-            source_quote=finding.source_quote,
-            location_label=finding.location_label,
-            needs_human_review=finding.needs_human_review,
-            human_review_status=finding.human_review_status,
-            status=finding.status,
-            metadata=finding.metadata,
-            source_task_id=finding.source_task_id,
-            created_at=finding.created_at,
-            updated_at=finding.updated_at,
-        )
+    def from_record(cls, finding) -> MatterFindingRecordOut:
+        return cls.model_validate(finding)
 
 
-class MatterProfileOut(BaseModel):
-    matter_id: str
-    document_type: str = "Unknown"
-    parties: list[str] = Field(default_factory=list)
-    user_side: str = ""
-    governing_law: str = ""
-    jurisdiction: str = ""
-    key_dates: list[dict[str, Any]] = Field(default_factory=list)
-    review_scope: list[str] = Field(default_factory=list)
-    open_questions: list[str] = Field(default_factory=list)
-    confidence: str = "Low"
-    citations: list[str] = Field(default_factory=list)
-    source_step_id: str = ""
-    confirmation_gates: list[dict[str, Any]] = Field(default_factory=list)
-
-    @classmethod
-    def from_profile(cls, profile) -> "MatterProfileOut":
-        return cls(
-            matter_id=profile.matter_id,
-            document_type=profile.document_type,
-            parties=profile.parties,
-            user_side=profile.user_side,
-            governing_law=profile.governing_law,
-            jurisdiction=profile.jurisdiction,
-            key_dates=profile.key_dates,
-            review_scope=profile.review_scope,
-            open_questions=profile.open_questions,
-            confidence=profile.confidence,
-            citations=profile.citations,
-            source_step_id=profile.source_step_id,
-            confirmation_gates=getattr(profile, "confirmation_gates", []),
-        )
-
-
-class _ArtifactBase(BaseModel):
+class _ArtifactBase(_AttrModel):
     artifact_id: str
     artifact_type: str
     title: str
@@ -335,21 +207,6 @@ class _ArtifactBase(BaseModel):
     source_finding_ids: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class AgentArtifactOut(_ArtifactBase):
-    @classmethod
-    def from_artifact(cls, artifact) -> "AgentArtifactOut":
-        return cls(
-            artifact_id=artifact.artifact_id,
-            artifact_type=artifact.artifact_type,
-            title=artifact.title,
-            summary=artifact.summary,
-            items=artifact.items,
-            source_finding_ids=artifact.source_finding_ids,
-            citations=artifact.citations,
-            metadata=artifact.metadata,
-        )
 
 
 class MatterArtifactRecordOut(_ArtifactBase):
@@ -361,58 +218,11 @@ class MatterArtifactRecordOut(_ArtifactBase):
     updated_at: datetime
 
     @classmethod
-    def from_record(cls, artifact) -> "MatterArtifactRecordOut":
-        return cls(
-            artifact_id=artifact.artifact_id,
-            matter_id=artifact.matter_id,
-            artifact_type=artifact.artifact_type,
-            title=artifact.title,
-            summary=artifact.summary,
-            items=artifact.items,
-            source_finding_ids=artifact.source_finding_ids,
-            citations=artifact.citations,
-            metadata=artifact.metadata,
-            source_task_id=artifact.source_task_id,
-            version=artifact.version,
-            status=artifact.status,
-            created_at=artifact.created_at,
-            updated_at=artifact.updated_at,
-        )
+    def from_record(cls, artifact) -> MatterArtifactRecordOut:
+        return cls.model_validate(artifact)
 
 
-class AgentConfirmationGateOut(BaseModel):
-    gate_id: str
-    gate_type: str
-    title: str
-    question: str
-    status: str = "pending"
-    priority: str = "normal"
-    required: bool = True
-    reason: str = ""
-    related_finding_ids: list[str] = Field(default_factory=list)
-    related_artifact_ids: list[str] = Field(default_factory=list)
-    citations: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @classmethod
-    def from_gate(cls, gate) -> "AgentConfirmationGateOut":
-        return cls(
-            gate_id=gate.gate_id,
-            gate_type=gate.gate_type,
-            title=gate.title,
-            question=gate.question,
-            status=gate.status,
-            priority=gate.priority,
-            required=gate.required,
-            reason=gate.reason,
-            related_finding_ids=gate.related_finding_ids,
-            related_artifact_ids=gate.related_artifact_ids,
-            citations=gate.citations,
-            metadata=gate.metadata,
-        )
-
-
-class MatterRecordOut(BaseModel):
+class MatterRecordOut(_AttrModel):
     matter_id: str
     title: str
     status: str
@@ -424,29 +234,17 @@ class MatterRecordOut(BaseModel):
     artifacts: list[MatterArtifactRecordOut] = Field(default_factory=list)
     findings: list[MatterFindingRecordOut] = Field(default_factory=list)
 
+    @field_validator("artifacts", "findings", mode="before")
     @classmethod
-    def from_record(cls, matter) -> "MatterRecordOut":
-        return cls(
-            matter_id=matter.matter_id,
-            title=matter.title,
-            status=matter.status,
-            matter_profile=matter.matter_profile,
-            source_task_id=matter.source_task_id,
-            latest_task_id=matter.latest_task_id,
-            created_at=matter.created_at,
-            updated_at=matter.updated_at,
-            artifacts=[
-                MatterArtifactRecordOut.from_record(a)
-                for a in matter.artifacts or []
-            ],
-            findings=[
-                MatterFindingRecordOut.from_record(f)
-                for f in getattr(matter, "findings", None) or []
-            ],
-        )
+    def _none_to_list(cls, value):
+        return value or []
+
+    @classmethod
+    def from_record(cls, matter) -> MatterRecordOut:
+        return cls.model_validate(matter)
 
 
-class MatterEventOut(BaseModel):
+class MatterEventOut(_AttrModel):
     event_id: str
     matter_id: str
     event_type: str
@@ -458,18 +256,8 @@ class MatterEventOut(BaseModel):
     created_at: datetime
 
     @classmethod
-    def from_record(cls, event) -> "MatterEventOut":
-        return cls(
-            event_id=event.event_id,
-            matter_id=event.matter_id,
-            event_type=event.event_type,
-            entity_type=event.entity_type,
-            entity_id=event.entity_id,
-            old_value=event.old_value,
-            new_value=event.new_value,
-            actor=event.actor,
-            created_at=event.created_at,
-        )
+    def from_record(cls, event) -> MatterEventOut:
+        return cls.model_validate(event)
 
 
 class MatterListResponse(BaseModel):
@@ -481,53 +269,39 @@ class AgentTaskResponse(BaseModel):
     task_id: str
     status: str
     objective: str
-    plan: list[AgentPlanStepOut]
     steps: list[AgentStepResultOut]
-    findings: list[AgentFindingOut]
-    missing_information: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
     human_review_required: bool = True
     report: str
     citations: list[CitationOut] = Field(default_factory=list)
     confidence: str | None = None
     guard_warnings: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] | None = None
-    matter_profile: MatterProfileOut | None = None
-    artifacts: list[AgentArtifactOut] = Field(default_factory=list)
-    confirmation_gates: list[AgentConfirmationGateOut] = Field(default_factory=list)
+    matter_profile: dict[str, Any] | None = None
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_result(cls, result) -> "AgentTaskResponse":
-        matter_profile = (
-            MatterProfileOut.from_profile(result.matter_profile)
-            if result.matter_profile
-            else None
-        )
+    def from_result(cls, result) -> AgentTaskResponse:
         return cls(
             task_id=result.task_id,
             status=result.status,
             objective=result.objective,
-            plan=[AgentPlanStepOut.from_step(s) for s in result.plan],
             steps=[AgentStepResultOut.from_step(s) for s in result.steps],
-            findings=[AgentFindingOut.from_finding(f) for f in result.findings],
-            missing_information=result.missing_information,
+            findings=result.findings,
             human_review_required=result.human_review_required,
             report=result.report,
             citations=[CitationOut.from_citation(c) for c in result.citations],
             confidence=result.confidence,
             guard_warnings=result.guard_warnings,
             evidence=result.evidence,
-            matter_profile=matter_profile,
-            artifacts=[AgentArtifactOut.from_artifact(a) for a in result.artifacts],
-            confirmation_gates=[
-                AgentConfirmationGateOut.from_gate(g)
-                for g in getattr(result, "confirmation_gates", [])
-            ],
+            matter_profile=result.matter_profile,
+            artifacts=result.artifacts,
             metadata=result.metadata,
         )
 
 
-class AgentTaskEventOut(BaseModel):
+class AgentTaskEventOut(_AttrModel):
     event_id: int
     task_id: str
     event_type: str
@@ -538,19 +312,14 @@ class AgentTaskEventOut(BaseModel):
     step_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("payload", mode="before")
     @classmethod
-    def from_event(cls, event) -> "AgentTaskEventOut":
-        return cls(
-            event_id=event.event_id,
-            task_id=event.task_id,
-            event_type=event.event_type,
-            stage=event.stage,
-            progress=event.progress,
-            message=event.message,
-            created_at=event.created_at,
-            step_id=event.step_id,
-            payload=event.payload or {},
-        )
+    def _payload_or_empty(cls, value):
+        return value or {}
+
+    @classmethod
+    def from_event(cls, event) -> AgentTaskEventOut:
+        return cls.model_validate(event)
 
 
 class AgentTaskRecordResponse(BaseModel):
@@ -572,7 +341,7 @@ class AgentTaskRecordResponse(BaseModel):
     events: list[AgentTaskEventOut] = Field(default_factory=list)
 
     @classmethod
-    def from_record(cls, record) -> "AgentTaskRecordResponse":
+    def from_record(cls, record) -> AgentTaskRecordResponse:
         result = AgentTaskResponse(**record.result) if record.result else None
         return cls(
             task_id=record.task_id,
@@ -639,7 +408,7 @@ class ConflictCheckResponse(BaseModel):
     guard_warnings: list[str] = Field(default_factory=list)
 
 
-class IngestResponse(BaseModel):
+class IngestResponse(_AttrModel):
     file_id: str
     file_name: str
     document_count: int
@@ -666,21 +435,7 @@ class IngestJobResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_record(cls, record) -> "IngestJobResponse":
-        result = None
-        if record.result is not None:
-            result = IngestResponse(
-                file_id=record.result.file_id,
-                file_name=record.result.file_name,
-                document_count=record.result.document_count,
-                chunk_count=record.result.chunk_count,
-                document_key=record.result.document_key,
-                document_version=record.result.document_version,
-                file_extension=record.result.file_extension,
-                page_count=record.result.page_count,
-                skipped=record.result.skipped,
-                warnings=record.result.warnings,
-            )
+    def from_record(cls, record) -> IngestJobResponse:
         return cls(
             job_id=record.job_id,
             status=record.status.value,
@@ -690,7 +445,7 @@ class IngestJobResponse(BaseModel):
             submitted_at=record.submitted_at,
             started_at=record.started_at,
             completed_at=record.completed_at,
-            result=result,
+            result=IngestResponse.model_validate(record.result) if record.result else None,
             error=record.error,
             warnings=record.warnings or [],
         )
@@ -729,13 +484,13 @@ class DocumentTextResponse(BaseModel):
     total_chunks: int
 
 
-class MemoryOut(BaseModel):
+class MemoryOut(_AttrModel):
     memory_id: str
     scope: str
     type: str
     key: str
     content: str
-    value: dict[str, Any] | None
+    value: dict[str, Any] | None = Field(validation_alias="value_json")
     source: str
     confidence: float
     created_at: datetime
@@ -751,28 +506,8 @@ class MemoryOut(BaseModel):
     superseded_from_content: str | None = None
 
     @classmethod
-    def from_memory(cls, memory) -> "MemoryOut":
-        return cls(
-            memory_id=memory.memory_id,
-            scope=memory.scope,
-            type=memory.type,
-            key=memory.key,
-            content=memory.content,
-            value=memory.value_json,
-            source=memory.source,
-            confidence=memory.confidence,
-            created_at=memory.created_at,
-            updated_at=memory.updated_at,
-            expires_at=memory.expires_at,
-            visibility=memory.visibility,
-            supersedes_id=memory.supersedes_id,
-            status=memory.status,
-            source_message_id=memory.source_message_id,
-            conversation_id=memory.conversation_id,
-            task_id=memory.task_id,
-            superseded_conflicting=getattr(memory, "superseded_conflicting", False),
-            superseded_from_content=getattr(memory, "superseded_from_content", None),
-        )
+    def from_memory(cls, memory) -> MemoryOut:
+        return cls.model_validate(memory)
 
 
 class MemoryListResponse(BaseModel):

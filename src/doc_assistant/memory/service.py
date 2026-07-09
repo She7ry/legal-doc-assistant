@@ -1,43 +1,14 @@
-"""用户记忆服务：对话历史、长期记忆写入/检索、自动摘要与衰减维护。
-
-MemoryService 在 QA / ToolCalling 提问前注入相关记忆，在回答后提取新记忆候选。
-底层 ``MemoryStore``（SQLite）存结构化记录，``MemoryVectorStore`` 做语义检索去重。
-"""
+"""Lean memory service: explicit user memories plus conversation history."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Callable
-from datetime import datetime, timezone
-from threading import Lock
+import re
+from datetime import datetime
 from uuid import uuid4
 
 from doc_assistant.config.settings import settings
-from doc_assistant.memory._conflict import (
-    _is_conflicting_memory_update,
-    _is_equivalent_memory,
-    _with_supersede_conflict_metadata,
-)
-from doc_assistant.memory._prompt import (
-    _estimate_prompt_tokens,
-    _format_memory_prompt_line,
-    _prompt_candidate_rank,
-    _truncate_to_prompt_tokens,
-)
-from doc_assistant.memory._retrieval import (
-    _filter_memory_candidates,
-    _is_semantic_duplicate_memory,
-    _memory_similarity_query,
-    _vector_candidate_needs_hydration,
-)
-from doc_assistant.memory.maintenance import (
-    _default_expires_at,
-    _memory_retention_rank,
-)
-from doc_assistant.memory.policy import (
-    extract_memory_write_intents,
-    extract_task_memory_write_intents,
-)
 from doc_assistant.memory.schemas import (
     ConversationRecord,
     MemoryCandidate,
@@ -48,44 +19,41 @@ from doc_assistant.memory.schemas import (
     MessageRecord,
 )
 from doc_assistant.memory.store import MemoryStore
-from doc_assistant.memory.summarization import (
-    _conversation_summary_key,
-    _summarize_conversation,
-    _summarize_conversation_llm_structured,
-    _summary_message_count,
-)
 from doc_assistant.memory.vector_store import MemoryVectorStore
 
 logger = logging.getLogger(__name__)
+
 _RECENT_HISTORY_WITH_SUMMARY_LIMIT = 8
+_SUMMARY_MAX_CHARS = 2000
+_EXPLICIT_MEMORY_MARKERS = (
+    "please remember",
+    "remember that",
+    "remember my",
+    "remember",
+    "from now on",
+    "going forward",
+    "always answer",
+    "请记住",
+    "帮我记住",
+    "记住",
+    "以后",
+)
 
 
 class MemoryService:
-    """用户记忆与对话历史的业务编排层。
-
-    主要能力：
-    - 问答前：检索相关记忆、加载/合并对话历史，注入 prompt
-    - 问答后：规则 + LLM 抽取新记忆、写入 SQLite 与向量索引
-    - 维护：过期清理、置信度衰减、冲突记忆 supersede、自动摘要
-
-    QA / ToolCalling / Agent 通过本类共享同一套记忆，而非各自读写数据库。
-    """
+    """Small facade over SQLite memory rows and optional vector lookup."""
 
     def __init__(
         self,
         store: MemoryStore | None = None,
         vector_store: MemoryVectorStore | None = None,
-        memory_extractor: Callable[[str], list[MemoryWriteIntent]] | None = None,
+        memory_extractor=None,
         summary_model: object | None = None,
-        summary_model_factory: Callable[[], object] | None = None,
+        summary_model_factory=None,
     ) -> None:
+        del memory_extractor, summary_model, summary_model_factory
         self.store = store or MemoryStore()
         self.vector_store = vector_store
-        self.memory_extractor = memory_extractor
-        self._summary_model = summary_model
-        self._summary_model_factory = summary_model_factory
-        self._maintenance_lock = Lock()
-        self._maintenance_last_run: dict[tuple[str, str, str], datetime] = {}
 
     def ensure_context(self, tenant_id: str, user_id: str, conversation_id: str | None) -> str:
         resolved_conversation_id = conversation_id or uuid4().hex
@@ -158,14 +126,13 @@ class MemoryService:
         conversation_id: str,
         content: str,
     ) -> str:
-        message = self.store.add_message(
+        return self.store.add_message(
             tenant_id=tenant_id,
             user_id=user_id,
             conversation_id=conversation_id,
             role="user",
             content=content,
-        )
-        return message.message_id
+        ).message_id
 
     def record_assistant_message(
         self,
@@ -175,14 +142,13 @@ class MemoryService:
         conversation_id: str,
         content: str,
     ) -> str:
-        message = self.store.add_message(
+        return self.store.add_message(
             tenant_id=tenant_id,
             user_id=user_id,
             conversation_id=conversation_id,
             role="assistant",
             content=content,
-        )
-        return message.message_id
+        ).message_id
 
     def load_conversation_history(
         self,
@@ -202,6 +168,7 @@ class MemoryService:
                 type="task_state",
                 key=_conversation_summary_key(conversation_id),
             )
+
         message_limit = max(0, limit)
         if summary_memory:
             message_limit = min(message_limit, _RECENT_HISTORY_WITH_SUMMARY_LIMIT)
@@ -211,12 +178,15 @@ class MemoryService:
             conversation_id,
             limit=message_limit,
         )
+
         history = []
         if summary_memory and summary_memory.content.strip():
             history.append({"role": "system", "content": summary_memory.content})
-        for message in messages:
-            if message.role in {"user", "assistant"} and message.content.strip():
-                history.append({"role": message.role, "content": message.content})
+        history.extend(
+            {"role": message.role, "content": message.content}
+            for message in messages
+            if message.role in {"user", "assistant"} and message.content.strip()
+        )
         return history
 
     def summarize_conversation_to_memory(
@@ -227,31 +197,13 @@ class MemoryService:
         conversation_id: str,
         limit: int = 40,
     ) -> MemoryRecord | None:
-        total_message_count = self.store.count_messages(tenant_id, user_id, conversation_id)
-        previous = self.store.find_active_memory_by_key(
-            tenant_id,
-            user_id,
-            scope="session",
-            type="task_state",
-            key=_conversation_summary_key(conversation_id),
-        )
-        previous_count = _summary_message_count(previous)
-        new_message_count = max(0, total_message_count - previous_count) if previous else total_message_count
-        if previous and new_message_count <= 0:
-            return previous
-        message_limit = max(2, min(limit, 200))
-        if previous and previous_count > 0:
-            message_limit = max(0, min(message_limit, new_message_count))
         messages = self.store.list_messages(
             tenant_id,
             user_id,
             conversation_id,
-            limit=message_limit,
+            limit=max(1, min(limit, 100)),
         )
-        summary, summary_method = self._summarize_conversation_messages(
-            messages,
-            previous_summary=previous.content if previous else None,
-        )
+        summary = _summarize_messages(messages)
         if not summary:
             return None
         return self.create_memory(
@@ -263,78 +215,13 @@ class MemoryService:
             content=summary,
             value_json={
                 "conversation_id": conversation_id,
-                "message_count": total_message_count,
-                "previous_message_count": previous_count if previous else 0,
-                "incremental": bool(previous and previous_count > 0),
+                "message_count": self.store.count_messages(tenant_id, user_id, conversation_id),
                 "summary": summary,
-                "summary_method": summary_method,
+                "summary_method": "simple",
             },
             source="system_generated",
             confidence=0.7,
             conversation_id=conversation_id,
-        )
-
-    def _summarize_conversation_messages(
-        self,
-        messages: list[MessageRecord],
-        *,
-        previous_summary: str | None = None,
-    ) -> tuple[str, str]:
-        if settings.memory_llm_extraction_enabled:
-            try:
-                summary = _summarize_conversation_llm_structured(
-                    messages,
-                    self._summary_chat_model(),
-                    previous_summary=previous_summary,
-                )
-                if summary:
-                    return summary, "llm"
-            except Exception:
-                logger.debug("LLM conversation summary failed; falling back to rule summary.", exc_info=True)
-        return _summarize_conversation(messages, previous_summary=previous_summary), "rule"
-
-    def _summary_chat_model(self) -> object:
-        if self._summary_model is None:
-            if self._summary_model_factory is not None:
-                self._summary_model = self._summary_model_factory()
-            else:
-                from doc_assistant.models.language_model import build_chat_model
-
-                self._summary_model = build_chat_model()
-        return self._summary_model
-
-    def maybe_summarize_conversation(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        conversation_id: str,
-    ) -> MemoryRecord | None:
-        threshold = int(getattr(settings, "memory_auto_summary_threshold", 0))
-        if threshold <= 0:
-            return None
-
-        message_count = self.store.count_messages(tenant_id, user_id, conversation_id)
-        if message_count < threshold:
-            return None
-
-        previous = self.store.find_active_memory_by_key(
-            tenant_id,
-            user_id,
-            scope="session",
-            type="task_state",
-            key=_conversation_summary_key(conversation_id),
-        )
-        previous_count = _summary_message_count(previous)
-        refresh_interval = max(1, int(getattr(settings, "memory_auto_summary_interval", 8)))
-        if previous and message_count - previous_count < refresh_interval:
-            return None
-
-        return self.summarize_conversation_to_memory(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            limit=int(getattr(settings, "memory_auto_summary_window", 40)),
         )
 
     def write_memories_from_user_message(
@@ -346,12 +233,6 @@ class MemoryService:
         message_id: str,
         content: str,
     ) -> list[MemoryRecord]:
-        intents = extract_memory_write_intents(content)
-        if not intents and self.memory_extractor is not None:
-            try:
-                intents = self.memory_extractor(content)
-            except Exception:
-                logger.warning("External memory extractor failed; skipping inferred writes", exc_info=True)
         return [
             self.create_memory_from_intent(
                 tenant_id=tenant_id,
@@ -360,31 +241,7 @@ class MemoryService:
                 source_message_id=message_id,
                 intent=intent,
             )
-            for intent in intents
-        ]
-
-    def write_memories_from_assistant_message(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        conversation_id: str,
-        message_id: str,
-        content: str,
-        task_id: str | None = None,
-    ) -> list[MemoryRecord]:
-        if not task_id:
-            return []
-        intents = extract_task_memory_write_intents(content, task_id=task_id)
-        return [
-            self.create_memory_from_intent(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                source_message_id=message_id,
-                intent=intent,
-            )
-            for intent in intents
+            for intent in extract_memory_write_intents(content)
         ]
 
     def create_memory_from_intent(
@@ -430,7 +287,6 @@ class MemoryService:
         source_message_id: str | None = None,
         task_id: str | None = None,
     ) -> MemoryRecord:
-        expires_at = expires_at or _default_expires_at(scope)
         previous = self.store.find_active_memory_by_key(
             tenant_id,
             user_id,
@@ -438,18 +294,7 @@ class MemoryService:
             type=type,
             key=key,
         )
-        if previous is None:
-            previous = self._find_semantic_duplicate_memory(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                scope=scope,
-                type=type,
-                key=key,
-                content=content,
-            )
-            if previous is not None:
-                key = previous.key
-        if previous and not previous.is_expired() and _is_equivalent_memory(
+        if previous and _same_memory(
             previous,
             content=content,
             value_json=value_json,
@@ -458,14 +303,6 @@ class MemoryService:
             expires_at=expires_at,
         ):
             return previous
-        superseded_conflicting = bool(
-            previous
-            and type == "preference"
-            and previous.type == "preference"
-            and _is_conflicting_memory_update(previous.content, content)
-        )
-        if superseded_conflicting:
-            value_json = _with_supersede_conflict_metadata(value_json, previous.content)
 
         memory = self.store.create_memory(
             tenant_id=tenant_id,
@@ -487,14 +324,7 @@ class MemoryService:
         if previous:
             self.store.mark_memory_status(tenant_id, user_id, previous.memory_id, "stale")
             self._delete_vector(previous.memory_id)
-
         self._upsert_vector(memory)
-        self._run_maintenance_if_due(
-            tenant_id,
-            user_id,
-            "enforce_memory_limit",
-            lambda: self.enforce_memory_limit(tenant_id, user_id),
-        )
         return memory
 
     def list_memories(
@@ -570,28 +400,8 @@ class MemoryService:
         return stale
 
     def enforce_memory_limit(self, tenant_id: str, user_id: str) -> list[MemoryRecord]:
-        max_active = int(getattr(settings, "memory_max_active_per_user", 0))
-        if max_active <= 0:
-            return []
-        active = self.store.list_active_memories_for_user(tenant_id, user_id)
-        overflow = len(active) - max_active
-        if overflow <= 0:
-            return []
-        candidates = sorted(
-            active,
-            key=lambda memory: (
-                _memory_retention_rank(memory),
-                memory.updated_at,
-                memory.created_at,
-            ),
-        )
-        stale: list[MemoryRecord] = []
-        for memory in candidates[:overflow]:
-            updated = self.store.mark_memory_status(tenant_id, user_id, memory.memory_id, "stale")
-            if updated:
-                stale.append(updated)
-                self._delete_vector(memory.memory_id)
-        return stale
+        del tenant_id, user_id
+        return []
 
     def repair_vector_index(self, tenant_id: str, user_id: str) -> dict[str, int]:
         if self.vector_store is None:
@@ -600,11 +410,11 @@ class MemoryService:
         for memory_id in self.store.list_vector_cleanup_memory_ids(tenant_id, user_id):
             self._delete_vector(memory_id)
             deleted += 1
-
-        upserted = 0
-        for memory in self.store.list_active_memories_for_user(tenant_id, user_id):
-            if self._upsert_vector(memory):
-                upserted += 1
+        upserted = sum(
+            1
+            for memory in self.store.list_active_memories_for_user(tenant_id, user_id)
+            if self._upsert_vector(memory)
+        )
         return {"deleted": deleted, "upserted": upserted}
 
     def retrieve_relevant_memories(
@@ -615,69 +425,37 @@ class MemoryService:
         query: str,
         limit: int | None = None,
     ) -> list[MemoryCandidate]:
-        self._run_maintenance_if_due(
-            tenant_id,
-            user_id,
-            "cleanup_expired_memories",
-            lambda: self.cleanup_expired_memories(tenant_id, user_id),
-        )
-        search_limit = limit or settings.memory_top_k
-        return _filter_memory_candidates(
-            self._hydrate_vector_candidates(
+        search_limit = max(1, int(limit or settings.memory_top_k))
+        return [
+            candidate
+            for candidate in self._hydrate_vector_candidates(
                 tenant_id,
                 user_id,
                 self._vector_search(tenant_id, user_id, query, search_limit),
-            ),
-            user_id,
-        )[:search_limit]
+            )
+            if _usable_candidate(candidate, user_id)
+        ][:search_limit]
 
     def format_for_prompt(self, candidates: list[MemoryCandidate]) -> str:
-        if not candidates:
+        usable = sorted(candidates, key=_candidate_rank, reverse=True)
+        if not usable:
             return "No relevant user memory."
 
         lines = [
             "Relevant memory for this user and tenant:",
             "Use high-confidence memory as context. Treat confidence below 0.70 as a hint, not a fact.",
         ]
-        ranked_candidates = sorted(candidates, key=_prompt_candidate_rank, reverse=True)
-        max_tokens = max(1, int(getattr(settings, "memory_prompt_max_tokens", 800)))
-        used_tokens = _estimate_prompt_tokens("\n".join(lines))
-        current_groups: set[str] = set()
-        emitted = 0
-        for candidate in ranked_candidates:
+        max_chars = max(200, int(settings.memory_prompt_max_tokens) * 4)
+        for candidate in usable:
             memory = candidate.memory
-            group = f"{memory.scope}/{memory.type}"
-            additions: list[str] = []
-            if group not in current_groups:
-                additions.append(f"\n{group}:")
-            additions.append(_format_memory_prompt_line(candidate))
-
-            addition_text = "\n".join(additions)
-            addition_tokens = _estimate_prompt_tokens(addition_text)
-            if used_tokens + addition_tokens <= max_tokens:
-                lines.extend(additions)
-                used_tokens += addition_tokens
-                current_groups.add(group)
-                emitted += 1
-                continue
-
-            header_tokens = _estimate_prompt_tokens(additions[0]) if len(additions) > 1 else 0
-            remaining_tokens = max_tokens - used_tokens - header_tokens
-            if remaining_tokens >= 16:
-                truncated_line = _truncate_to_prompt_tokens(additions[-1], remaining_tokens)
-                if truncated_line:
-                    if len(additions) > 1:
-                        lines.append(additions[0])
-                        used_tokens += header_tokens
-                        current_groups.add(group)
-                    lines.append(truncated_line)
-                    used_tokens += _estimate_prompt_tokens(truncated_line)
-                    emitted += 1
-            break
-
-        if emitted == 0:
-            return "No relevant user memory."
-        return "\n".join(lines)
+            line = (
+                f"- {memory.key} ({memory.source}, confidence {memory.confidence:.2f}): "
+                f"{' '.join(memory.content.split())}"
+            )
+            if len("\n".join([*lines, line])) > max_chars:
+                break
+            lines.append(line[:500])
+        return "\n".join(lines) if len(lines) > 2 else "No relevant user memory."
 
     def usages_from_candidates(self, candidates: list[MemoryCandidate]) -> list[MemoryUsage]:
         return [
@@ -717,88 +495,25 @@ class MemoryService:
         user_id: str,
         candidates: list[MemoryCandidate],
     ) -> list[MemoryCandidate]:
-        if not candidates:
-            return []
         hydrate_ids = [
             candidate.memory.memory_id
             for candidate in candidates
-            if candidate.memory.memory_id and _vector_candidate_needs_hydration(candidate)
+            if candidate.memory.memory_id and candidate.retrieval_source != "vector"
         ]
-        hydrated_by_id = {}
-        if hydrate_ids:
-            hydrated_by_id = {
-                memory.memory_id: memory
-                for memory in self.store.get_memories_by_ids(tenant_id, user_id, hydrate_ids)
-            }
-        hydrated_candidates: list[MemoryCandidate] = []
-        for candidate in candidates:
-            memory_id = candidate.memory.memory_id
-            if not memory_id:
-                continue
-            memory = hydrated_by_id.get(memory_id) if _vector_candidate_needs_hydration(candidate) else candidate.memory
-            if memory is None:
-                continue
-            hydrated_candidates.append(
-                MemoryCandidate(
-                    memory=memory,
-                    score=candidate.score,
-                    retrieval_source="vector",
-                )
+        hydrated = {
+            memory.memory_id: memory
+            for memory in self.store.get_memories_by_ids(tenant_id, user_id, hydrate_ids)
+        }
+        return [
+            MemoryCandidate(
+                memory=hydrated.get(candidate.memory.memory_id, candidate.memory),
+                score=candidate.score,
+                retrieval_source="vector",
             )
-        return hydrated_candidates
-
-    def _run_maintenance_if_due(
-        self,
-        tenant_id: str,
-        user_id: str,
-        kind: str,
-        action: Callable[[], object],
-    ) -> None:
-        if not settings.memory_maintenance_enabled:
-            return
-        cooldown_seconds = int(getattr(settings, "memory_maintenance_cooldown_seconds", 300))
-        now = datetime.now(timezone.utc)
-        key = (tenant_id, user_id, kind)
-        with self._maintenance_lock:
-            previous = self._maintenance_last_run.get(key)
-            if previous and cooldown_seconds > 0 and (now - previous).total_seconds() < cooldown_seconds:
-                return
-            self._maintenance_last_run[key] = now
-        try:
-            action()
-        except Exception:
-            logger.warning(
-                "Memory maintenance failed; request will continue.",
-                extra={"tenant_id": tenant_id, "user_id": user_id, "maintenance_kind": kind},
-                exc_info=True,
-            )
-
-    def _find_semantic_duplicate_memory(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        scope: str,
-        type: str,
-        key: str,
-        content: str,
-    ) -> MemoryRecord | None:
-        if self.vector_store is None or scope not in {"user", "org"}:
-            return None
-        threshold = float(getattr(settings, "memory_semantic_dedup_min_score", 0.88))
-        if threshold <= 0:
-            return None
-        query = _memory_similarity_query(scope=scope, type=type, key=key, content=content)
-        for candidate in self._vector_search(tenant_id, user_id, query, 3):
-            score = candidate.score if candidate.score is not None else 0.0
-            if score < threshold:
-                continue
-            memory = self.store.get_memory(tenant_id, user_id, candidate.memory.memory_id)
-            if memory is None:
-                continue
-            if _is_semantic_duplicate_memory(memory, scope=scope, type=type, user_id=user_id):
-                return memory
-        return None
+            for candidate in candidates
+            if candidate.memory.memory_id
+            and (candidate.retrieval_source == "vector" or candidate.memory.memory_id in hydrated)
+        ]
 
     def _upsert_vector(self, memory: MemoryRecord) -> bool:
         if self.vector_store is None:
@@ -807,7 +522,7 @@ class MemoryService:
             self.vector_store.upsert_memory(memory)
             return True
         except Exception:
-            logger.warning("Memory vector upsert failed; memory remains in structured store", exc_info=True)
+            logger.warning("Memory vector upsert failed; memory remains in SQLite", exc_info=True)
             return False
 
     def _delete_vector(self, memory_id: str) -> None:
@@ -815,3 +530,145 @@ class MemoryService:
             return
         self.vector_store.delete_memory(memory_id)
 
+
+def extract_memory_write_intents(user_text: str) -> list[MemoryWriteIntent]:
+    text = " ".join(user_text.split())
+    if not text or not _has_explicit_memory_marker(text):
+        return []
+    content = _strip_memory_marker(text)
+    return [
+        MemoryWriteIntent(
+            type="preference" if _looks_like_preference(part) else "fact",
+            key=_infer_key(part),
+            content=part,
+            value_json={"text": part},
+            source="explicit",
+            confidence=0.95,
+        )
+        for part in _split_memory_parts(content)
+        if len(part) >= 4
+    ]
+
+
+def _has_explicit_memory_marker(text: str) -> bool:
+    lowered = text.casefold()
+    return any(marker in lowered for marker in _EXPLICIT_MEMORY_MARKERS)
+
+
+def _strip_memory_marker(text: str) -> str:
+    patterns = (
+        r"^\s*(please\s+)?remember\s+(that\s+|my\s+)?",
+        r"^\s*from\s+now\s+on[:,]?\s*",
+        r"^\s*going\s+forward[:,]?\s*",
+        r"^\s*always\s+answer\s*[:,]?\s*",
+        r"^\s*请?帮?我?记住[：:\s]*",
+        r"^\s*以后(都|请)?[：:\s]*",
+    )
+    content = text.strip()
+    for pattern in patterns:
+        content = re.sub(pattern, "", content, flags=re.IGNORECASE)
+    return _clean_memory_text(content)
+
+
+def _split_memory_parts(content: str) -> list[str]:
+    content = re.sub(r"\s+(?:and also|also|and my)\s+", "；", content, flags=re.IGNORECASE)
+    content = re.sub(r"(并且|而且|另外|同时)", "；", content)
+    return [
+        cleaned
+        for part in re.split(r"[;；。]\s*", content)
+        if (cleaned := _clean_memory_text(part))
+    ]
+
+
+def _clean_memory_text(text: str) -> str:
+    return re.sub(r"^[ ：:。.]+|[ ：:。.]+$", "", text.strip())
+
+
+def _looks_like_preference(text: str) -> bool:
+    lowered = text.casefold()
+    return any(
+        term in lowered
+        for term in (
+            "answer",
+            "reply",
+            "response",
+            "style",
+            "prefer",
+            "concise",
+            "detailed",
+            "language",
+            "回答",
+            "回复",
+            "风格",
+            "偏好",
+            "简洁",
+            "详细",
+            "中文",
+            "英文",
+        )
+    )
+
+
+def _infer_key(content: str) -> str:
+    lowered = content.casefold()
+    if _looks_like_preference(content):
+        return "answer_style"
+    if any(term in lowered for term in ("role", "job", "company", "business", "职位", "岗位", "公司")):
+        return "business_context"
+    words = re.findall(r"[A-Za-z0-9_\-\u4e00-\u9fff]+", lowered)
+    digest = hashlib.sha1(" ".join(words).encode("utf-8")).hexdigest()[:10] if words else ""
+    return ("_".join(words[:6])[:48] + (f"_{digest}" if digest else ""))[:80] or "user_memory"
+
+
+def _same_memory(
+    memory: MemoryRecord,
+    *,
+    content: str,
+    value_json: dict | None,
+    visibility: str,
+    task_id: str | None,
+    expires_at: datetime | None,
+) -> bool:
+    return (
+        memory.content == content.strip()
+        and memory.value_json == value_json
+        and memory.visibility == visibility
+        and memory.task_id == task_id
+        and memory.expires_at == expires_at
+    )
+
+
+def _usable_candidate(candidate: MemoryCandidate, user_id: str) -> bool:
+    memory = candidate.memory
+    return (
+        memory.status == "active"
+        and not memory.is_expired()
+        and memory.confidence >= settings.memory_min_confidence
+        and (memory.user_id == user_id or memory.visibility in {"team", "org"})
+    )
+
+
+def _candidate_rank(candidate: MemoryCandidate) -> tuple[float, float, datetime, datetime]:
+    memory = candidate.memory
+    return (
+        memory.confidence,
+        candidate.score or 0.0,
+        memory.updated_at,
+        memory.created_at,
+    )
+
+
+def _summarize_messages(messages: list[MessageRecord]) -> str:
+    parts = [
+        f"{'User' if message.role == 'user' else 'Assistant'}: {' '.join(message.content.split())}"
+        for message in messages
+        if message.role in {"user", "assistant"} and message.content.strip()
+    ]
+    if not parts:
+        return ""
+    summary = "Conversation summary:\n" + "\n".join(parts)
+    return summary[: _SUMMARY_MAX_CHARS - 3] + "..." if len(summary) > _SUMMARY_MAX_CHARS else summary
+
+
+def _conversation_summary_key(conversation_id: str) -> str:
+    return f"conversation_summary_{conversation_id[:40]}"

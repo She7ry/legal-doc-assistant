@@ -16,4 +16,4 @@ def require_found(value: _T | None, detail: str = "Not found.") -> _T:
 
 def get_fields_set(body) -> set[str]:
     """Retrieve the set of explicitly-provided fields from a Pydantic model."""
-    return getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    return body.model_fields_set

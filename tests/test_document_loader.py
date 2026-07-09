@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import zipfile
+from types import SimpleNamespace
 
 from doc_assistant.ingestion import document_loader
 

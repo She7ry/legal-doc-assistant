@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
-from enum import Enum
 import json
-from pathlib import Path
 import sqlite3
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from threading import Lock
 from uuid import uuid4
 
@@ -31,11 +32,11 @@ class IngestJobRecord:
     file_name: str
     saved_path: Path
     status: IngestJobStatus
-    submitted_at: "datetime"
+    submitted_at: datetime
     stage: str = "uploaded"
     progress: int = 5
-    started_at: "datetime | None" = None
-    completed_at: "datetime | None" = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     result: IngestResult | None = None
     error: str | None = None
     warnings: list[str] | None = None

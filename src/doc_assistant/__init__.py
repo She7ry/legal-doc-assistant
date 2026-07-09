@@ -9,7 +9,7 @@
                                     ↓
               answer_guard + evidence → 校验引用、评估证据支持度
                                     ↓
-    复杂任务 → agent_service（LangGraph 工作流）→ 计划 → 逐步执行 → 报告
+    复杂任务 → agent_service（ReAct tool calling）→ 工具轨迹 → 带引用报告
 
 目录结构速查
 ------------
@@ -19,10 +19,10 @@ retrieval/    Qdrant Dense/BM25 Sparse 混合检索与分块入库
 models/       LLM / Embedding 客户端（DeepSeek、OpenAI-compatible 等）
 schemas/      跨模块共享的数据结构（Citation、QAAnswer 等）
 services/     业务核心：问答、工具调用聊天、法律 Agent
-  agent/      Agent 工作流编排（LangGraph）与数据结构
+  agent/      ReAct Agent adapter 与数据结构
   answer_guard  答案合规校验（引用、强结论、无依据事实）
   evidence      将答案拆成可审计主张并评估引用支持度
-graphs/       LangGraph 状态图定义（Agent 流水线、工具调用循环）
+graphs/       LangGraph 状态图定义（工具调用循环）
 memory/       用户长期记忆、对话历史、语义检索
 matter/       案件（matter）持久化：finding、artifact、审计事件
 tools/        Agent 可调用的外部工具（如网页搜索）

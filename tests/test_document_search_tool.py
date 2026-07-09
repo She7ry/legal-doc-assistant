@@ -4,8 +4,8 @@ import pytest
 from langchain_core.documents import Document
 
 from doc_assistant.tools.document_search import (
-    SEARCH_DOCUMENTS_TOOL_SCHEMA,
     DocumentSearchTool,
+    SearchDocumentsInput,
 )
 
 
@@ -27,9 +27,9 @@ def test_document_search_tool_executes_and_normalizes_results() -> None:
     backend = RecordingBackend()
     tool = DocumentSearchTool(backend, default_top_k=4)
 
-    execution = tool.execute({"query": " payment terms ", "top_k": 20})
+    arguments = SearchDocumentsInput(query=" payment terms ", top_k=10)
+    execution = tool.execute(arguments.query, arguments.top_k)
 
-    assert SEARCH_DOCUMENTS_TOOL_SCHEMA["function"]["name"] == "search_documents"
     assert backend.calls == [("payment terms", 10)]
     assert execution.query == "payment terms"
     assert execution.hits[0].result == {
@@ -48,7 +48,5 @@ def test_document_search_tool_executes_and_normalizes_results() -> None:
 
 
 def test_document_search_tool_rejects_an_empty_query() -> None:
-    tool = DocumentSearchTool(RecordingBackend(), default_top_k=4)
-
     with pytest.raises(ValueError, match="query is required"):
-        tool.execute({"query": "  "})
+        SearchDocumentsInput(query="  ")

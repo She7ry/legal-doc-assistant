@@ -13,27 +13,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.documents import Document
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import PromptTemplate
 
 from doc_assistant.config.settings import settings
+from doc_assistant.grounding.answer_repair import try_lightweight_repair
+from doc_assistant.grounding.document_context import format_document_context
 from doc_assistant.grounding.evidence import build_evidence_profile
 from doc_assistant.grounding.guard import AnswerGuardResult, validate_answer
+from doc_assistant.memory.history import format_chat_history, merge_chat_history
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
 from doc_assistant.memory.service import MemoryService
-from doc_assistant.models.language_model import (
-    AsyncMessageChatModelProtocol,
-    InvokableChatModelProtocol,
-    MessageChatModelProtocol,
-    MessageStreamingChatModelProtocol,
-    build_chat_model,
-)
+from doc_assistant.models.language_model import build_chat_model
 from doc_assistant.retrieval.vector_store import DocumentVectorStore
 from doc_assistant.schemas.citation import Citation, QAAnswer
 from doc_assistant.skills import SkillEngine, build_skill_engine_from_settings
@@ -44,9 +41,6 @@ from doc_assistant.skills.runtime import (
     fuse_retrieval_results,
     is_complex_retrieval_query,
     render_evidence_assessment,
-)
-from doc_assistant.utils.coercion import (
-    optional_str,
 )
 from doc_assistant.utils.prompt_loader import load_base_legal_prompt, load_prompt
 
@@ -126,7 +120,7 @@ class DocumentQAService:
     def __init__(
         self,
         vector_store: DocumentVectorStore | None = None,
-        chat_model=None,
+        chat_model: BaseChatModel | None = None,
         memory_service: MemoryService | None = None,
         tenant_id: str | None = None,
         skill_engine: SkillEngine | None = None,
@@ -486,7 +480,7 @@ class DocumentQAService:
         question: str,
         documents: list[Document],
         *,
-        phase: str = "executor",
+        phase: str = "answer",
     ) -> tuple[SkillRuntimeContext, EvidenceSufficiencyResult | None, str]:
         """Select relevant skills and run the pre-generation evidence audit."""
         context = self._prepare_skill_context(question, phase=phase)
@@ -599,7 +593,7 @@ class DocumentQAService:
         if not guard_result.issues:
             return answer
 
-        repaired, fixed_all = _try_lightweight_repair(answer, guard_result, citations)
+        repaired, fixed_all = try_lightweight_repair(answer, guard_result, citations)
         if fixed_all:
             return repaired
 
@@ -647,115 +641,24 @@ class DocumentQAService:
 
     def _format_context(self, documents: list[Document]) -> tuple[str, list[Citation]]:
         """把检索到的 Document 列表格式化为 prompt 上下文 + Citation 列表（编号 S1,S2…）。"""
-        return self._format_context_prefixed(documents, prefix="S")
+        return format_document_context(documents, prefix="S")
 
     def _format_context_prefixed(
         self, documents: list[Document], prefix: str = "S"
     ) -> tuple[str, list[Citation]]:
-        context_parts = []
-        citations = []
-
-        for index, document in enumerate(documents, start=1):
-            source_id = f"{prefix}{index}"
-            metadata = document.metadata or {}
-            text = self._compact_text(document.page_content)
-            page = metadata.get("page")
-            chunk_id = metadata.get("chunk_id")
-            section_heading = metadata.get("section_heading")
-            retrieval_score = metadata.get("retrieval_score")
-            retrieval_relevance = metadata.get("retrieval_relevance")
-            file_name = metadata.get("file_name") or metadata.get("source") or "unknown"
-            file_id = optional_str(metadata.get("file_id"))
-            document_key = optional_str(metadata.get("document_key"))
-            document_version = (
-                metadata.get("document_version")
-                if isinstance(metadata.get("document_version"), int)
-                else None
-            )
-            page_number = page if isinstance(page, int) else None
-            page_label = f"page {page_number + 1}" if page_number is not None else None
-            section_part = f"; section={section_heading}" if section_heading else ""
-            page_part = page_label or "unknown"
-
-            context_parts.append(
-                f"[{source_id}] file={file_name}; page={page_part}; "
-                f"page_index={page}; chunk={chunk_id}{section_part}\n{text}"
-            )
-            citations.append(
-                Citation(
-                    source_id=source_id,
-                    file_name=str(file_name),
-                    page=page_number,
-                    chunk_id=chunk_id if isinstance(chunk_id, int) else None,
-                    preview=text[:500],
-                    source_type="document",
-                    file_id=file_id,
-                    document_key=document_key,
-                    document_version=document_version,
-                    page_label=page_label,
-                    section_heading=str(section_heading) if section_heading else None,
-                    exact_quote=text[:1200],
-                    retrieval_score=(
-                        float(retrieval_score)
-                        if isinstance(retrieval_score, int | float)
-                        else None
-                    ),
-                    retrieval_relevance=(
-                        float(retrieval_relevance)
-                        if isinstance(retrieval_relevance, int | float)
-                        else None
-                    ),
-                )
-            )
-
-        return "\n\n".join(context_parts), citations
-
-    @staticmethod
-    def _compact_text(text: str) -> str:
-        return " ".join(text.split())
+        return format_document_context(documents, prefix=prefix)
 
     def _invoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        # 1) Prefer the project's message invocation interface.
-        if isinstance(self.chat_model, MessageChatModelProtocol):
-            response = self.chat_model.invoke_messages(messages)
-            return str(response.get("content") or "")
-
-        # 2) Fall back to LangChain BaseChatModel-compatible invocation.
-        if isinstance(self.chat_model, InvokableChatModelProtocol):
-            try:
-                response = self.chat_model.invoke(messages=messages)
-            except TypeError:
-                response = self.chat_model.invoke(self._messages_to_prompt(messages))
-            content = getattr(response, "content", response)
-            return str(content)
-
-        raise ValueError("The configured chat model does not support message-based chat.")
+        return str(self.chat_model.invoke(messages).content or "")
 
     async def _ainvoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
-        if isinstance(self.chat_model, AsyncMessageChatModelProtocol):
-            response = await self.chat_model.ainvoke_messages(messages)
-            return str(response.get("content") or "")
-        return await asyncio.to_thread(self._invoke_chat_messages, messages)
+        response = await self.chat_model.ainvoke(messages)
+        return str(response.content or "")
 
     def _stream_chat_messages(self, messages: list[dict[str, str]]) -> Iterator[str]:
-        if isinstance(self.chat_model, MessageStreamingChatModelProtocol):
-            chunks = self.chat_model.stream(messages=messages)
-            for chunk in chunks:
-                content = getattr(chunk, "content", chunk)
-                if content:
-                    yield str(content)
-            return
-        yield self._invoke_chat_messages(messages)
-
-    @staticmethod
-    def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
-        parts = []
-        for message in messages:
-            role = message.get("role", "user")
-            content = str(message.get("content") or "").strip()
-            if content:
-                parts.append(f"{role.upper()}:\n{content}")
-        return "\n\n".join(parts)
+        for chunk in self.chat_model.stream(messages):
+            if chunk.content:
+                yield str(chunk.content)
 
     def _record_assistant_message(
         self,
@@ -769,24 +672,11 @@ class DocumentQAService:
         if not (self.memory_service and user_id and conversation_id and user_message_recorded):
             return
         try:
-            message_id = self.memory_service.record_assistant_message(
+            self.memory_service.record_assistant_message(
                 tenant_id=self.tenant_id,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 content=content,
-            )
-            self.memory_service.write_memories_from_assistant_message(
-                tenant_id=self.tenant_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                content=content,
-                task_id=task_id,
-            )
-            self.memory_service.maybe_summarize_conversation(
-                tenant_id=self.tenant_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
             )
         except (OSError, RuntimeError, ValueError):
             logger.warning(
@@ -798,25 +688,7 @@ class DocumentQAService:
 
     @staticmethod
     def _format_chat_history(messages: list[dict[str, object]], max_messages: int = 12) -> str:
-        system_parts = []
-        chat_parts = []
-        for message in messages:
-            role = message.get("role")
-            content = str(message.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "system":
-                if _is_conversation_summary_context(content):
-                    system_parts.append(f"Session summary: {content}")
-                continue
-            if role not in {"user", "assistant"}:
-                continue
-
-            label = "User" if role == "user" else "Assistant"
-            chat_parts.append(f"{label}: {content}")
-
-        history_parts = [*system_parts, *chat_parts[-max_messages:]]
-        return "\n".join(history_parts) if history_parts else "No previous messages."
+        return format_chat_history(messages, max_messages)
 
     @staticmethod
     def _merge_chat_history(
@@ -825,36 +697,11 @@ class DocumentQAService:
         *,
         max_messages: int,
     ) -> list[dict[str, object]]:
-        system_context: list[dict[str, object]] = []
-        merged: list[dict[str, object]] = []
-        seen: set[tuple[str, str]] = set()
-        for message in [*persisted_history, *incoming_history]:
-            role = message.get("role")
-            content = str(message.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "system":
-                if not _is_conversation_summary_context(content):
-                    continue
-                key = ("system", content)
-                if key in seen:
-                    continue
-                seen.add(key)
-                system_context.append({"role": "system", "content": content})
-                continue
-            if role not in {"user", "assistant"}:
-                continue
-            key = (str(role), content)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append({"role": str(role), "content": content})
-        recent_messages = merged[-max(0, max_messages) :] if max_messages else []
-        return [*system_context, *recent_messages]
-
-
-def _is_conversation_summary_context(content: str) -> bool:
-    return content.strip().casefold().startswith("conversation summary:")
+        return merge_chat_history(
+            persisted_history,
+            incoming_history,
+            max_messages=max_messages,
+        )
 
 
 def _looks_like_document_question(question: str) -> bool:
@@ -890,80 +737,3 @@ def _looks_like_document_question(question: str) -> bool:
             )
         )
     )
-
-
-def _try_lightweight_repair(
-    content: str,
-    guard_result: AnswerGuardResult,
-    citations: list[Citation],
-) -> tuple[str, bool]:
-    valid_ids = {c.source_id.upper() for c in citations}
-    if not valid_ids:
-        return content, False
-
-    repaired = content
-    fixed_any = False
-    fixed_all = True
-    first_ref = f"[{next(iter(sorted(valid_ids)))}]"
-
-    for issue in guard_result.issues:
-        lowered = issue.casefold()
-        if "source ids that were not returned" in lowered:
-            repaired = re.sub(
-                r"\[([SCDPW]\d+)\]",
-                lambda match: match.group(0)
-                if match.group(1).upper() in valid_ids
-                else "",
-                repaired,
-                flags=re.IGNORECASE,
-            )
-            fixed_any = True
-        elif "does not include any source citations" in lowered:
-            repaired = f"{repaired.rstrip()} {first_ref}".strip()
-            fixed_any = True
-        elif "material paragraph lacks a source citation" in lowered:
-            repaired = _append_default_citations_to_material_paragraphs(repaired, first_ref)
-            fixed_any = True
-        elif "specific fact" in lowered and "without a nearby citation" in lowered:
-            repaired = _append_default_citations_to_fact_sentences(repaired, first_ref)
-            fixed_any = True
-        else:
-            fixed_all = False
-
-    if fixed_any and not re.search(r"\[[SCDPW]\d+\]", repaired, flags=re.IGNORECASE):
-        repaired = f"{repaired.rstrip()} {first_ref}".strip()
-
-    return repaired if fixed_any else content, fixed_all and fixed_any
-
-
-def _append_default_citations_to_material_paragraphs(content: str, source_ref: str) -> str:
-    blocks = re.split(r"(\n\s*\n)", content)
-    repaired_blocks = []
-    for block in blocks:
-        stripped = block.strip()
-        if not stripped or block.startswith("\n"):
-            repaired_blocks.append(block)
-            continue
-        if stripped.startswith("#") or re.search(r"\[[SCDPW]\d+\]", block, flags=re.IGNORECASE):
-            repaired_blocks.append(block)
-            continue
-        if len(stripped) >= 40:
-            repaired_blocks.append(f"{block.rstrip()} {source_ref}")
-        else:
-            repaired_blocks.append(block)
-    return "".join(repaired_blocks)
-
-
-def _append_default_citations_to_fact_sentences(content: str, source_ref: str) -> str:
-    sentences = re.split(r"([.!?。！？]\s*)", content)
-    repaired = []
-    for index in range(0, len(sentences), 2):
-        sentence = sentences[index]
-        punctuation = sentences[index + 1] if index + 1 < len(sentences) else ""
-        if (
-            re.search(r"\b\d+(?:\.\d+)?%|\b\d+\s+(?:days?|business days?|months?|years?)\b|\$\s?\d", sentence)
-            and not re.search(r"\[[SCDPW]\d+\]", sentence, flags=re.IGNORECASE)
-        ):
-            sentence = f"{sentence.rstrip()} {source_ref}"
-        repaired.append(sentence + punctuation)
-    return "".join(repaired)

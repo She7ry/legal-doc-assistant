@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 
-from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep, require_api_key
+from api.dependencies import MemoryServiceDep, TenantIdDep, UserIdDep
 from api.routers.helpers import get_fields_set
 from api.schemas.requests import (
     MemoryBatchCreateRequest,
@@ -19,11 +19,7 @@ from api.schemas.responses import (
 )
 from doc_assistant.memory.schemas import UNSET, MemoryUpdate
 
-router = APIRouter(
-    prefix="/memories",
-    tags=["memories"],
-    dependencies=[Depends(require_api_key)],
-)
+router = APIRouter(prefix="/memories", tags=["memories"])
 
 
 def _create_memory_kwargs(body: MemoryCreateRequest, tenant_id: str, user_id: str) -> dict:
