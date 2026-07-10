@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 
-from api.dependencies import JobStoreDep, TenantIdDep, VectorStoreDep, require_api_key
+from api.dependencies import JobStoreDep, TenantIdDep, VectorStoreDep
 from api.jobs import IngestJobRecord, IngestJobStore
 from api.schemas.responses import (
     DocumentInfo,
@@ -19,11 +20,7 @@ from doc_assistant.retrieval.vector_store import DocumentVectorStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/documents",
-    tags=["documents"],
-    dependencies=[Depends(require_api_key)],
-)
+router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post(
@@ -36,7 +33,7 @@ def ingest_document(
     vector_store: VectorStoreDep,
     tenant_id: TenantIdDep,
     job_store: JobStoreDep,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
 ) -> IngestJobResponse:
     suffix = f".{file.filename.rsplit('.', 1)[-1].lower()}" if file.filename and "." in file.filename else ""
     if suffix not in SUPPORTED_EXTENSIONS:

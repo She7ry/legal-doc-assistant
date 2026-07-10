@@ -22,13 +22,13 @@ def test_settings_rejects_invalid_chunk_overlap() -> None:
         Settings(retrieval=RetrievalSettings(chunk_size=100, chunk_overlap=100))
 
 
-def test_agent_backoff_is_parsed_as_numbers(monkeypatch) -> None:
-    monkeypatch.delenv("DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS", raising=False)
+def test_tool_call_iterations_are_read_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", "4")
 
-    assert Settings().agent_step_retry_backoff_seconds == (2.0, 5.0)
+    assert Settings().tool_call_max_iterations == 4
 
 
-def test_memory_llm_extraction_is_enabled_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED", raising=False)
+def test_memory_top_k_is_read_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DOC_ASSISTANT_MEMORY_TOP_K", "2")
 
-    assert Settings().memory_llm_extraction_enabled is True
+    assert Settings().memory_top_k == 2

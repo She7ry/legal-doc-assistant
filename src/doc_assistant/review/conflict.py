@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.utils.coercion import (
@@ -15,11 +17,33 @@ from doc_assistant.utils.coercion import (
     coerce_conflict_status,
     coerce_conflict_type,
     coerce_risk_level,
-    extract_json_object,
     format_source_refs,
     optional_str,
     source_id_list,
 )
+
+
+class ConflictItemOutput(BaseModel):
+    topic: str
+    conflict_type: str
+    severity: Literal["High", "Medium", "Low", "Needs human review"]
+    contract_position: str = ""
+    policy_position: str = ""
+    why_conflict: str = ""
+    recommended_action: str = ""
+    contract_citations: list[str] = Field(default_factory=list)
+    policy_citations: list[str] = Field(default_factory=list)
+    needs_human_review: bool = True
+    confidence: str | None = None
+
+
+class ConflictCheckOutput(BaseModel):
+    overall_status: Literal[
+        "No conflict found", "Potential conflict", "Insufficient information"
+    ]
+    conflicts: list[ConflictItemOutput] = Field(default_factory=list)
+    needs_human_review: bool
+    supporting_citations: list[str] = Field(default_factory=list)
 
 
 def empty_conflict_metadata() -> dict[str, Any]:
@@ -32,14 +56,8 @@ def empty_conflict_metadata() -> dict[str, Any]:
     }
 
 
-def conflict_metadata(raw_content: str, citations: list[Citation]) -> dict[str, Any]:
-    data = extract_json_object(raw_content)
-    if not isinstance(data, dict):
-        return {
-            **empty_conflict_metadata(),
-            "structured": False,
-            "overall_status": coerce_conflict_status(raw_content),
-        }
+def conflict_metadata(output: ConflictCheckOutput, citations: list[Citation]) -> dict[str, Any]:
+    data = output.model_dump()
 
     raw_conflicts = data.get("conflicts")
     conflicts: list[dict[str, Any]] = []

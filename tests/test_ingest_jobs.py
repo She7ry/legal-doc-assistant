@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from doc_assistant.schemas.citation import IngestResult
-
 from api.jobs import IngestJobStatus, IngestJobStore
+from doc_assistant.schemas.citation import IngestResult
 
 
 def test_ingest_job_store_hides_jobs_from_other_tenants(tmp_path) -> None:

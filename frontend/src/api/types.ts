@@ -127,15 +127,6 @@ export interface AgentTaskResumeRequest {
   matter_id?: string | null;
 }
 
-export interface AgentPlanStep {
-  step_id: string;
-  title: string;
-  purpose: string;
-  tool: string;
-  arguments: Record<string, unknown>;
-  requires_confirmation: boolean;
-}
-
 export interface AgentStepResult {
   step_id: string;
   title: string;
@@ -148,85 +139,20 @@ export interface AgentStepResult {
   output: Record<string, unknown>;
 }
 
-export interface AgentFinding {
-  finding_id: string;
-  category: string;
-  severity: string;
-  summary: string;
-  citations: string[];
-  recommended_action: string;
-  needs_human_review: boolean;
-  source_step_id: string;
-  clause_reference: string;
-  evidence_coverage: string;
-  support_level: string;
-  unsupported_reason: string;
-  source_quote: string;
-  location_label: string;
-  human_review_status: string;
-  status: string;
-  evidence: Record<string, unknown>[];
-}
-
-export interface MatterProfile {
-  matter_id: string;
-  document_type: string;
-  parties: string[];
-  user_side: string;
-  governing_law: string;
-  jurisdiction: string;
-  key_dates: Record<string, unknown>[];
-  review_scope: string[];
-  open_questions: string[];
-  confidence: string;
-  citations: string[];
-  source_step_id: string;
-  confirmation_gates: AgentConfirmationGate[];
-}
-
-export interface AgentArtifact {
-  artifact_id: string;
-  artifact_type: string;
-  title: string;
-  summary: string;
-  items: Record<string, unknown>[];
-  source_finding_ids: string[];
-  citations: string[];
-  metadata: Record<string, unknown>;
-}
-
-export interface AgentConfirmationGate {
-  gate_id: string;
-  gate_type: string;
-  title: string;
-  question: string;
-  status: string;
-  priority: string;
-  required: boolean;
-  reason: string;
-  related_finding_ids: string[];
-  related_artifact_ids: string[];
-  citations: string[];
-  metadata: Record<string, unknown>;
-}
-
 export interface AgentTaskResponse {
   task_id: string;
   status: string;
   objective: string;
-  plan: AgentPlanStep[];
   steps: AgentStepResult[];
-  findings: AgentFinding[];
-  missing_information: string[];
+  findings: Record<string, unknown>[];
   human_review_required: boolean;
   report: string;
   citations: Citation[];
   confidence: string | null;
   guard_warnings: string[];
   evidence: EvidenceProfile | null;
-  matter_profile: MatterProfile | null;
-  artifacts: AgentArtifact[];
-  confirmation_gates: AgentConfirmationGate[];
+  matter_profile: Record<string, unknown> | null;
+  artifacts: Record<string, unknown>[];
   metadata: Record<string, unknown>;
 }
 

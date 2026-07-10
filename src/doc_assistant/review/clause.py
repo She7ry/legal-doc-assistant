@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from doc_assistant.review.taxonomy import ClauseProfile
 from doc_assistant.schemas.citation import Citation
@@ -16,10 +18,28 @@ from doc_assistant.utils.coercion import (
     citation_suffix,
     coerce_bool,
     coerce_risk_level,
-    extract_json_object,
     optional_str,
     risk_reason_list,
 )
+
+
+class ClauseRiskReason(BaseModel):
+    reason: str
+    citation: str | None = None
+
+
+class ClauseReviewOutput(BaseModel):
+    clause_type: str
+    normalized_clause_type: str
+    found: bool
+    summary: str
+    risk_level: Literal["High", "Medium", "Low", "Needs human review"]
+    risk_reasons: list[ClauseRiskReason] = Field(default_factory=list)
+    affected_party: str | None = None
+    plain_language_explanation: str = ""
+    questions_for_lawyer: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    needs_human_review: bool
 
 
 def empty_clause_review_metadata(
@@ -45,17 +65,10 @@ def empty_clause_review_metadata(
 def clause_review_metadata(
     clause_type: str,
     profile: ClauseProfile,
-    raw_content: str,
+    output: ClauseReviewOutput,
     citations: list[Citation],
 ) -> dict[str, Any]:
-    data = extract_json_object(raw_content)
-    if not isinstance(data, dict):
-        return {
-            **empty_clause_review_metadata(clause_type, profile),
-            "structured": False,
-            "summary": raw_content.strip(),
-            "found": None,
-        }
+    data = output.model_dump()
 
     found = coerce_bool(data.get("found"))
     risk_level = coerce_risk_level(data.get("risk_level"))

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from enum import Enum
 import json
-from pathlib import Path
 import sqlite3
+from dataclasses import dataclass, replace
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from uuid import uuid4
@@ -23,7 +24,7 @@ class AgentTaskStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     NEEDS_INPUT = "needs_input"
-    INTERRUPTED = "interrupted"  # P1-1: HITL 中断等待审批
+    INTERRUPTED = "interrupted"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -36,7 +37,7 @@ class AgentTaskEventRecord:
     stage: str
     progress: int
     message: str
-    created_at: "datetime"
+    created_at: datetime
     step_id: str | None = None
     payload: dict[str, Any] | None = None
 
@@ -55,9 +56,9 @@ class AgentTaskRecord:
     status: AgentTaskStatus
     stage: str
     progress: int
-    submitted_at: "datetime"
-    started_at: "datetime | None" = None
-    completed_at: "datetime | None" = None
+    submitted_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
     events: list[AgentTaskEventRecord] | None = None
@@ -169,7 +170,7 @@ class AgentTaskStore:
         with self._lock:
             record = self._require_record(task_id)
             record.status = AgentTaskStatus.RUNNING
-            record.stage = "planning"
+            record.stage = "answering"
             record.progress = 5
             record.started_at = utc_now()
             self._save_record(record)
@@ -242,24 +243,6 @@ class AgentTaskStore:
                 progress=0,
                 message="需要补充信息后再运行 Agent 任务。",
                 payload={"questions": questions[:3]},
-            )
-
-    def mark_interrupted(self, task_id: str, interrupt_data: dict[str, Any]) -> None:
-        """P1-1: Mark task as interrupted by HITL confirmation gates."""
-        with self._lock:
-            record = self._require_record(task_id)
-            record.status = AgentTaskStatus.INTERRUPTED
-            record.stage = "confirmation_required"
-            record.progress = 95
-            record.result = None
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type="interrupted",
-                stage="confirmation_required",
-                progress=95,
-                message="Task requires human review before finalization.",
-                payload=interrupt_data,
             )
 
     def resume_with_input(
@@ -585,6 +568,7 @@ def _record_to_row(record: AgentTaskRecord) -> tuple[object, ...]:
 
 
 def _row_to_record(row: sqlite3.Row) -> AgentTaskRecord:
+    row_keys = row.keys()
     return AgentTaskRecord(
         task_id=row["task_id"],
         tenant_id=row["tenant_id"],
@@ -594,7 +578,7 @@ def _row_to_record(row: sqlite3.Row) -> AgentTaskRecord:
         user_role=row["user_role"],
         max_steps=row["max_steps"],
         conversation_id=row["conversation_id"],
-        matter_id=row["matter_id"] if "matter_id" in row.keys() else row["task_id"],
+        matter_id=row["matter_id"] if "matter_id" in row_keys else row["task_id"],
         status=AgentTaskStatus(row["status"]),
         stage=row["stage"],
         progress=row["progress"],

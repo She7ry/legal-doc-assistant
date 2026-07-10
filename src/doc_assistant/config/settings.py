@@ -41,16 +41,6 @@ def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
-def _float_csv_env(name: str, default: str = "") -> tuple[float, ...]:
-    values = []
-    for part in _csv_env(name, default):
-        try:
-            values.append(float(part))
-        except ValueError as exc:
-            raise ValueError(f"{name} must be a comma-separated list of numbers.") from exc
-    return tuple(values)
-
-
 def _json_object_env(name: str) -> dict[str, Any]:
     value = os.getenv(name)
     if not value:
@@ -173,11 +163,6 @@ class LLMSettings:
         default_factory=lambda: _json_object_env("DOC_ASSISTANT_CHAT_EXTRA_BODY")
     )
     llm_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_LLM_MAX_RETRIES", 3))
-    llm_circuit_breaker_threshold: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_LLM_CIRCUIT_BREAKER_THRESHOLD", 5))
-    llm_circuit_breaker_cooldown_seconds: int = field(
-        default_factory=lambda: _int_env("DOC_ASSISTANT_LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30)
-    )
-    enable_thinking: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_ENABLE_THINKING", False))
     temperature: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_TEMPERATURE", 0.0))
 
 
@@ -260,23 +245,11 @@ class SkillSettings:
 
 @dataclass(frozen=True)
 class AgentSettings:
-    """Agent / 规划器配置。"""
+    """Agent and tool-calling runtime limits."""
 
-    agent_max_parallel_steps: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_MAX_PARALLEL_STEPS", 3))
-    agent_step_max_retries: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_STEP_MAX_RETRIES", 2))
-    agent_step_retry_backoff_seconds: tuple[float, ...] = field(
-        default_factory=lambda: _float_csv_env(
-            "DOC_ASSISTANT_AGENT_STEP_RETRY_BACKOFF_SECONDS",
-            "2,5",
-        )
-    )
-    agent_llm_planner_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_LLM_PLANNER_ENABLED", True))
-    agent_react_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_AGENT_REACT_ENABLED", True))
-    agent_react_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_AGENT_REACT_MAX_ITERATIONS", 2))
     chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
     tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
     tool_call_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_HISTORY_WINDOW", 12))
-    tool_call_timeout_seconds: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_TIMEOUT_SECONDS", 30))
 
 
 @dataclass(frozen=True)
@@ -285,26 +258,7 @@ class MemorySettings:
 
     memory_top_k: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TOP_K", 5))
     memory_min_confidence: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE", 0.55))
-    memory_semantic_dedup_min_score: float = field(
-        default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_SEMANTIC_DEDUP_MIN_SCORE", 0.88)
-    )
-    memory_session_ttl_hours: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_SESSION_TTL_HOURS", 24))
-    memory_task_ttl_hours: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_TASK_TTL_HOURS", 168))
-    memory_max_active_per_user: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_MAX_ACTIVE_PER_USER", 500))
-    memory_decay_half_life_days: float = field(default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_DECAY_HALF_LIFE_DAYS", 90.0))
-    memory_maintenance_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_MEMORY_MAINTENANCE_ENABLED", True))
-    memory_maintenance_cooldown_seconds: int = field(
-        default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_MAINTENANCE_COOLDOWN_SECONDS", 300)
-    )
-    memory_auto_summary_threshold: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD", 12))
-    memory_auto_summary_interval: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_INTERVAL", 5))
-    memory_auto_summary_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_WINDOW", 40))
     memory_prompt_max_tokens: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS", 800))
-    memory_llm_extraction_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED", True))
-    memory_llm_extraction_max_items: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MAX_ITEMS", 3))
-    memory_llm_extraction_min_confidence: float = field(
-        default_factory=lambda: _float_env("DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_MIN_CONFIDENCE", 0.6)
-    )
 
 
 @dataclass(frozen=True)
@@ -416,30 +370,9 @@ class Settings:
             "skill_max_retrieval_queries",
         ):
             _validate_positive(name, getattr(skill, name))
-        a = self.agent
-        if a.agent_step_max_retries < 0:
-            raise ValueError("agent_step_max_retries must be greater than or equal to 0.")
-        if any(value < 0 for value in a.agent_step_retry_backoff_seconds):
-            raise ValueError("agent_step_retry_backoff_seconds values must be non-negative.")
-        if a.agent_react_max_iterations < 0:
-            raise ValueError("agent_react_max_iterations must be greater than or equal to 0.")
         m = self.memory
-        if m.memory_auto_summary_threshold < 0:
-            raise ValueError("memory_auto_summary_threshold must be greater than or equal to 0.")
-        if m.memory_auto_summary_interval <= 0:
-            raise ValueError("memory_auto_summary_interval must be greater than 0.")
-        if m.memory_auto_summary_window <= 0:
-            raise ValueError("memory_auto_summary_window must be greater than 0.")
         if m.memory_prompt_max_tokens <= 0:
             raise ValueError("memory_prompt_max_tokens must be greater than 0.")
-        if not 0 <= m.memory_semantic_dedup_min_score <= 1:
-            raise ValueError("memory_semantic_dedup_min_score must be between 0 and 1.")
-        if m.memory_maintenance_cooldown_seconds < 0:
-            raise ValueError("memory_maintenance_cooldown_seconds must be greater than or equal to 0.")
-        if m.memory_llm_extraction_max_items <= 0:
-            raise ValueError("memory_llm_extraction_max_items must be greater than 0.")
-        if not 0 <= m.memory_llm_extraction_min_confidence <= 1:
-            raise ValueError("memory_llm_extraction_min_confidence must be between 0 and 1.")
 
     def with_overrides(self, **kwargs: Any) -> Settings:
         """返回应用了临时覆盖项的新 Settings 副本（测试或单次请求用）。

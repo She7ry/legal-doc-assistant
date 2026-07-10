@@ -9,12 +9,7 @@ from fastapi.testclient import TestClient
 from api import dependencies
 from api.agent_tasks import AgentTaskStore
 from api.main import app
-from doc_assistant.agent.schemas import (
-    AgentArtifact,
-    AgentConfirmationGate,
-    AgentTaskResult,
-    MatterProfile,
-)
+from doc_assistant.agent.schemas import AgentTaskResult
 from doc_assistant.matter.store import MatterStore
 
 
@@ -23,20 +18,17 @@ class FastAgentService:
         progress_callback = kwargs.get("progress_callback")
         if progress_callback:
             progress_callback(
-                event_type="plan_created",
-                stage="planning",
+                event_type="react_started",
+                stage="answering",
                 progress=10,
-                message="Created a test plan.",
-                payload={"plan": []},
+                message="Running ReAct tool-calling workflow.",
             )
         return AgentTaskResult(
             task_id=kwargs["task_id"],
             status="completed",
             objective=kwargs["objective"],
-            plan=[],
             steps=[],
             findings=[],
-            missing_information=[],
             human_review_required=False,
             report="Test report.",
             citations=[],
@@ -47,62 +39,51 @@ class FastAgentService:
 class RichAgentService:
     def run_task(self, **kwargs) -> AgentTaskResult:
         matter_id = kwargs["matter_id"]
-        gate = AgentConfirmationGate(
-            gate_id="confirm_user_side",
-            gate_type="matter_fact",
-            title="Confirm represented side",
-            question="Confirm which side the user represents.",
-            priority="high",
-            reason="The fake task leaves user_side unconfirmed.",
-        )
+        gate = {
+            "gate_id": "confirm_user_side",
+            "gate_type": "matter_fact",
+            "title": "Confirm represented side",
+            "question": "Confirm which side the user represents.",
+            "status": "pending",
+            "priority": "high",
+            "required": True,
+            "reason": "The fake task leaves user_side unconfirmed.",
+            "related_finding_ids": [],
+            "related_artifact_ids": [],
+            "citations": [],
+            "metadata": {},
+        }
         return AgentTaskResult(
             task_id=kwargs["task_id"],
             status="needs_human_review",
             objective=kwargs["objective"],
-            plan=[],
             steps=[],
             findings=[],
-            missing_information=[],
             human_review_required=True,
             report="Matter report.",
             citations=[],
             confidence="Medium",
-            matter_profile=MatterProfile(
-                matter_id=matter_id,
-                document_type="SaaS agreement",
-                parties=["VendorCo", "CustomerCo"],
-                governing_law="New York",
-                review_scope=["termination"],
-                open_questions=["Confirm user side."],
-                confirmation_gates=[
-                    {
-                        "gate_id": gate.gate_id,
-                        "gate_type": gate.gate_type,
-                        "title": gate.title,
-                        "question": gate.question,
-                        "status": gate.status,
-                        "priority": gate.priority,
-                        "required": gate.required,
-                        "reason": gate.reason,
-                        "related_finding_ids": gate.related_finding_ids,
-                        "related_artifact_ids": gate.related_artifact_ids,
-                        "citations": gate.citations,
-                        "metadata": gate.metadata,
-                    }
-                ],
-            ),
+            matter_profile={
+                "matter_id": matter_id,
+                "document_type": "SaaS agreement",
+                "parties": ["VendorCo", "CustomerCo"],
+                "governing_law": "New York",
+                "review_scope": ["termination"],
+                "open_questions": ["Confirm user side."],
+                "confirmation_gates": [gate],
+            },
             artifacts=[
-                AgentArtifact(
-                    artifact_id="risk_matrix",
-                    artifact_type="risk_matrix",
-                    title="Risk matrix",
-                    summary="Structured risk rows.",
-                    items=[{"item_id": "risk-1", "category": "termination"}],
-                    source_finding_ids=["f1"],
-                    citations=["S1"],
-                )
+                {
+                    "artifact_id": "risk_matrix",
+                    "artifact_type": "risk_matrix",
+                    "title": "Risk matrix",
+                    "summary": "Structured risk rows.",
+                    "items": [{"item_id": "risk-1", "category": "termination"}],
+                    "source_finding_ids": ["f1"],
+                    "citations": ["S1"],
+                    "metadata": {},
+                }
             ],
-            confirmation_gates=[gate],
         )
 
 
@@ -251,7 +232,7 @@ def test_agent_task_api_resumes_task_after_supplemental_input(tmp_path) -> None:
         assert "Review payment and termination risk" in data["result"]["objective"]
         event_types = [event["event_type"] for event in data["events"]]
         assert "input_received" in event_types
-        assert event_types[-4:] == ["queued", "running", "plan_created", "succeeded"]
+        assert event_types[-4:] == ["queued", "running", "react_started", "succeeded"]
     finally:
         app.dependency_overrides.clear()
 
