@@ -174,7 +174,7 @@ def update_matter_artifact(
     fields_set = get_fields_set(body)
     if not fields_set:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one artifact field must be provided.",
         )
     try:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from api.agent_tasks import AgentTaskStatus, AgentTaskStore
 
 
@@ -147,3 +150,33 @@ def test_agent_task_store_persists_tasks_to_sqlite(tmp_path) -> None:
     assert loaded.error == "model unavailable"
     assert loaded.events
     assert loaded.events[-1].event_type == "failed"
+
+
+def test_agent_task_store_claims_sqlite_task_once_and_does_not_restart_running(tmp_path) -> None:
+    db_path = tmp_path / "agent_tasks.sqlite3"
+    first_store = AgentTaskStore(db_path)
+    second_store = AgentTaskStore(db_path)
+    task = first_store.create(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        objective="Review liability.",
+        focus_areas=["liability limitation"],
+        user_role="ordinary",
+        max_steps=5,
+        conversation_id=None,
+    )
+    barrier = Barrier(2)
+
+    def claim(store: AgentTaskStore) -> bool:
+        barrier.wait()
+        return store.claim(task.task_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = list(executor.map(claim, (first_store, second_store)))
+
+    assert sum(claimed) == 1
+    assert first_store.list_restartable() == []
+    loaded = second_store.get(task.task_id, "tenant-a", "user-a")
+    assert loaded is not None
+    assert loaded.status == AgentTaskStatus.RUNNING
+    assert [event.event_type for event in loaded.events or []].count("running") == 1

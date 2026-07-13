@@ -82,13 +82,12 @@ class IngestJobStore:
                     rows = connection.execute(
                         """
                         SELECT * FROM ingest_jobs
-                        WHERE status IN (?, ?)
+                        WHERE status = ?
                         ORDER BY submitted_at ASC
                         LIMIT ?
                         """,
                         (
                             IngestJobStatus.QUEUED.value,
-                            IngestJobStatus.RUNNING.value,
                             max(1, min(limit, 500)),
                         ),
                     ).fetchall()
@@ -97,8 +96,40 @@ class IngestJobStore:
             return [
                 replace(record)
                 for record in self._jobs.values()
-                if record.status in {IngestJobStatus.QUEUED, IngestJobStatus.RUNNING}
+                if record.status == IngestJobStatus.QUEUED
             ][:limit]
+
+    def claim(self, job_id: str, stage: str = "parsing", progress: int = 15) -> bool:
+        progress = clamp_progress(progress)
+        started_at = utc_now()
+        with self._lock:
+            if self.db_path:
+                with self._connect() as connection:
+                    cursor = connection.execute(
+                        """
+                        UPDATE ingest_jobs
+                        SET status = ?, stage = ?, progress = ?, started_at = ?
+                        WHERE job_id = ? AND status = ?
+                        """,
+                        (
+                            IngestJobStatus.RUNNING.value,
+                            stage,
+                            progress,
+                            datetime_to_db(started_at),
+                            job_id,
+                            IngestJobStatus.QUEUED.value,
+                        ),
+                    )
+                return cursor.rowcount == 1
+
+            record = self._jobs.get(job_id)
+            if record is None or record.status != IngestJobStatus.QUEUED:
+                return False
+            record.status = IngestJobStatus.RUNNING
+            record.stage = stage
+            record.progress = progress
+            record.started_at = started_at
+            return True
 
     def mark_running(self, job_id: str, stage: str = "parsing", progress: int = 15) -> None:
         with self._lock:

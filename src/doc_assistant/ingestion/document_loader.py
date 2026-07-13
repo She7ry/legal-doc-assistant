@@ -142,9 +142,9 @@ def _ocr_pdf_pages(path: Path, pages: list[int]) -> tuple[dict[int, str], list[s
                 warnings.append(f"OCR produced no image for PDF page {page + 1}.")
                 continue
             text = pytesseract.image_to_string(images[0], lang=settings.pdf_ocr_lang).strip()
-        except Exception as exc:
+        except Exception:
             logger.warning("PDF OCR failed", extra={"path": str(path), "page": page}, exc_info=True)
-            warnings.append(f"OCR failed for PDF page {page + 1}: {exc}")
+            warnings.append(f"OCR failed for PDF page {page + 1}.")
             continue
 
         if text:

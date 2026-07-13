@@ -11,10 +11,6 @@ from typing import Any
 
 from doc_assistant.review.taxonomy import allowed_conflict_type_keys
 from doc_assistant.schemas.citation import Citation
-from doc_assistant.utils.json import extract_json_object as _extract_json_object
-from doc_assistant.utils.text import optional_text
-
-extract_json_object = _extract_json_object
 
 
 def as_str(value: Any, default: str = "") -> str:
@@ -25,9 +21,6 @@ def as_str(value: Any, default: str = "") -> str:
     if isinstance(value, (int, float, bool)):
         return str(value)
     return default
-
-
-optional_str = optional_text
 
 
 def as_list_str(value: Any) -> list[str]:
@@ -43,41 +36,6 @@ def as_list_str(value: Any) -> list[str]:
                 result.append(text)
         return result
     return []
-
-
-def coerce_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"true", "yes", "y", "found"}:
-            return True
-        if normalized in {"false", "no", "n", "not found"}:
-            return False
-    return None
-
-
-def coerce_risk_level(value: Any) -> str:
-    if not isinstance(value, str):
-        return "Needs human review"
-    normalized = value.strip().casefold().replace("_", " ")
-    if "human" in normalized or "review" in normalized:
-        return "Needs human review"
-    for level in ("Low", "Medium", "High"):
-        if normalized == level.casefold() or level.casefold() in normalized:
-            return level
-    return "Needs human review"
-
-
-def coerce_conflict_status(value: Any) -> str:
-    if not isinstance(value, str):
-        return "Insufficient information"
-    normalized = value.strip().casefold()
-    if "potential" in normalized or ("conflict" in normalized and "no" not in normalized):
-        return "Potential conflict"
-    if "no conflict" in normalized or normalized == "none":
-        return "No conflict found"
-    return "Insufficient information"
 
 
 def coerce_conflict_type(value: Any) -> str:

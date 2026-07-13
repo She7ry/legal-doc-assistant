@@ -11,7 +11,7 @@ _clean_text = compact_text
 
 SOURCE_REF_PATTERN = re.compile(r"\[([SCDPW]\d+)\]", re.IGNORECASE)
 BARE_SOURCE_REF_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])([SCDPW]\d+)(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9])(?<!\[)([SCDPW]\d+)(?![A-Za-z0-9])(?!\])",
     re.IGNORECASE,
 )
 

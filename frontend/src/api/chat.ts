@@ -10,7 +10,6 @@ import type {
   ConversationMessagesResponse,
   ConversationRecord,
   ConversationUpdateRequest,
-  MemoryUsage,
 } from "./types";
 
 export function askQuestion(body: AskRequest): Promise<AnswerResponse> {
@@ -71,7 +70,6 @@ export function updateChatConversation(
 
 export interface StreamMetadata {
   citations: Citation[];
-  memories_used?: MemoryUsage[];
 }
 
 export interface StreamDelta {
@@ -111,7 +109,7 @@ export async function askQuestionStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let answer: AnswerResponse = { content: "", citations: [], memories_used: [] };
+  let answer: AnswerResponse = { content: "", citations: [] };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -205,7 +203,6 @@ function handleStreamEvent(
     answer = {
       ...answer,
       citations: metadata.citations,
-      memories_used: metadata.memories_used ?? [],
     };
     handlers.onMetadata?.(metadata);
     return answer;

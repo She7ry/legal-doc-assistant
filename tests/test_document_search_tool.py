@@ -4,35 +4,20 @@ import pytest
 from langchain_core.documents import Document
 
 from doc_assistant.tools.document_search import (
-    DocumentSearchTool,
     SearchDocumentsInput,
+    document_search_result,
 )
 
 
-class RecordingBackend:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, int | None]] = []
+def test_document_search_result_normalizes_document() -> None:
+    result = document_search_result(
+        Document(
+            page_content="  Payment is due\nwithin 30 days.  ",
+            metadata={"file_name": "contract.pdf", "page": 1, "chunk_id": 3},
+        )
+    )
 
-    def search(self, query: str, k: int | None = None) -> list[Document]:
-        self.calls.append((query, k))
-        return [
-            Document(
-                page_content="  Payment is due\nwithin 30 days.  ",
-                metadata={"file_name": "contract.pdf", "page": 1, "chunk_id": 3},
-            )
-        ]
-
-
-def test_document_search_tool_executes_and_normalizes_results() -> None:
-    backend = RecordingBackend()
-    tool = DocumentSearchTool(backend, default_top_k=4)
-
-    arguments = SearchDocumentsInput(query=" payment terms ", top_k=10)
-    execution = tool.execute(arguments.query, arguments.top_k)
-
-    assert backend.calls == [("payment terms", 10)]
-    assert execution.query == "payment terms"
-    assert execution.hits[0].result == {
+    assert result == {
         "file_name": "contract.pdf",
         "file_id": None,
         "document_key": None,

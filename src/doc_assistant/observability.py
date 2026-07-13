@@ -18,12 +18,12 @@ def traced_operation(operation: str, **context: Any) -> Iterator[None]:
     try:
         yield
     except Exception as exc:
-        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.error(
             "Operation failed",
             extra={
                 "operation": operation,
-                "elapsed_ms": elapsed_ms,
+                "duration_ms": duration_ms,
                 "error": str(exc),
                 **context,
             },
@@ -31,8 +31,8 @@ def traced_operation(operation: str, **context: Any) -> Iterator[None]:
         )
         raise
     else:
-        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.info(
             "Operation completed",
-            extra={"operation": operation, "elapsed_ms": elapsed_ms, **context},
+            extra={"operation": operation, "duration_ms": duration_ms, **context},
         )

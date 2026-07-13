@@ -1,11 +1,7 @@
 from langchain_core.documents import Document
 
 from doc_assistant.retrieval.document_identity import document_identity
-from doc_assistant.utils.json import (
-    extract_json_array,
-    extract_json_object,
-    parse_json_object,
-)
+from doc_assistant.utils.json import parse_json_object
 from doc_assistant.utils.text import as_text_list, compact_text, dedupe_texts, optional_text
 
 
@@ -27,12 +23,6 @@ def test_json_helpers_parse_persisted_and_llm_output() -> None:
     assert parse_json_object('{"status": "ok"}') == {"status": "ok"}
     assert parse_json_object("[]") is None
     assert parse_json_object("not json") is None
-    assert extract_json_object('Result: ```json\n{"status": "ok"}\n```') == {
-        "status": "ok"
-    }
-    assert extract_json_array('Plan: ```json\n[{"tool": "search"}]\n```') == [
-        {"tool": "search"}
-    ]
 
 
 def test_document_identity_uses_canonical_chunk_metadata() -> None:

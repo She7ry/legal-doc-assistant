@@ -82,19 +82,27 @@ def get_document_text(
     document_key: str | None = Query(default=None, min_length=1, max_length=128),
     file_id: str | None = Query(default=None, min_length=1, max_length=128),
     document_version: int | None = Query(default=None, ge=1),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
 ) -> DocumentTextResponse:
+    if not document_key and not file_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Provide document_key or file_id.",
+        )
     try:
         preview = vector_store.get_document_text(
             document_key=document_key,
             file_id=file_id,
             document_version=document_version,
+            offset=offset,
+            limit=limit,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Failed to load document text")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to load document text: {exc}",
+            detail="Document text service is unavailable.",
         ) from exc
 
     if preview is None:
@@ -111,9 +119,10 @@ def list_documents(vector_store: VectorStoreDep) -> DocumentListResponse:
     try:
         indexed_documents = vector_store.list_documents()
     except Exception as exc:
+        logger.exception("Failed to query indexed documents")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to query vector store: {exc}",
+            detail="Document index service is unavailable.",
         ) from exc
 
     docs = [DocumentInfo(**document) for document in indexed_documents]
@@ -142,7 +151,8 @@ def _run_ingest_job(
     vector_store: DocumentVectorStore,
     job_store: IngestJobStore,
 ) -> None:
-    job_store.mark_running(job_id)
+    if not job_store.claim(job_id):
+        return
 
     def update_progress(stage: str, progress: int, warning: str | None = None) -> None:
         job_store.update_progress(job_id, stage, progress, warning)
@@ -153,9 +163,9 @@ def _run_ingest_job(
             file_name=file_name,
             progress_callback=update_progress,
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Document ingest job failed", extra={"job_id": job_id})
-        job_store.mark_failed(job_id, f"Failed to ingest document: {exc}")
+        job_store.mark_failed(job_id, "Document ingestion failed.")
         return
 
     job_store.mark_succeeded(job_id, result)

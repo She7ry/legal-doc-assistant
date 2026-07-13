@@ -23,9 +23,11 @@ from api.dependencies import (
     _vector_store,
     require_api_key,
 )
+from api.logging_config import configure_logging
 from api.middleware.rate_limit import SlidingWindowRateLimiter
-from api.routers import agent, chat, documents, matters, memories, review
+from api.routers import agent, chat, documents, matters, review
 from api.schemas.responses import HealthCheckOut, HealthResponse
+from api.task_queue import shutdown_background_tasks
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import SUPPORTED_EXTENSIONS
 
@@ -38,6 +40,7 @@ _rate_limiter = SlidingWindowRateLimiter(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     # Pre-warm singletons on startup so the first request does not bear the
     # cost of initialising storage, Qdrant connections, and embedding models.
     settings.ensure_directories()
@@ -48,14 +51,18 @@ async def lifespan(app: FastAPI):
     _recover_background_work()
     if not settings.api_keys:
         logger.warning("DOC_ASSISTANT_API_KEYS is not configured; API authentication is disabled.")
-    yield
-    # 清理 LLM 客户端持有的 HTTP 连接
-    from doc_assistant.models.language_model import build_chat_model
-    chat_model = build_chat_model()
-    if hasattr(chat_model, "aclose"):
-        await chat_model.aclose()
-    if hasattr(chat_model, "close"):
-        chat_model.close()
+    try:
+        yield
+    finally:
+        shutdown_background_tasks()
+        # 清理 LLM 客户端持有的 HTTP 连接
+        from doc_assistant.models.language_model import build_chat_model
+
+        chat_model = build_chat_model()
+        if hasattr(chat_model, "aclose"):
+            await chat_model.aclose()
+        if hasattr(chat_model, "close"):
+            chat_model.close()
 
 
 app = FastAPI(
@@ -82,7 +89,6 @@ api_router.include_router(chat.router)
 api_router.include_router(agent.router)
 api_router.include_router(matters.router)
 api_router.include_router(review.router)
-api_router.include_router(memories.router)
 app.include_router(api_router)
 
 
@@ -168,29 +174,9 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return _error_response(
         request=request,
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         code="validation_error",
         detail=exc.errors(),
-    )
-
-
-@app.exception_handler(ValueError)
-async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-    return _error_response(
-        request=request,
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        code="value_error",
-        detail=str(exc),
-    )
-
-
-@app.exception_handler(RuntimeError)
-async def runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
-    return _error_response(
-        request=request,
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        code="upstream_error",
-        detail=str(exc),
     )
 
 

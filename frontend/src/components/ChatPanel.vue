@@ -78,20 +78,6 @@
             v-if="message.role === 'assistant' && message.citations.length"
             :citations="message.citations"
           />
-          <div
-            v-if="message.role === 'assistant' && message.memoriesUsed.length"
-            class="memory-usage-list"
-          >
-            <span>Memory used</span>
-            <el-tag
-              v-for="memory in message.memoriesUsed"
-              :key="memory.memory_id"
-              effect="plain"
-              size="small"
-            >
-              {{ memory.type }}: {{ memory.key }}
-            </el-tag>
-          </div>
         </div>
       </article>
     </div>
@@ -138,7 +124,6 @@ import type {
   Citation,
   ConversationRecord,
   EvidenceProfile,
-  MemoryUsage,
 } from "../api/types";
 import CitationList from "./CitationList.vue";
 import EvidencePanel from "./EvidencePanel.vue";
@@ -148,7 +133,6 @@ interface UiMessage {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
-  memoriesUsed: MemoryUsage[];
   confidence: string | null;
   guardWarnings: string[];
   evidence: EvidenceProfile | null;
@@ -202,7 +186,6 @@ async function send() {
     role: "user",
     content: text,
     citations: [],
-    memoriesUsed: [],
     confidence: null,
     guardWarnings: [],
     evidence: null,
@@ -213,7 +196,6 @@ async function send() {
     role: "assistant",
     content: "",
     citations: [],
-    memoriesUsed: [],
     confidence: null,
     guardWarnings: [],
     evidence: null,
@@ -234,7 +216,6 @@ async function send() {
           const message = findMessage(assistantId);
           if (message) {
             message.citations = metadata.citations;
-            message.memoriesUsed = metadata.memories_used ?? [];
           }
         },
         onDelta(delta) {
@@ -249,7 +230,6 @@ async function send() {
           if (message) {
             message.content = answer.content;
             message.citations = answer.citations;
-            message.memoriesUsed = answer.memories_used ?? [];
             message.confidence = answer.confidence ?? null;
             message.guardWarnings = answer.guard_warnings ?? [];
             message.evidence = answer.evidence ?? null;
@@ -356,7 +336,6 @@ async function restoreConversation() {
       role: message.role,
       content: message.content,
       citations: [],
-      memoriesUsed: [],
       confidence: null,
       guardWarnings: [],
       evidence: null,

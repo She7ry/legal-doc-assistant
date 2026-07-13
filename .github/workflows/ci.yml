@@ -22,7 +22,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: python -m pip install -e ".[dev,eval]"
+        run: python -m pip install -c constraints-py311.txt -e ".[dev,eval]"
+
+      - name: Run Ruff
+        run: python -m ruff check src api tests scripts
 
       - name: Run pytest
         run: python -m pytest -q
@@ -80,7 +83,7 @@ jobs:
 
       - name: Install eval dependencies
         if: steps.eval_credentials.outputs.enabled == 'true'
-        run: python -m pip install -e ".[dev,eval]"
+        run: python -m pip install -c constraints-py311.txt -e ".[dev,eval]"
 
       - name: Run RAG eval gate
         if: steps.eval_credentials.outputs.enabled == 'true'

@@ -66,7 +66,20 @@ class MatterRepository:
         rows = connection.execute(
             sql.SELECT_MATTERS_BY_USER, (tenant_id, user_id, max(1, min(limit, 200))),
         ).fetchall()
-        return [_row_to_matter(row) for row in rows]
+        records = [_row_to_matter(row) for row in rows]
+        # ponytail: bounded N+1; bulk-load findings if Matter list latency becomes measurable.
+        return [
+            replace(
+                record,
+                findings=self.list_findings(
+                    connection,
+                    record.matter_id,
+                    tenant_id,
+                    user_id,
+                ),
+            )
+            for record in records
+        ]
 
     def upsert_matter(
         self,

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from threading import enumerate as enumerate_threads
+from types import SimpleNamespace
+
 from api.jobs import IngestJobStatus, IngestJobStore
+from api.task_queue import shutdown_background_tasks, submit_background_task
 from doc_assistant.schemas.citation import IngestResult
 
 
@@ -62,3 +69,63 @@ def test_ingest_job_store_persists_jobs_to_sqlite(tmp_path) -> None:
     assert loaded.status == IngestJobStatus.SUCCEEDED
     assert loaded.result == result
     assert loaded.warnings == ["empty page"]
+
+
+def test_ingest_job_store_claims_sqlite_job_once_and_does_not_restart_running(tmp_path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    first_store = IngestJobStore(db_path)
+    second_store = IngestJobStore(db_path)
+    job = first_store.create("tenant-a", "contract.txt", tmp_path / "contract.txt")
+    barrier = Barrier(2)
+
+    def claim(store: IngestJobStore) -> bool:
+        barrier.wait()
+        return store.claim(job.job_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = list(executor.map(claim, (first_store, second_store)))
+
+    assert sum(claimed) == 1
+    assert first_store.list_restartable() == []
+    loaded = second_store.get(job.job_id, "tenant-a")
+    assert loaded is not None
+    assert loaded.status == IngestJobStatus.RUNNING
+
+
+def test_background_executor_rebuilds_across_lifespans(monkeypatch) -> None:
+    from api import main as api_main
+    from doc_assistant.models import language_model
+
+    completed: list[str] = []
+    monkeypatch.setattr(api_main, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        api_main,
+        "settings",
+        SimpleNamespace(
+            default_tenant_id="default",
+            api_keys=("test",),
+            ensure_directories=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(api_main, "_vector_store", lambda _tenant_id: None)
+    monkeypatch.setattr(api_main, "_memory_service", lambda _tenant_id: None)
+    monkeypatch.setattr(api_main, "_qa_service", lambda _tenant_id: None)
+    monkeypatch.setattr(api_main, "_agent_service", lambda _tenant_id: None)
+    monkeypatch.setattr(api_main, "_recover_background_work", lambda: None)
+    monkeypatch.setattr(language_model, "build_chat_model", lambda: object())
+
+    async def run_once(key: str, value: str) -> None:
+        async with api_main.lifespan(api_main.app):
+            assert submit_background_task(key, completed.append, value)
+
+    try:
+        asyncio.run(run_once("lifespan-first", "first"))
+        asyncio.run(run_once("lifespan-second", "second"))
+    finally:
+        shutdown_background_tasks()
+
+    assert completed == ["first", "second"]
+    assert not any(
+        thread.is_alive() and thread.name.startswith("legal-doc-background")
+        for thread in enumerate_threads()
+    )

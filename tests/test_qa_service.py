@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -55,6 +58,18 @@ class StructuredFakeListChatModel(FakeListChatModel):
         return RunnableLambda(lambda messages: schema.model_validate_json(self.invoke(messages).content))
 
 
+class SlowFakeListChatModel(FakeListChatModel):
+    heartbeat_ticks: list[int]
+    invocation_threads: list[int]
+
+    def _call(self, *args, **kwargs) -> str:
+        heartbeat_before = self.heartbeat_ticks[0]
+        time.sleep(0.05)
+        assert self.heartbeat_ticks[0] > heartbeat_before
+        self.invocation_threads.append(threading.get_ident())
+        return super()._call(*args, **kwargs)
+
+
 def test_ask_uses_general_chat_when_no_documents_are_found() -> None:
     service = DocumentQAService(
         vector_store=EmptyVectorStore(),
@@ -65,6 +80,47 @@ def test_ask_uses_general_chat_when_no_documents_are_found() -> None:
 
     assert answer.content == "Hello! Nice to see you."
     assert answer.citations == []
+
+
+def test_aask_offloads_sync_rewrite_and_finalize() -> None:
+    model = SlowFakeListChatModel(
+        responses=[
+            "clause enforceability",
+            "The clause is invalid [S1].",
+            "The clause may be unenforceable and requires legal review [S1].",
+        ],
+        heartbeat_ticks=[0],
+        invocation_threads=[],
+    )
+    service = DocumentQAService(
+        vector_store=StaticVectorStore(
+            [Document(page_content=model.responses[-1], metadata={"file_name": "contract.pdf"})]
+        ),
+        chat_model=model,
+    )
+    loop_thread = threading.get_ident()
+
+    async def run() -> None:
+        done = asyncio.Event()
+
+        async def heartbeat() -> None:
+            while not done.is_set():
+                model.heartbeat_ticks[0] += 1
+                await asyncio.sleep(0.001)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        answer = await service.aask(
+            "这个条款有效吗？",
+            chat_history=[{"role": "user", "content": "请审查这个条款。"}],
+        )
+        done.set()
+        await heartbeat_task
+        assert answer.content == model.responses[-1]
+
+    asyncio.run(run())
+
+    assert len(model.invocation_threads) == 3
+    assert all(thread_id != loop_thread for thread_id in model.invocation_threads)
 
 
 def test_format_chat_history_keeps_recent_user_and_assistant_messages() -> None:

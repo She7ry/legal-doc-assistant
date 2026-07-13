@@ -619,19 +619,8 @@ const hasActiveFilters = computed(
     filters.gateStatus !== "all" ||
     filters.riskSeverity !== "all",
 );
-const unresolvedRequiredGates = computed(() =>
-  confirmationGates.value.filter(
-    (gate) => gateRequired(gate) && !["approved", "waived"].includes(gateStatus(gate)),
-  ),
-);
-const unresolvedFindings = computed(() =>
-  findings.value.filter((finding) => !isFindingFormalReady(finding)),
-);
 const canGenerateFormalReport = computed(
-  () =>
-    Boolean(selectedMatter.value) &&
-    !unresolvedRequiredGates.value.length &&
-    !unresolvedFindings.value.length,
+  () => Boolean(selectedMatter.value?.can_generate_formal_report),
 );
 const canExportArtifactBundle = computed(
   () =>
@@ -1180,19 +1169,6 @@ function severityType(severity: string) {
     return "success";
   }
   return "info";
-}
-
-function isFindingFormalReady(finding: MatterFindingRecord) {
-  const reviewReady =
-    !finding.needs_human_review ||
-    ["approved", "waived", "resolved", "not_required"].includes(finding.human_review_status);
-  const evidenceReady =
-    Boolean(finding.citations.length) &&
-    Boolean(finding.source_quote) &&
-    Boolean(finding.location_label) &&
-    Boolean(finding.support_level) &&
-    (finding.support_level === "direct" || Boolean(finding.unsupported_reason));
-  return reviewReady && evidenceReady;
 }
 
 function isFindingUpdating(

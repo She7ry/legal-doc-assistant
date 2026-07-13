@@ -97,7 +97,7 @@ class AgentTaskStore:
             user_role=user_role,
             max_steps=max_steps,
             conversation_id=conversation_id,
-            matter_id=matter_id or task_id,
+            matter_id=matter_id,
             status=AgentTaskStatus.QUEUED,
             stage="queued",
             progress=0,
@@ -148,13 +148,12 @@ class AgentTaskStore:
                     rows = connection.execute(
                         """
                         SELECT * FROM agent_tasks
-                        WHERE status IN (?, ?)
+                        WHERE status = ?
                         ORDER BY submitted_at ASC
                         LIMIT ?
                         """,
                         (
                             AgentTaskStatus.QUEUED.value,
-                            AgentTaskStatus.RUNNING.value,
                             max(1, min(limit, 500)),
                         ),
                     ).fetchall()
@@ -163,8 +162,58 @@ class AgentTaskStore:
             return [
                 self._copy_record(record)
                 for record in self._tasks.values()
-                if record.status in {AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING}
+                if record.status == AgentTaskStatus.QUEUED
             ][:limit]
+
+    def claim(self, task_id: str) -> bool:
+        started_at = utc_now()
+        with self._lock:
+            if self.db_path:
+                with self._connect() as connection:
+                    cursor = connection.execute(
+                        """
+                        UPDATE agent_tasks
+                        SET status = ?, stage = ?, progress = ?, started_at = ?
+                        WHERE task_id = ? AND status = ?
+                        """,
+                        (
+                            AgentTaskStatus.RUNNING.value,
+                            "answering",
+                            5,
+                            datetime_to_db(started_at),
+                            task_id,
+                            AgentTaskStatus.QUEUED.value,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        return False
+                    self._insert_event_with_connection(
+                        connection,
+                        task_id,
+                        event_type="running",
+                        stage="answering",
+                        progress=5,
+                        message="Agent task started.",
+                        step_id=None,
+                        payload=None,
+                    )
+                return True
+
+            record = self._tasks.get(task_id)
+            if record is None or record.status != AgentTaskStatus.QUEUED:
+                return False
+            record.status = AgentTaskStatus.RUNNING
+            record.stage = "answering"
+            record.progress = 5
+            record.started_at = started_at
+            self._append_event(
+                task_id,
+                event_type="running",
+                stage=record.stage,
+                progress=record.progress,
+                message="Agent task started.",
+            )
+            return True
 
     def mark_running(self, task_id: str) -> None:
         with self._lock:
@@ -208,7 +257,13 @@ class AgentTaskStore:
                 payload=payload,
             )
 
-    def mark_succeeded(self, task_id: str, result: dict[str, Any]) -> None:
+    def mark_succeeded(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+        *,
+        matter_id: str | None = None,
+    ) -> None:
         with self._lock:
             record = self._require_record(task_id)
             record.status = AgentTaskStatus.SUCCEEDED
@@ -217,6 +272,7 @@ class AgentTaskStore:
             record.completed_at = utc_now()
             record.result = result
             record.error = None
+            record.matter_id = matter_id
             self._save_record(record)
             self._append_event(
                 task_id,
@@ -264,7 +320,7 @@ class AgentTaskStore:
             record.user_role = user_role
             record.max_steps = max_steps
             record.conversation_id = conversation_id
-            record.matter_id = matter_id or record.matter_id or task_id
+            record.matter_id = matter_id or record.matter_id
             record.status = AgentTaskStatus.QUEUED
             record.stage = "queued"
             record.progress = 0
@@ -482,34 +538,57 @@ class AgentTaskStore:
         step_id: str | None,
         payload: dict[str, Any] | None,
     ) -> AgentTaskEventRecord:
-        created_at = utc_now()
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO agent_task_events (
-                    task_id, event_type, stage, progress, message, step_id,
-                    payload_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    event_type,
-                    stage,
-                    clamp_progress(progress),
-                    message,
-                    step_id,
-                    json.dumps(payload or {}, ensure_ascii=False),
-                    datetime_to_db(created_at),
-                ),
+            return self._insert_event_with_connection(
+                connection,
+                task_id,
+                event_type=event_type,
+                stage=stage,
+                progress=progress,
+                message=message,
+                step_id=step_id,
+                payload=payload,
             )
-            event_id = int(cursor.lastrowid)
+
+    def _insert_event_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        *,
+        event_type: str,
+        stage: str,
+        progress: int,
+        message: str,
+        step_id: str | None,
+        payload: dict[str, Any] | None,
+    ) -> AgentTaskEventRecord:
+        created_at = utc_now()
+        progress = clamp_progress(progress)
+        cursor = connection.execute(
+            """
+            INSERT INTO agent_task_events (
+                task_id, event_type, stage, progress, message, step_id,
+                payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                event_type,
+                stage,
+                progress,
+                message,
+                step_id,
+                json.dumps(payload or {}, ensure_ascii=False),
+                datetime_to_db(created_at),
+            ),
+        )
         return AgentTaskEventRecord(
-            event_id=event_id,
+            event_id=int(cursor.lastrowid),
             task_id=task_id,
             event_type=event_type,
             stage=stage,
-            progress=clamp_progress(progress),
+            progress=progress,
             message=message,
             step_id=step_id,
             payload=payload or {},

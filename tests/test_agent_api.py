@@ -133,6 +133,8 @@ def test_agent_task_api_creates_gets_and_streams_events(tmp_path) -> None:
         data = _wait_for_agent_task(client, task_id)
         assert data["status"] == "succeeded"
         assert data["result"]["report"] == "Test report."
+        assert data["matter_id"] is None
+        assert matter_store.list("default", "api-test-user") == []
 
         events = client.get(
             f"/api/v1/agent/tasks/{task_id}/events",
@@ -308,6 +310,8 @@ def test_agent_task_api_persists_matter_profile_and_artifacts(tmp_path) -> None:
         assert data["matter_profile"]["confirmation_gates"][0]["gate_id"] == "confirm_user_side"
         assert data["artifacts"][0]["artifact_type"] == "risk_matrix"
         assert data["artifacts"][0]["version"] == 1
+        assert data["can_generate_formal_report"] is False
+        assert data["formal_report_blockers"]
 
         exported = client.get(
             "/api/v1/matters/matter-saas-1/artifacts/risk_matrix/export",
@@ -395,6 +399,8 @@ def test_agent_task_api_persists_matter_profile_and_artifacts(tmp_path) -> None:
         updated_gate = updated.json()["matter_profile"]["confirmation_gates"][0]
         assert updated_gate["status"] == "waived"
         assert updated_gate["metadata"]["last_decision"]["note"] == "Business accepted this gap."
+        assert updated.json()["can_generate_formal_report"] is True
+        assert updated.json()["formal_report_blockers"] == []
 
         missing_gate = client.patch(
             "/api/v1/matters/matter-saas-1/confirmation-gates/not-a-gate",
@@ -424,5 +430,6 @@ def test_agent_task_api_persists_matter_profile_and_artifacts(tmp_path) -> None:
         )
         assert listed.status_code == 200
         assert listed.json()["total"] == 1
+        assert listed.json()["matters"][0]["can_generate_formal_report"] is True
     finally:
         app.dependency_overrides.clear()

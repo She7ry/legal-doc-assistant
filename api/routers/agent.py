@@ -85,7 +85,7 @@ def resume_agent_task(
     objective_override = _clean_text(body.objective)
     if not objective_override and not clarification_answers:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide an updated objective or at least one clarification answer.",
         )
 
@@ -159,7 +159,8 @@ def _run_agent_task(
     matter_store: MatterStore,
 ) -> None:
     task_id = record.task_id
-    task_store.mark_running(task_id)
+    if not task_store.claim(task_id):
+        return
 
     def progress_callback(**event) -> None:
         task_store.update_progress(task_id, **event)
@@ -178,25 +179,36 @@ def _run_agent_task(
         )
         response = AgentTaskResponse.from_result(result)
         encoded_response = jsonable_encoder(response)
-    except Exception as exc:
+    except Exception:
         logger.exception("Agent task failed", extra={"task_id": task_id})
-        task_store.mark_failed(task_id, f"Failed to run Agent task: {exc}")
+        task_store.mark_failed(task_id, "Agent task failed.")
         return
 
-    try:
-        matter_store.upsert_from_agent_result(
-            tenant_id=record.tenant_id,
-            user_id=record.user_id,
-            matter_id=record.matter_id or task_id,
-            result=encoded_response,
-        )
-    except Exception as exc:
-        logger.exception("Agent task completed but matter persistence failed", extra={"task_id": task_id})
-        metadata = dict(encoded_response.get("metadata") or {})
-        metadata["matter_persist_error"] = str(exc)
-        encoded_response["metadata"] = metadata
+    persisted_matter_id = None
+    if _has_matter_content(encoded_response):
+        candidate_matter_id = record.matter_id or task_id
+        try:
+            matter_store.upsert_from_agent_result(
+                tenant_id=record.tenant_id,
+                user_id=record.user_id,
+                matter_id=candidate_matter_id,
+                result=encoded_response,
+            )
+            persisted_matter_id = candidate_matter_id
+        except Exception:
+            logger.exception(
+                "Agent task completed but matter persistence failed",
+                extra={"task_id": task_id},
+            )
+            metadata = dict(encoded_response.get("metadata") or {})
+            metadata["matter_persist_error"] = "matter_persistence_failed"
+            encoded_response["metadata"] = metadata
 
-    task_store.mark_succeeded(task_id, encoded_response)
+    task_store.mark_succeeded(
+        task_id,
+        encoded_response,
+        matter_id=persisted_matter_id,
+    )
 
 
 def enqueue_agent_task(
@@ -235,6 +247,16 @@ def _check_clarification_and_enqueue(
         return AgentTaskRecordResponse.from_record(updated)
     enqueue_agent_task(record, agent_service, task_store, matter_store)
     return AgentTaskRecordResponse.from_record(record)
+
+
+def _has_matter_content(result: dict) -> bool:
+    profile = result.get("matter_profile")
+    profile_has_content = isinstance(profile, dict) and any(
+        value not in (None, "", [], {})
+        for key, value in profile.items()
+        if key != "matter_id"
+    )
+    return profile_has_content or bool(result.get("findings") or result.get("artifacts"))
 
 
 def _agent_task_event_stream(

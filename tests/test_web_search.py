@@ -58,3 +58,12 @@ def test_web_search_rejects_domain_operator_injection() -> None:
             max_results=1,
             domains=["example.com -site:competitor.com"],
         )
+
+
+def test_web_search_uses_requests_retry_adapter() -> None:
+    client = DuckDuckGoSearchClient(max_retries=3)
+    retry = client.session.get_adapter("https://").max_retries
+
+    assert retry.total == 2
+    assert 429 in retry.status_forcelist
+    assert 500 in retry.status_forcelist

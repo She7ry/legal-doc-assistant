@@ -83,7 +83,7 @@ class QdrantRetriever:
             "vector_search",
             tenant_id=self.tenant_id,
             top_k=top_k,
-            query=query[:120],
+            query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest()[:12],
             backend="qdrant",
             retrieval_mode=mode,
         ):

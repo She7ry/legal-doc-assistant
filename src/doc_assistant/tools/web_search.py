@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
-import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Annotated, Any
+from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from langchain_core.tools import InjectedToolCallId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from doc_assistant.config.settings import settings
 from doc_assistant.schemas.citation import Citation
+from doc_assistant.utils.text import optional_text
 
 DUCKDUCKGO_HTML_URL = "https://duckduckgo.com/html/"
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
@@ -47,14 +47,6 @@ class WebSource:
     source: str | None = None
 
 
-@dataclass(frozen=True)
-class WebSearchExecution:
-    """Validated query and raw web results produced by one tool execution."""
-
-    query: str
-    results: tuple[WebSearchResult, ...]
-
-
 class WebSearchInput(BaseModel):
     query: str = Field(min_length=1, max_length=300)
     recency_days: int | None = Field(default=None, ge=1, le=365)
@@ -62,12 +54,18 @@ class WebSearchInput(BaseModel):
     max_results: int | None = Field(default=None, ge=1, le=10)
     tool_call_id: Annotated[str, InjectedToolCallId] = ""
 
+    @field_validator("query")
+    @classmethod
+    def clean_query(cls, value: str) -> str:
+        if not (value := value.strip()):
+            raise ValueError("query is required")
+        return value
+
 
 class WebSearchClient:
     """网页搜索抽象基类；子类实现 DuckDuckGo / Brave / Bing。
 
-    ``search`` 为同步入口；``async_search`` 默认在线程池里调用 search，
-    供 async API 使用。子类只需实现 ``search``。
+    子类只需实现同步 ``search`` 入口。
     """
 
     def __init__(
@@ -79,9 +77,15 @@ class WebSearchClient:
     ) -> None:
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
-        self.max_retries = max_retries
         self.session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10)
+        retry = Retry(
+            total=max(0, max_retries - 1),
+            backoff_factor=1,
+            status_forcelist=(429, *range(500, 600)),
+            allowed_methods=frozenset({"GET"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=5, pool_maxsize=10)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         if default_headers:
@@ -97,30 +101,9 @@ class WebSearchClient:
     ) -> list[WebSearchResult]:
         raise NotImplementedError
 
-    async def async_search(
-        self,
-        query: str,
-        *,
-        max_results: int,
-        recency_days: int | None = None,
-        domains: list[str] | None = None,
-    ) -> list[WebSearchResult]:
-        return await asyncio.to_thread(
-            self.search,
-            query,
-            max_results=max_results,
-            recency_days=recency_days,
-            domains=domains,
-        )
-
     def _get(self, params: dict[str, object]) -> requests.Response:
-        return _get_with_retries(
-            self.session,
-            self.base_url,
-            params=params,
-            headers={},
-            timeout=self.timeout_seconds,
-            max_retries=self.max_retries,
+        return self.session.get(
+            self.base_url, params=params, headers={}, timeout=self.timeout_seconds
         )
 
 
@@ -139,45 +122,6 @@ class DisabledWebSearchClient(WebSearchClient):
         domains: list[str] | None = None,
     ) -> list[WebSearchResult]:
         raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
-
-
-class WebSearchTool:
-    """Execute web_search against an injected search client."""
-
-    def __init__(self, client: WebSearchClient, *, default_max_results: int) -> None:
-        self.client = client
-        self.default_max_results = default_max_results
-
-    def execute(
-        self,
-        query: str,
-        *,
-        max_results: int | None = None,
-        recency_days: int | None = None,
-        domains: list[str] | None = None,
-    ) -> WebSearchExecution:
-        if isinstance(self.client, DisabledWebSearchClient):
-            raise RuntimeError("Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.")
-
-        query = _required_string({"query": query}, "query", max_length=300)
-        top_k = _clamp_int(int(max_results or self.default_max_results), minimum=1, maximum=10)
-        if recency_days is not None:
-            recency_days = _clamp_int(int(recency_days), minimum=1, maximum=365)
-        if domains is not None and not isinstance(domains, list):
-            raise ValueError("domains must be a list of domain strings.")
-        clean_domains = [str(domain).strip() for domain in domains or [] if str(domain).strip()]
-
-        return WebSearchExecution(
-            query=query,
-            results=tuple(
-                self.client.search(
-                    query,
-                    max_results=top_k,
-                    recency_days=recency_days,
-                    domains=clean_domains,
-                )
-            ),
-        )
 
 
 class DuckDuckGoSearchClient(WebSearchClient):
@@ -233,7 +177,6 @@ class BraveSearchClient(WebSearchClient):
             max_retries=max_retries,
             default_headers={"X-Subscription-Token": api_key},
         )
-        self.api_key = api_key
 
     def search(
         self,
@@ -258,7 +201,7 @@ class BraveSearchClient(WebSearchClient):
                 title=str(item.get("title") or ""),
                 url=str(item.get("url") or ""),
                 snippet=str(item.get("description") or ""),
-                published_at=_string_or_none(item.get("age") or item.get("page_age")),
+                published_at=optional_text(item.get("age") or item.get("page_age")),
                 source=_domain_from_url(str(item.get("url") or "")),
             )
             for item in results[:max_results]
@@ -282,7 +225,6 @@ class BingSearchClient(WebSearchClient):
             max_retries=max_retries,
             default_headers={"Ocp-Apim-Subscription-Key": api_key},
         )
-        self.api_key = api_key
 
     def search(
         self,
@@ -307,7 +249,7 @@ class BingSearchClient(WebSearchClient):
                 title=str(item.get("name") or ""),
                 url=str(item.get("url") or ""),
                 snippet=str(item.get("snippet") or ""),
-                published_at=_string_or_none(item.get("dateLastCrawled")),
+                published_at=optional_text(item.get("dateLastCrawled")),
                 source=_domain_from_url(str(item.get("url") or "")),
             )
             for item in results[:max_results]
@@ -451,48 +393,6 @@ def _clean_domain(domain: str) -> str:
     return candidate
 
 
-def _get_with_retries(
-    session: requests.Session,
-    url: str,
-    *,
-    params: dict[str, object],
-    headers: dict[str, str],
-    timeout: int,
-    max_retries: int,
-) -> requests.Response:
-    """带指数退避的 GET 重试，429/5xx 会重试直到 max_retries。"""
-    attempts = max(1, max_retries)
-    last_error: requests.RequestException | None = None
-    for attempt in range(attempts):
-        try:
-            response = session.get(url, params=params, headers=headers, timeout=timeout)
-            if response.status_code not in {429} and response.status_code < 500:
-                return response
-            if attempt == attempts - 1:
-                return response
-        except requests.RequestException as exc:
-            last_error = exc
-            if attempt == attempts - 1:
-                raise
-        time.sleep(min(2 ** attempt, 8))
-    if last_error:
-        raise last_error
-    raise RuntimeError("Search request failed without a response.")
-
-
-def _required_string(arguments: dict[str, Any], name: str, *, max_length: int) -> str:
-    value = str(arguments.get(name) or "").strip()
-    if not value:
-        raise ValueError(f"{name} is required.")
-    if len(value) > max_length:
-        raise ValueError(f"{name} must be {max_length} characters or fewer.")
-    return value
-
-
-def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
-    return max(minimum, min(maximum, value))
-
-
 def _duckduckgo_recency_filter(recency_days: int | None) -> str | None:
     if recency_days is None:
         return None
@@ -544,10 +444,3 @@ def _decode_duckduckgo_url(value: str) -> str:
 def _domain_from_url(url: str) -> str | None:
     parsed = urlparse(url)
     return parsed.netloc or None
-
-
-def _string_or_none(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

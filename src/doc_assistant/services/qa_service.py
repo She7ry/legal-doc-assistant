@@ -181,7 +181,7 @@ class DocumentQAService:
             skill_names=skill_names,
         )
         content = await self._ainvoke_chat_messages(prepared.messages)
-        return self.finalize_prepared_answer(prepared, content)
+        return await asyncio.to_thread(self.finalize_prepared_answer, prepared, content)
 
     def finalize_prepared_answer(
         self,
@@ -198,7 +198,7 @@ class DocumentQAService:
             verify_citation_semantics=self._citation_verification_enabled(prepared),
         )
         if repair and guard_result.needs_repair:
-            content = self._repair_answer(content, guard_result, prepared)
+            content = self._repair_content(content, guard_result, prepared.citations)
             guard_result = validate_answer(
                 content,
                 prepared.citations,
@@ -356,7 +356,7 @@ class DocumentQAService:
                 evidence_sufficiency=evidence_assessment,
             )
 
-        context, citations = self._format_context(documents)
+        context, citations = format_document_context(documents, prefix="S")
         task_prompt = self.prompt.format(
             question=question,
             context=context,
@@ -442,7 +442,9 @@ class DocumentQAService:
             effective_chat_history,
             max_messages=settings.chat_history_window,
         )
-        retrieval_query = self._rewrite_query(question, chat_history_text)
+        retrieval_query = await asyncio.to_thread(
+            self._rewrite_query, question, chat_history_text,
+        )
         skill_context = self._prepare_skill_context(question, selected_names=skill_names)
         retrieval_queries = self._retrieval_queries(retrieval_query, skill_context)
         result_sets = await asyncio.gather(
@@ -549,13 +551,18 @@ class DocumentQAService:
 
     def review_clause(self, clause_type: str, top_k: int | None = None) -> QAAnswer:
         """按条款类型检索文档并输出结构化风险审查（高/中/低 + 理由 + 引用）。"""
-        from doc_assistant.services.review_service import review_clause as _review
+        from doc_assistant.tools.legal_review import review_clause as _review
 
         return _review(self, clause_type, top_k)
 
-    def check_conflict(self, contract_query: str, policy_query: str, top_k: int | None = None) -> QAAnswer:
+    def check_conflict(
+        self,
+        contract_query: str,
+        policy_query: str,
+        top_k: int | None = None,
+    ) -> QAAnswer:
         """分别检索合同与政策片段，比对义务/定义是否冲突并输出结构化结论。"""
-        from doc_assistant.services.review_service import check_conflict as _check
+        from doc_assistant.tools.legal_review import check_conflict as _check
 
         return _check(self, contract_query, policy_query, top_k)
 
@@ -566,14 +573,6 @@ class DocumentQAService:
             {"role": "system", "content": self.base_prompt},
             {"role": "user", "content": task_prompt},
         ]
-
-    def _repair_answer(
-        self,
-        answer: str,
-        guard_result: AnswerGuardResult,
-        prepared: PreparedQAAnswer,
-    ) -> str:
-        return self._repair_content(answer, guard_result, prepared.citations)
 
     def repair_content(
         self,
@@ -638,15 +637,6 @@ class DocumentQAService:
         if not rewritten or len(rewritten) > 500:
             return question
         return rewritten
-
-    def _format_context(self, documents: list[Document]) -> tuple[str, list[Citation]]:
-        """把检索到的 Document 列表格式化为 prompt 上下文 + Citation 列表（编号 S1,S2…）。"""
-        return format_document_context(documents, prefix="S")
-
-    def _format_context_prefixed(
-        self, documents: list[Document], prefix: str = "S"
-    ) -> tuple[str, list[Citation]]:
-        return format_document_context(documents, prefix=prefix)
 
     def _invoke_chat_messages(self, messages: list[dict[str, str]]) -> str:
         return str(self.chat_model.invoke(messages).content or "")

@@ -287,24 +287,7 @@ class MemoryService:
         source_message_id: str | None = None,
         task_id: str | None = None,
     ) -> MemoryRecord:
-        previous = self.store.find_active_memory_by_key(
-            tenant_id,
-            user_id,
-            scope=scope,
-            type=type,
-            key=key,
-        )
-        if previous and _same_memory(
-            previous,
-            content=content,
-            value_json=value_json,
-            visibility=visibility,
-            task_id=task_id,
-            expires_at=expires_at,
-        ):
-            return previous
-
-        memory = self.store.create_memory(
+        memory, superseded_id, created = self.store.create_or_supersede_memory(
             tenant_id=tenant_id,
             user_id=user_id,
             scope=scope,
@@ -316,14 +299,14 @@ class MemoryService:
             confidence=confidence,
             expires_at=expires_at,
             visibility=visibility,
-            supersedes_id=previous.memory_id if previous else None,
             source_message_id=source_message_id,
             conversation_id=conversation_id,
             task_id=task_id,
         )
-        if previous:
-            self.store.mark_memory_status(tenant_id, user_id, previous.memory_id, "stale")
-            self._delete_vector(previous.memory_id)
+        if not created:
+            return memory
+        if superseded_id:
+            self._delete_vector(superseded_id)
         self._upsert_vector(memory)
         return memory
 
@@ -408,8 +391,7 @@ class MemoryService:
             return {"deleted": 0, "upserted": 0}
         deleted = 0
         for memory_id in self.store.list_vector_cleanup_memory_ids(tenant_id, user_id):
-            self._delete_vector(memory_id)
-            deleted += 1
+            deleted += self._delete_vector(memory_id)
         upserted = sum(
             1
             for memory in self.store.list_active_memories_for_user(tenant_id, user_id)
@@ -495,24 +477,20 @@ class MemoryService:
         user_id: str,
         candidates: list[MemoryCandidate],
     ) -> list[MemoryCandidate]:
-        hydrate_ids = [
-            candidate.memory.memory_id
-            for candidate in candidates
-            if candidate.memory.memory_id and candidate.retrieval_source != "vector"
-        ]
+        hydrate_ids = [candidate.memory.memory_id for candidate in candidates if candidate.memory.memory_id]
         hydrated = {
             memory.memory_id: memory
             for memory in self.store.get_memories_by_ids(tenant_id, user_id, hydrate_ids)
+            if memory.status == "active" and not memory.is_expired()
         }
         return [
             MemoryCandidate(
-                memory=hydrated.get(candidate.memory.memory_id, candidate.memory),
+                memory=hydrated[candidate.memory.memory_id],
                 score=candidate.score,
                 retrieval_source="vector",
             )
             for candidate in candidates
-            if candidate.memory.memory_id
-            and (candidate.retrieval_source == "vector" or candidate.memory.memory_id in hydrated)
+            if candidate.memory.memory_id in hydrated
         ]
 
     def _upsert_vector(self, memory: MemoryRecord) -> bool:
@@ -525,10 +503,14 @@ class MemoryService:
             logger.warning("Memory vector upsert failed; memory remains in SQLite", exc_info=True)
             return False
 
-    def _delete_vector(self, memory_id: str) -> None:
+    def _delete_vector(self, memory_id: str) -> bool:
         if self.vector_store is None:
-            return
-        self.vector_store.delete_memory(memory_id)
+            return False
+        try:
+            return self.vector_store.delete_memory(memory_id)
+        except Exception:
+            logger.warning("Memory vector delete failed; SQLite remains authoritative", exc_info=True)
+            return False
 
 
 def extract_memory_write_intents(user_text: str) -> list[MemoryWriteIntent]:
@@ -618,24 +600,6 @@ def _infer_key(content: str) -> str:
     words = re.findall(r"[A-Za-z0-9_\-\u4e00-\u9fff]+", lowered)
     digest = hashlib.sha1(" ".join(words).encode("utf-8")).hexdigest()[:10] if words else ""
     return ("_".join(words[:6])[:48] + (f"_{digest}" if digest else ""))[:80] or "user_memory"
-
-
-def _same_memory(
-    memory: MemoryRecord,
-    *,
-    content: str,
-    value_json: dict | None,
-    visibility: str,
-    task_id: str | None,
-    expires_at: datetime | None,
-) -> bool:
-    return (
-        memory.content == content.strip()
-        and memory.value_json == value_json
-        and memory.visibility == visibility
-        and memory.task_id == task_id
-        and memory.expires_at == expires_at
-    )
 
 
 def _usable_candidate(candidate: MemoryCandidate, user_id: str) -> bool:

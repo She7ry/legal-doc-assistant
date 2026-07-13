@@ -1,20 +1,13 @@
-"""Document-search tool definition and execution.
-
-The tool owns its OpenAI-compatible schema, argument validation, retrieval,
-and result normalization. Conversation-scoped citation identifiers remain the
-responsibility of the calling service.
-"""
+"""Document-search tool schema and result normalization."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any
 
 from langchain_core.documents import Document
 from langchain_core.tools import InjectedToolCallId
 from pydantic import BaseModel, Field, field_validator
 
-from doc_assistant.retrieval.document_identity import document_identity
 from doc_assistant.utils.text import optional_text
 
 
@@ -31,49 +24,7 @@ class SearchDocumentsInput(BaseModel):
         return value
 
 
-class DocumentSearchBackend(Protocol):
-    """Minimal retrieval interface required by :class:`DocumentSearchTool`."""
-
-    def search(self, query: str, k: int | None = None) -> list[Document]: ...
-
-
-@dataclass(frozen=True)
-class DocumentSearchHit:
-    """A normalized document hit before a conversation source ID is assigned."""
-
-    identity: str
-    result: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class DocumentSearchExecution:
-    """Validated query and normalized hits produced by one tool execution."""
-
-    query: str
-    hits: tuple[DocumentSearchHit, ...]
-
-
-class DocumentSearchTool:
-    """Execute the ``search_documents`` tool against an injected vector store."""
-
-    def __init__(self, backend: DocumentSearchBackend, *, default_top_k: int) -> None:
-        self.backend = backend
-        self.default_top_k = default_top_k
-
-    def execute(self, query: str, top_k: int | None = None) -> DocumentSearchExecution:
-        top_k = top_k or self.default_top_k
-        documents = self.backend.search(query, k=top_k)
-        hits = tuple(
-            DocumentSearchHit(
-                identity=document_identity(document),
-                result=_document_result(document),
-            )
-            for document in documents
-        )
-        return DocumentSearchExecution(query=query, hits=hits)
-
-
-def _document_result(document: Document) -> dict[str, Any]:
+def document_search_result(document: Document) -> dict[str, Any]:
     metadata = document.metadata or {}
     content = " ".join(document.page_content.split())[:1600]
     page = metadata.get("page")
@@ -105,9 +56,6 @@ def _document_result(document: Document) -> dict[str, Any]:
 
 
 __all__ = [
-    "DocumentSearchBackend",
-    "DocumentSearchExecution",
-    "DocumentSearchHit",
-    "DocumentSearchTool",
     "SearchDocumentsInput",
+    "document_search_result",
 ]

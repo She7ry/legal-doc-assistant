@@ -102,7 +102,6 @@ export interface ConversationUpdateRequest {
 export interface AnswerResponse {
   content: string;
   citations: Citation[];
-  memories_used?: MemoryUsage[];
   confidence?: string | null;
   guard_warnings?: string[];
   evidence?: EvidenceProfile | null;
@@ -239,6 +238,8 @@ export interface MatterRecord {
   updated_at: string;
   artifacts: MatterArtifactRecord[];
   findings: MatterFindingRecord[];
+  formal_report_blockers: string[];
+  can_generate_formal_report: boolean;
 }
 
 export interface MatterListResponse {
@@ -269,19 +270,6 @@ export interface MatterArtifactUpdateRequest {
 export interface MatterFindingUpdateRequest {
   human_review_status: "pending" | "approved" | "waived" | "needs_info" | "resolved";
   note?: string | null;
-}
-
-export interface MemoryUsage {
-  memory_id: string;
-  type: string;
-  key: string;
-  content: string;
-  source: string;
-  confidence: number;
-  scope: string;
-  score: number | null;
-  superseded_conflicting?: boolean;
-  superseded_from_content?: string | null;
 }
 
 export interface ClauseReviewRequest {
@@ -396,68 +384,9 @@ export interface DocumentTextResponse {
   document: DocumentInfo;
   chunks: DocumentTextChunk[];
   total_chunks: number;
-}
-
-export interface MemoryRecord {
-  memory_id: string;
-  scope: string;
-  type: string;
-  key: string;
-  content: string;
-  value: Record<string, unknown> | null;
-  source: string;
-  confidence: number;
-  created_at: string;
-  updated_at: string;
-  expires_at: string | null;
-  visibility: string;
-  supersedes_id: string | null;
-  status: string;
-  source_message_id: string | null;
-  conversation_id: string | null;
-  task_id: string | null;
-  superseded_conflicting: boolean;
-  superseded_from_content: string | null;
-}
-
-export interface MemoryListResponse {
-  memories: MemoryRecord[];
-  total: number;
-}
-
-export interface MemoryMaintenanceResponse {
-  expired_stale: number;
-  limit_stale: number;
-  vector_deleted: number;
-  vector_upserted: number;
-}
-
-export interface MemoryConversationSummaryRequest {
-  conversation_id: string;
-  limit?: number;
-}
-
-export interface MemoryCreateRequest {
-  scope: string;
-  type: string;
-  key: string;
-  content: string;
-  value?: Record<string, unknown> | null;
-  source: string;
-  confidence: number;
-  expires_at?: string | null;
-  visibility: string;
-}
-
-export interface MemoryUpdateRequest {
-  key?: string;
-  content?: string;
-  value?: Record<string, unknown> | null;
-  source?: string;
-  confidence?: number;
-  expires_at?: string | null;
-  visibility?: string;
-  status?: string;
+  offset: number;
+  limit: number;
+  next_offset: number | null;
 }
 
 export interface ApiErrorPayload {

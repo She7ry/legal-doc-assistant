@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any, TypedDict
 
 from langchain_core.documents import Document
@@ -17,6 +18,7 @@ from doc_assistant.retrieval._qdrant_backend import (
     active_filter,
     clean_metadata,
     ensure_dense_collection,
+    ensure_payload_indexes,
     field_filter,
     point_id,
     sparse_document_vector,
@@ -30,6 +32,15 @@ class VectorRecord(TypedDict):
     document: str
 
 
+_DOCUMENT_PAYLOAD_INDEXES = {
+    "active": models.PayloadSchemaType.BOOL,
+    "document_key": models.PayloadSchemaType.KEYWORD,
+    "file_id": models.PayloadSchemaType.KEYWORD,
+    "document_version": models.PayloadSchemaType.INTEGER,
+    "chunk_id": models.PayloadSchemaType.INTEGER,
+}
+
+
 class QdrantDocumentRepository:
     def __init__(
         self,
@@ -40,6 +51,9 @@ class QdrantDocumentRepository:
         self.client = client
         self.collection_name = collection_name
         self.embedding_model = embedding_model
+        self._collection_lock = Lock()
+        self._payload_indexes_initialized = False
+        self._validated_vector_size: int | None = None
 
     def all_records(self, *, include_documents: bool = True) -> list[VectorRecord]:
         return self._scroll(include_documents=include_documents)
@@ -56,11 +70,73 @@ class QdrantDocumentRepository:
         document_key: str | None,
         file_id: str | None,
         include_documents: bool,
-    ) -> list[VectorRecord]:
-        return self._scroll(
-            include_documents=include_documents,
-            query_filter=field_filter(document_key=document_key, file_id=file_id),
+        document_version: int | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[VectorRecord], int, VectorRecord | None]:
+        if not self._ensure_payload_indexes_if_collection_exists():
+            return [], 0, None
+
+        identity_filter = field_filter(
+            document_key=document_key,
+            file_id=file_id,
+            document_version=document_version,
         )
+        document_filter = models.Filter(
+            must=[
+                *([identity_filter] if identity_filter is not None else []),
+                *([active_filter()] if document_version is None else []),
+            ]
+        )
+        total = int(
+            self.client.count(
+                collection_name=self.collection_name,
+                count_filter=document_filter,
+                exact=True,
+            ).count
+        )
+        if total == 0:
+            return [], 0, None
+
+        page_filter = models.Filter(
+            must=[
+                document_filter,
+                models.FieldCondition(
+                    key="chunk_id",
+                    range=models.Range(gte=offset, lt=offset + limit),
+                ),
+            ]
+        )
+        points, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=page_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        records = [
+            self._record_from_payload(
+                dict(point.payload or {}),
+                include_documents=include_documents,
+            )
+            for point in points
+        ]
+        if records:
+            return records, total, records[0]
+
+        points, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=document_filter,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        representative = (
+            self._record_from_payload(dict(points[0].payload or {}), include_documents=False)
+            if points
+            else None
+        )
+        return records, total, representative
 
     def active_records(self, *, include_documents: bool = True) -> list[VectorRecord]:
         return self._scroll(
@@ -77,20 +153,19 @@ class QdrantDocumentRepository:
             wait=True,
         )
 
-    def update_metadatas(
+    def set_payload(
         self,
         ids: list[str],
-        metadatas: list[dict[str, str | int | float | bool]],
+        payload: dict[str, str | int | float | bool],
     ) -> None:
-        if not self.client.collection_exists(self.collection_name):
+        if not ids:
             return
-        for record_id, metadata in zip(ids, metadatas, strict=True):
-            self.client.set_payload(
-                collection_name=self.collection_name,
-                payload=clean_metadata(metadata),
-                points=[point_id(record_id)],
-                wait=True,
-            )
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload=clean_metadata(payload),
+            points=[point_id(record_id) for record_id in ids],
+            wait=True,
+        )
 
     def embed_query(self, query: str) -> list[float]:
         return [float(value) for value in self.embedding_model.embed_query(query)]
@@ -116,12 +191,7 @@ class QdrantDocumentRepository:
                 f"Embedding provider returned {len(embeddings)} embeddings for {len(texts)} chunks."
             )
 
-        ensure_dense_collection(
-            self.client,
-            self.collection_name,
-            len(embeddings[0]),
-            with_sparse=True,
-        )
+        self._ensure_collection(len(embeddings[0]))
         points = []
         for record_id, text, chunk, embedding in zip(ids, texts, chunks, embeddings, strict=True):
             metadata = clean_metadata(chunk.metadata or {})
@@ -149,9 +219,13 @@ class QdrantDocumentRepository:
                 wait=True,
             )
 
-    def search(self, query: str, *, limit: int, mode: str) -> list[Document]:
-        if not self.client.collection_exists(self.collection_name):
-            return []
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        mode: str,
+    ) -> list[Document]:
         fetch_k = max(limit, int(settings.retrieval_fetch_k), limit * 5)
         query_filter = active_filter()
         sparse_query = sparse_query_vector(query)
@@ -159,6 +233,8 @@ class QdrantDocumentRepository:
 
         if mode in {"bm25", "sparse"}:
             if not sparse_query.indices:
+                return []
+            if not self._ensure_payload_indexes_if_collection_exists():
                 return []
             query_object: Any = models.NearestQuery(
                 nearest=sparse_query,
@@ -174,12 +250,7 @@ class QdrantDocumentRepository:
             )
         else:
             dense_query = self.embed_query(query)
-            ensure_dense_collection(
-                self.client,
-                self.collection_name,
-                len(dense_query),
-                with_sparse=True,
-            )
+            self._ensure_collection(len(dense_query))
             nearest = models.NearestQuery(
                 nearest=dense_query,
                 mmr=models.Mmr(diversity=diversity, candidates_limit=fetch_k),
@@ -223,6 +294,36 @@ class QdrantDocumentRepository:
             if _normalized_relevance(float(point.score), mode) >= minimum
         ]
 
+    def _ensure_collection(self, vector_size: int) -> None:
+        with self._collection_lock:
+            if self._validated_vector_size == vector_size:
+                return
+            ensure_dense_collection(
+                self.client,
+                self.collection_name,
+                vector_size,
+                with_sparse=True,
+                payload_indexes=(
+                    {} if self._payload_indexes_initialized else _DOCUMENT_PAYLOAD_INDEXES
+                ),
+            )
+            self._payload_indexes_initialized = True
+            self._validated_vector_size = vector_size
+
+    def _ensure_payload_indexes_if_collection_exists(self) -> bool:
+        with self._collection_lock:
+            if self._payload_indexes_initialized:
+                return True
+            if not self.client.collection_exists(self.collection_name):
+                return False
+            ensure_payload_indexes(
+                self.client,
+                self.collection_name,
+                _DOCUMENT_PAYLOAD_INDEXES,
+            )
+            self._payload_indexes_initialized = True
+            return True
+
     def _embed_documents(
         self,
         texts: list[str],
@@ -251,7 +352,10 @@ class QdrantDocumentRepository:
         include_documents: bool,
         query_filter: models.Filter | None = None,
     ) -> list[VectorRecord]:
-        if not self.client.collection_exists(self.collection_name):
+        if query_filter is not None:
+            if not self._ensure_payload_indexes_if_collection_exists():
+                return []
+        elif not self.client.collection_exists(self.collection_name):
             return []
         records: list[VectorRecord] = []
         offset: Any = None

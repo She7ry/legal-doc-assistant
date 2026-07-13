@@ -322,12 +322,29 @@ def test_matter_store_isolates_tenants_and_users(tmp_path) -> None:
         tenant_id="tenant-a",
         user_id="user-a",
         matter_id="matter-1",
-        result={"task_id": "task-1", "matter_profile": {"matter_id": "matter-1"}},
+        result={
+            "task_id": "task-1",
+            "matter_profile": {"matter_id": "matter-1", "document_type": "Contract"},
+        },
     )
 
     assert store.get("matter-1", "tenant-a", "user-a") is not None
     assert store.get("matter-1", "tenant-b", "user-a") is None
     assert store.get("matter-1", "tenant-a", "user-b") is None
+
+
+def test_matter_store_rejects_empty_agent_result(tmp_path) -> None:
+    store = MatterStore(tmp_path / "matters.sqlite3")
+
+    with pytest.raises(ValueError, match="does not contain Matter content"):
+        store.upsert_from_agent_result(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            matter_id="matter-1",
+            result={"task_id": "task-1", "findings": [], "artifacts": []},
+        )
+
+    assert store.list("tenant-a", "user-a") == []
 
 
 def test_matter_store_updates_confirmation_gate_decision(tmp_path) -> None:

@@ -110,6 +110,13 @@
               <p>{{ chunk.text }}</p>
             </article>
           </div>
+          <el-button
+            v-if="preview.next_offset !== null"
+            :loading="previewLoading"
+            @click="loadMorePreview"
+          >
+            加载更多（{{ preview.chunks.length }}/{{ preview.total_chunks }}）
+          </el-button>
         </template>
       </div>
     </el-drawer>
@@ -141,6 +148,7 @@ const preview = ref<DocumentTextResponse | null>(null);
 const previewVisible = ref(false);
 const previewLoading = ref(false);
 const highlightedChunkId = ref<number | null>(null);
+const previewPageSize = 100;
 
 onMounted(async () => {
   await loadDocuments();
@@ -189,10 +197,39 @@ async function openDocumentPreview(
       document_key: documentKey,
       file_id: fileId,
       document_version: target.document_version ?? null,
+      offset: chunkId === null ? 0 : Math.floor(chunkId / previewPageSize) * previewPageSize,
+      limit: previewPageSize,
     });
     await scrollToHighlightedChunk();
   } catch (error) {
     preview.value = null;
+    ElMessage.error(formatApiError(error));
+  } finally {
+    previewLoading.value = false;
+  }
+}
+
+async function loadMorePreview() {
+  const current = preview.value;
+  if (!current || current.next_offset === null || previewLoading.value) {
+    return;
+  }
+
+  previewLoading.value = true;
+  try {
+    const nextPage = await getDocumentText({
+      document_key: current.document.document_key,
+      file_id: current.document.file_id,
+      document_version: current.document.document_version,
+      offset: current.next_offset,
+      limit: current.limit,
+    });
+    preview.value = {
+      ...nextPage,
+      offset: current.offset,
+      chunks: [...current.chunks, ...nextPage.chunks],
+    };
+  } catch (error) {
     ElMessage.error(formatApiError(error));
   } finally {
     previewLoading.value = false;

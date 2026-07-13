@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -26,7 +27,6 @@ from api.schemas.responses import (
     ConversationMessageOut,
     ConversationMessagesResponse,
     ConversationOut,
-    MemoryUsageOut,
     ToolCallOut,
     ToolChatResponse,
     WebSourceOut,
@@ -34,6 +34,8 @@ from api.schemas.responses import (
 from api.sse import SSE_HEADERS, format_sse
 from doc_assistant.config.settings import settings
 from doc_assistant.services.qa_service import DocumentQAService, PreparedQAAnswer
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -51,6 +53,7 @@ def list_conversations(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> ConversationListResponse:
+    """列出当前租户和用户下的持久化对话列表，支持按状态过滤（active/archived/all）和分页。"""
     resolved_status = None if status_filter in {"", "all"} else status_filter
     conversations = memory_service.list_conversations(
         tenant_id, user_id, status=resolved_status, limit=limit, offset=offset,
@@ -78,6 +81,7 @@ def create_conversation(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> ConversationOut:
+    """创建一条新的持久化对话记录，可指定自定义 conversation_id 和标题。"""
     conversation = memory_service.create_conversation(
         tenant_id, user_id, conversation_id=body.conversation_id, title=body.title,
     )
@@ -96,10 +100,11 @@ def update_conversation(
     tenant_id: TenantIdDep,
     user_id: UserIdDep,
 ) -> ConversationOut:
+    """更新指定对话的标题或状态（如归档）。请求体至少需要提供一个待更新字段，若对话不存在则返回 404。"""
     fields_set = get_fields_set(body)
     if not fields_set:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one conversation field must be provided.",
         )
     conversation = memory_service.update_conversation(
@@ -124,6 +129,7 @@ def get_conversation_messages(
     user_id: UserIdDep,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> ConversationMessagesResponse:
+    """加载指定对话的历史消息记录，用于恢复对话上下文，支持 limit 控制返回条数。"""
     messages = memory_service.load_conversation_history(
         tenant_id, user_id, conversation_id, limit=limit, include_summary=False,
     )
@@ -139,6 +145,7 @@ def get_conversation_messages(
     summary="Ask a question about indexed documents",
 )
 async def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> AskResponse:
+    """向已索引的法律文档提问（基于 RAG 检索增强生成），返回答案内容、引用来源及置信度。"""
     history = [{"role": m.role, "content": m.content} for m in body.chat_history]
     answer = await qa_service.aask(
         body.question,
@@ -150,7 +157,6 @@ async def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) ->
     return AskResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
-        memories_used=[MemoryUsageOut.from_usage(m) for m in answer.memories_used],
         confidence=answer.confidence,
         guard_warnings=answer.guard_warnings,
         evidence=answer.metadata.get("evidence"),
@@ -167,9 +173,11 @@ def ask_with_tools(
     tool_service: ToolCallingServiceDep,
     user_id: UserIdDep,
 ) -> ToolChatResponse:
+    """带工具调用能力的问答接口：模型可自主调用检索、网络搜索等工具获取补充信息后再生成回答。
+    返回结果额外包含 web_sources 和 tool_calls 追踪信息。"""
     if body.enable_web_search and not settings.web_search_enabled:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Web search is disabled. Set DOC_ASSISTANT_WEB_SEARCH_ENABLED=true.",
         )
 
@@ -186,7 +194,6 @@ def ask_with_tools(
     return ToolChatResponse(
         content=answer.content,
         citations=[CitationOut.from_citation(c) for c in answer.citations],
-        memories_used=[MemoryUsageOut.from_usage(m) for m in answer.memories_used],
         web_sources=[WebSourceOut.from_source(s) for s in answer.web_sources],
         tool_calls=[ToolCallOut.from_trace(t) for t in answer.tool_calls],
         confidence=answer.confidence,
@@ -200,6 +207,8 @@ def ask_with_tools(
     summary="Ask a question and stream the answer as server-sent events",
 )
 def ask_stream(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> StreamingResponse:
+    """流式问答接口：通过 Server-Sent Events 逐块推送答案。
+    流程：先发送引用元数据，再逐块发送 delta 文本，流结束后发送 guard 校验结果和完整答案。"""
     history = [{"role": m.role, "content": m.content} for m in body.chat_history]
     prepared = qa_service.prepare_answer(
         body.question,
@@ -219,11 +228,13 @@ def _stream_answer_events(
     qa_service: DocumentQAService,
     prepared: PreparedQAAnswer,
 ) -> Iterator[str]:
+    """内部 SSE 事件生成器：将预处理好的答案转为 SSE 事件流。
+    依次产出：metadata（引用）→ delta（增量文本块）→ guard_result（安全校验）→ done（最终完整答案）。
+    若流式生成过程中出现异常，产出 error 事件并终止。"""
     yield format_sse(
         "metadata",
         {
             "citations": [CitationOut.from_citation(c) for c in prepared.citations],
-            "memories_used": [MemoryUsageOut.from_usage(m) for m in prepared.memories_used],
         },
     )
 
@@ -232,8 +243,16 @@ def _stream_answer_events(
         for chunk in qa_service.stream_prepared_answer(prepared):
             chunks.append(chunk)
             yield format_sse("delta", {"content": chunk})
-    except Exception as exc:
-        yield format_sse("error", {"code": "stream_error", "detail": str(exc)})
+    except Exception:
+        logger.exception("Answer stream failed", extra={"task_id": prepared.task_id})
+        yield format_sse(
+            "error",
+            {
+                "code": "stream_error",
+                "detail": "Answer stream failed.",
+                "task_id": prepared.task_id,
+            },
+        )
         return
 
     content = "".join(chunks)
@@ -252,7 +271,6 @@ def _stream_answer_events(
         {
             "content": answer.content,
             "citations": [CitationOut.from_citation(c) for c in answer.citations],
-            "memories_used": [MemoryUsageOut.from_usage(m) for m in answer.memories_used],
             "confidence": answer.confidence,
             "guard_warnings": answer.guard_warnings,
             "evidence": answer.metadata.get("evidence"),

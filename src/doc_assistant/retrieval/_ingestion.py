@@ -78,7 +78,7 @@ class DocumentIngester:
         active_same_content = [
             record for record in active_records if record["metadata"].get("file_id") == file_id
         ]
-        if active_same_content:
+        if _records_form_complete_version(active_same_content):
             return _skipped_result(
                 file_path=file_path,
                 file_id=file_id,
@@ -87,6 +87,10 @@ class DocumentIngester:
                 records=active_same_content,
                 progress_callback=progress_callback,
             )
+        if active_same_content:
+            invalid_ids = {record["id"] for record in active_same_content}
+            self.repository.delete(sorted(invalid_ids))
+            active_records = [record for record in active_records if record["id"] not in invalid_ids]
 
         version = (
             max(
@@ -179,7 +183,8 @@ class DocumentIngester:
             chunk.metadata.update(
                 {
                     "chunk_id": index,
-                    "active": True,
+                    "active": False,
+                    "expected_chunk_count": len(chunks),
                     "indexed_at": indexed_at,
                     "document_count": document_count,
                 }
@@ -226,16 +231,16 @@ class DocumentIngester:
                 batch_size=int(getattr(settings, "embedding_batch_size", 20)),
                 max_workers=int(getattr(settings, "embedding_max_workers", 4)),
             )
+            self.repository.set_payload(ids, {"active": True})
         except Exception:
             self._rollback_new_chunks(ids, file_id=file_id)
             raise
 
         try:
             self._deactivate_records(active_records, superseded_by_file_id=file_id)
-        except Exception as exc:
+        except Exception:
             warning = (
-                "New document version was indexed, but older versions could not be "
-                f"marked inactive: {exc}"
+                "New document version was indexed, but older versions could not be marked inactive."
             )
             logger.warning(
                 "Failed to deactivate older document versions",
@@ -264,15 +269,10 @@ class DocumentIngester:
     ) -> None:
         if not records:
             return
-        ids = []
-        metadatas = []
-        for record in records:
-            metadata = dict(record["metadata"])
-            metadata["active"] = False
-            metadata["superseded_by_file_id"] = superseded_by_file_id
-            ids.append(record["id"])
-            metadatas.append(clean_metadata(metadata))
-        self.repository.update_metadatas(ids, metadatas)
+        self.repository.set_payload(
+            [record["id"] for record in records],
+            {"active": False, "superseded_by_file_id": superseded_by_file_id},
+        )
 
 
 def document_key_for_file_name(file_name: str) -> str:
@@ -314,6 +314,22 @@ def count_pages(documents: list[Document]) -> int | None:
     if pages:
         return len(pages)
     return len(documents) if documents else None
+
+
+def _records_form_complete_version(records: list[VectorRecord]) -> bool:
+    expected_counts = {
+        optional_metadata_int(record["metadata"], "expected_chunk_count")
+        for record in records
+    }
+    if len(expected_counts) != 1:
+        return False
+    expected = next(iter(expected_counts), None)
+    if expected is None or expected <= 0 or len(records) != expected:
+        return False
+    chunk_ids = {
+        optional_metadata_int(record["metadata"], "chunk_id") for record in records
+    }
+    return chunk_ids == set(range(expected))
 
 
 def _skipped_result(

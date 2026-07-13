@@ -19,7 +19,6 @@
       <ChatPanel />
 
       <aside class="side-stack">
-        <MemoryPanel />
         <DocumentUploader @job-created="handleJobCreated" />
         <IngestJobStatus
           :job="activeJob"
@@ -41,7 +40,6 @@ import type { IngestJobResponse } from "../api/types";
 import ChatPanel from "../components/ChatPanel.vue";
 import DocumentUploader from "../components/DocumentUploader.vue";
 import IngestJobStatus from "../components/IngestJobStatus.vue";
-import MemoryPanel from "../components/MemoryPanel.vue";
 import { useSettingsStore } from "../stores/settings";
 
 const settings = useSettingsStore();

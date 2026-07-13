@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from qdrant_client import models
 
@@ -24,6 +25,13 @@ from doc_assistant.retrieval.vector_store import collection_name_for_tenant
 from doc_assistant.utils.json import parse_json_object
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_PAYLOAD_INDEXES = {
+    "tenant_id": models.PayloadSchemaType.KEYWORD,
+    "user_id": models.PayloadSchemaType.KEYWORD,
+    "status": models.PayloadSchemaType.KEYWORD,
+    "visibility": models.PayloadSchemaType.KEYWORD,
+}
 
 
 class MemoryVectorStore:
@@ -44,6 +52,8 @@ class MemoryVectorStore:
             Path(persist_directory or settings.memory_vector_store_dir)
         )
         self.embedding_model = build_embedding_model()
+        self._collection_lock = Lock()
+        self._validated_vector_size: int | None = None
 
     def upsert_memory(self, memory: MemoryRecord) -> str:
         if memory.status != "active" or memory.is_expired():
@@ -73,12 +83,7 @@ class MemoryVectorStore:
         }
         text = _memory_embedding_text(memory)
         embedding = [float(value) for value in self.embedding_model.embed_query(text)]
-        ensure_dense_collection(
-            self.vector_store,
-            self.collection_name,
-            len(embedding),
-            with_sparse=False,
-        )
+        self._ensure_collection(len(embedding))
         self.vector_store.upsert(
             collection_name=self.collection_name,
             points=[
@@ -96,21 +101,23 @@ class MemoryVectorStore:
         )
         return memory.memory_id
 
-    def delete_memory(self, memory_id: str) -> None:
+    def delete_memory(self, memory_id: str) -> bool:
         try:
             if not self.vector_store.collection_exists(self.collection_name):
-                return
+                return True
             self.vector_store.delete(
                 collection_name=self.collection_name,
                 points_selector=[point_id(memory_id)],
                 wait=True,
             )
+            return True
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Memory vector delete failed",
                 extra={"memory_id": memory_id},
                 exc_info=True,
             )
+            return False
 
     def search(
         self,
@@ -120,17 +127,10 @@ class MemoryVectorStore:
         user_id: str,
         k: int | None = None,
     ) -> list[MemoryCandidate]:
-        if not self.vector_store.collection_exists(self.collection_name):
-            return []
         search_k = max(1, int(k or settings.memory_top_k))
         resolved_tenant_id = tenant_id or self.tenant_id
         embedding = [float(value) for value in self.embedding_model.embed_query(query)]
-        ensure_dense_collection(
-            self.vector_store,
-            self.collection_name,
-            len(embedding),
-            with_sparse=False,
-        )
+        self._ensure_collection(len(embedding))
         response = self.vector_store.query_points(
             collection_name=self.collection_name,
             query=embedding,
@@ -178,6 +178,19 @@ class MemoryVectorStore:
                 )
             )
         return candidates
+
+    def _ensure_collection(self, vector_size: int) -> None:
+        with self._collection_lock:
+            if self._validated_vector_size == vector_size:
+                return
+            ensure_dense_collection(
+                self.vector_store,
+                self.collection_name,
+                vector_size,
+                with_sparse=False,
+                payload_indexes=_MEMORY_PAYLOAD_INDEXES,
+            )
+            self._validated_vector_size = vector_size
 
 
 def _memory_embedding_text(memory: MemoryRecord) -> str:

@@ -149,11 +149,6 @@ SELECT * FROM matters
 WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
 """
 
-SELECT_MATTER_EXISTING_FOR_UPSERT = """
-SELECT created_at, matter_profile_json, status FROM matters
-WHERE tenant_id = ? AND user_id = ? AND matter_id = ?
-"""
-
 UPSERT_MATTER = """
 INSERT INTO matters (
     matter_id, tenant_id, user_id, title, status, matter_profile_json,
@@ -189,11 +184,6 @@ WHERE matter_id = ? AND tenant_id = ? AND user_id = ?
 """
 
 # ── DML: matter_artifacts 表 ──────────────────────────────────
-
-SELECT_ARTIFACT_EXISTING = """
-SELECT version, created_at, title, summary, status FROM matter_artifacts
-WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND artifact_id = ?
-"""
 
 UPSERT_ARTIFACT = """
 INSERT INTO matter_artifacts (
@@ -270,11 +260,6 @@ FROM matter_artifacts
 
 # ── DML: review_findings 表 ───────────────────────────────────
 
-SELECT_FINDING_EXISTING = """
-SELECT created_at, human_review_status, status, metadata_json FROM review_findings
-WHERE tenant_id = ? AND user_id = ? AND matter_id = ? AND finding_id = ?
-"""
-
 UPSERT_FINDING = """
 INSERT INTO review_findings (
     finding_id, matter_id, tenant_id, user_id, category, severity, summary,
@@ -304,11 +289,6 @@ DO UPDATE SET
     metadata_json = excluded.metadata_json,
     source_task_id = excluded.source_task_id,
     updated_at = excluded.updated_at
-"""
-
-SELECT_FINDING_BY_ID = """
-SELECT finding_id FROM review_findings
-WHERE matter_id = ? AND tenant_id = ? AND user_id = ? AND finding_id = ?
 """
 
 SELECT_FINDING_ROW_BY_ID = """

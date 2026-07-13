@@ -39,47 +39,36 @@ def get_document_text(
     document_key: str | None = None,
     file_id: str | None = None,
     document_version: int | None = None,
+    offset: int = 0,
+    limit: int = 100,
 ) -> dict[str, Any] | None:
     resolved_document_key = (document_key or "").strip()
     resolved_file_id = (file_id or "").strip()
     if not resolved_document_key and not resolved_file_id:
         raise ValueError("Provide document_key or file_id.")
 
-    records = [
-        record
-        for record in repository.matching_records(
-            document_key=resolved_document_key or None,
-            file_id=resolved_file_id or None,
-            include_documents=True,
-        )
-        if _matches_version(record, document_version)
-    ]
-    if not records:
+    records, total_chunks, representative = repository.matching_records(
+        document_key=resolved_document_key or None,
+        file_id=resolved_file_id or None,
+        include_documents=True,
+        document_version=document_version,
+        offset=offset,
+        limit=limit,
+    )
+    if representative is None:
         return None
 
-    if document_version is None:
-        latest_version = max(
-            metadata_int(record["metadata"], "document_version", 1) for record in records
-        )
-        records = [
-            record
-            for record in records
-            if metadata_int(record["metadata"], "document_version", 1) == latest_version
-        ]
-
     records.sort(key=document_preview_sort_key)
-    first_metadata = records[0]["metadata"]
-    metadata_values = [record["metadata"] for record in records]
+    first_metadata = representative["metadata"]
     summary = _document_summary(
         first_metadata,
-        key=str(first_metadata.get("document_key") or resolved_document_key),
+        key=str(
+            first_metadata.get("document_key") or resolved_document_key or resolved_file_id
+        ),
         version=metadata_int(first_metadata, "document_version", document_version or 1),
     )
     summary["file_id"] = str(first_metadata.get("file_id") or resolved_file_id)
-    summary["chunk_count"] = len(records)
-    summary["warning_count"] = max(
-        metadata_int(metadata, "warning_count", 0) for metadata in metadata_values
-    )
+    summary["chunk_count"] = total_chunks
     chunks = [
         {
             "chunk_id": optional_metadata_int(record["metadata"], "chunk_id"),
@@ -91,14 +80,14 @@ def get_document_text(
         }
         for record in records
     ]
-    return {"document": summary, "chunks": chunks, "total_chunks": len(chunks)}
-
-
-def _matches_version(record: VectorRecord, document_version: int | None) -> bool:
-    metadata = record["metadata"]
-    if document_version is None:
-        return metadata_is_active(metadata)
-    return metadata_int(metadata, "document_version", 1) == document_version
+    return {
+        "document": summary,
+        "chunks": chunks,
+        "total_chunks": total_chunks,
+        "offset": offset,
+        "limit": limit,
+        "next_offset": offset + limit if offset + limit < total_chunks else None,
+    }
 
 
 def _document_summary(

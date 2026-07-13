@@ -30,6 +30,8 @@ export function getDocumentText(params: {
   document_key?: string | null;
   file_id?: string | null;
   document_version?: number | null;
+  offset?: number | null;
+  limit?: number | null;
 }): Promise<DocumentTextResponse> {
   return apiRequest<DocumentTextResponse>({
     method: "GET",
@@ -38,6 +40,8 @@ export function getDocumentText(params: {
       document_key: params.document_key || undefined,
       file_id: params.file_id || undefined,
       document_version: params.document_version || undefined,
+      offset: params.offset ?? undefined,
+      limit: params.limit ?? undefined,
     },
   });
 }

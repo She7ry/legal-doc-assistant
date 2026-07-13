@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 from collections import Counter
 from pathlib import Path
@@ -19,6 +20,8 @@ DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "bm25"
 DOCUMENT_PAYLOAD_KEY = "_document"
 RECORD_ID_PAYLOAD_KEY = "_record_id"
+
+logger = logging.getLogger(__name__)
 
 _clients: dict[str, QdrantClient] = {}
 _clients_lock = threading.Lock()
@@ -58,28 +61,61 @@ def ensure_dense_collection(
     vector_size: int,
     *,
     with_sparse: bool,
+    payload_indexes: dict[str, models.PayloadSchemaType],
 ) -> None:
     """Create a collection lazily after the embedding dimension is known."""
     with _collections_lock:
         if client.collection_exists(collection_name):
             _validate_vector_size(client, collection_name, vector_size)
-            return
+        else:
+            sparse_config = None
+            if with_sparse:
+                sparse_config = {
+                    SPARSE_VECTOR_NAME: models.SparseVectorParams(modifier=models.Modifier.IDF)
+                }
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    DENSE_VECTOR_NAME: models.VectorParams(
+                        size=vector_size,
+                        distance=models.Distance.COSINE,
+                    )
+                },
+                sparse_vectors_config=sparse_config,
+            )
 
-        sparse_config = None
-        if with_sparse:
-            sparse_config = {
-                SPARSE_VECTOR_NAME: models.SparseVectorParams(modifier=models.Modifier.IDF)
-            }
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config={
-                DENSE_VECTOR_NAME: models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE,
-                )
-            },
-            sparse_vectors_config=sparse_config,
-        )
+        _create_payload_indexes(client, collection_name, payload_indexes)
+
+
+def ensure_payload_indexes(
+    client: QdrantClient,
+    collection_name: str,
+    payload_indexes: dict[str, models.PayloadSchemaType],
+) -> None:
+    with _collections_lock:
+        _create_payload_indexes(client, collection_name, payload_indexes)
+
+
+def _create_payload_indexes(
+    client: QdrantClient,
+    collection_name: str,
+    payload_indexes: dict[str, models.PayloadSchemaType],
+) -> None:
+    for field_name, field_schema in payload_indexes.items():
+        try:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field_name,
+                field_schema=field_schema,
+                wait=True,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to create Qdrant payload index %r for collection %r",
+                field_name,
+                collection_name,
+                exc_info=True,
+            )
 
 
 def _validate_vector_size(
@@ -122,11 +158,12 @@ def metadata_is_active(metadata: dict[str, Any]) -> bool:
 
 def active_filter() -> models.Filter:
     return models.Filter(
-        must=[
+        should=[
             models.FieldCondition(
                 key="active",
                 match=models.MatchValue(value=True),
-            )
+            ),
+            models.IsEmptyCondition(is_empty=models.PayloadField(key="active")),
         ]
     )
 

@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from doc_assistant.config.settings import settings
 from doc_assistant.ingestion.document_loader import load_documents
 from doc_assistant.models.language_model import build_embedding_model
 from doc_assistant.retrieval._chunking import (
     INGESTION_CHUNK_SEPARATORS,
+    build_ingestion_text_splitter,
     split_documents_for_ingestion,
 )
 from doc_assistant.retrieval._document_catalog import (
@@ -59,11 +59,7 @@ class DocumentVectorStore:
         )
         effective_persist_directory = Path(persist_directory or settings.vector_store_dir)
         self.vector_store = shared_qdrant_client(effective_persist_directory)
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            separators=list(INGESTION_CHUNK_SEPARATORS),
-        )
+        self.splitter = build_ingestion_text_splitter()
 
         repository = QdrantDocumentRepository(
             self.vector_store,
@@ -109,12 +105,16 @@ class DocumentVectorStore:
         document_key: str | None = None,
         file_id: str | None = None,
         document_version: int | None = None,
+        offset: int = 0,
+        limit: int = 100,
     ) -> dict[str, Any] | None:
         return catalog_get_document_text(
             self._repository,
             document_key=document_key,
             file_id=file_id,
             document_version=document_version,
+            offset=offset,
+            limit=limit,
         )
 
 

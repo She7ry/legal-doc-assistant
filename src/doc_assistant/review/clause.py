@@ -16,11 +16,9 @@ from doc_assistant.utils.coercion import (
     as_list_str,
     as_str,
     citation_suffix,
-    coerce_bool,
-    coerce_risk_level,
-    optional_str,
     risk_reason_list,
 )
+from doc_assistant.utils.text import optional_text
 
 
 class ClauseRiskReason(BaseModel):
@@ -69,42 +67,21 @@ def clause_review_metadata(
     citations: list[Citation],
 ) -> dict[str, Any]:
     data = output.model_dump()
-
-    found = coerce_bool(data.get("found"))
-    risk_level = coerce_risk_level(data.get("risk_level"))
-    risk_reasons = risk_reason_list(data.get("risk_reasons"), citations)
-    needs_human_review = coerce_bool(data.get("needs_human_review"))
-    if needs_human_review is None:
-        needs_human_review = found is not True or risk_level == "Needs human review"
-
-    summary = as_str(data.get("summary"))
-    plain_language = as_str(
-        data.get("plain_language_explanation")
-        or data.get("plain_language")
-        or data.get("explanation")
-        or summary
-    )
+    summary = as_str(output.summary)
 
     return {
         "structured": True,
-        "clause_type": as_str(data.get("clause_type"), clause_type),
-        "normalized_clause_type": as_str(
-            data.get("normalized_clause_type") or data.get("clause_key"),
-            profile.key,
-        ),
-        "found": found,
+        "clause_type": as_str(output.clause_type, clause_type),
+        "normalized_clause_type": as_str(output.normalized_clause_type, profile.key),
+        "found": output.found,
         "summary": summary,
-        "risk_level": risk_level,
-        "risk_reasons": risk_reasons,
-        "affected_party": optional_str(data.get("affected_party")),
-        "plain_language_explanation": plain_language,
-        "questions_for_lawyer": as_list_str(
-            data.get("questions_for_lawyer")
-            or data.get("negotiation_or_review_points")
-            or data.get("review_points")
-        ),
-        "missing_information": as_list_str(data.get("missing_information")),
-        "needs_human_review": needs_human_review,
+        "risk_level": output.risk_level,
+        "risk_reasons": risk_reason_list(data["risk_reasons"], citations),
+        "affected_party": optional_text(output.affected_party),
+        "plain_language_explanation": as_str(output.plain_language_explanation or summary),
+        "questions_for_lawyer": as_list_str(output.questions_for_lawyer),
+        "missing_information": as_list_str(output.missing_information),
+        "needs_human_review": output.needs_human_review,
     }
 
 
@@ -131,7 +108,7 @@ def render_clause_review(metadata: dict[str, Any], citations: list[Citation]) ->
     if summary:
         lines.append(f"Summary: {summary}{cite_suffix}")
 
-    affected_party = optional_str(metadata.get("affected_party"))
+    affected_party = optional_text(metadata.get("affected_party"))
     if affected_party:
         lines.append(f"Affected party: {affected_party}{cite_suffix}")
 

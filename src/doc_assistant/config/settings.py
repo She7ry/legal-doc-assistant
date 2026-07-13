@@ -19,17 +19,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+# ── 环境变量读取辅助函数 ──────────────────────────────────────────────────
+
+
 def _int_env(name: str, default: int) -> int:
+    """从环境变量读整数，未设置则返回默认值。"""
     value = os.getenv(name)
     return int(value) if value else default
 
 
 def _float_env(name: str, default: float) -> float:
+    """从环境变量读浮点数，未设置则返回默认值。"""
     value = os.getenv(name)
     return float(value) if value else default
 
 
 def _bool_env(name: str, default: bool) -> bool:
+    """从环境变量读布尔值，支持 1/true/yes/on（大小写不敏感）。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -37,11 +43,13 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
+    """从环境变量读逗号分隔列表，返回去空白去空项的元组。"""
     value = os.getenv(name, default)
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def _json_object_env(name: str) -> dict[str, Any]:
+    """从环境变量读 JSON 对象，解析失败或非 dict 时抛出 ValueError。"""
     value = os.getenv(name)
     if not value:
         return {}
@@ -57,11 +65,13 @@ def _json_object_env(name: str) -> dict[str, Any]:
 
 
 def _path_env(name: str, default: Path) -> Path:
+    """从环境变量读文件路径，未设置则返回默认 Path。"""
     value = os.getenv(name)
     return Path(value) if value else default
 
 
 def _first_env(*names: str, default: str = "") -> str:
+    """从多个环境变量中返回第一个非空值。"""
     for name in names:
         value = os.getenv(name)
         if value and value.strip():
@@ -70,7 +80,7 @@ def _first_env(*names: str, default: str = "") -> str:
 
 
 class _SecretStr(str):
-    """在 repr / print 中屏蔽敏感值，防止日志泄露 API Key。"""
+    """敏感字符串：repr 时只显示首尾各两位加星号，防止日志泄露 API Key。"""
 
     def __repr__(self) -> str:
         if len(self) <= 4:
@@ -82,11 +92,13 @@ class _SecretStr(str):
 
 
 def _secret_env(name: str, default: str = "") -> _SecretStr:
+    """从环境变量读敏感值，包裹为 _SecretStr。"""
     value = os.getenv(name, default)
     return _SecretStr(value.strip() if value else default)
 
 
 def _secret_first_env(*names: str, default: str = "") -> _SecretStr:
+    """从多个环境变量中返回第一个非空的敏感值。"""
     return _SecretStr(_first_env(*names, default=default))
 
 
@@ -202,7 +214,7 @@ class RetrievalSettings:
 
 @dataclass(frozen=True)
 class SkillSettings:
-    """只读运行时 Skill 的启用名单与资源限制。"""
+    """Skill 启用白名单与资源限制。"""
 
     skills_enabled: bool = field(
         default_factory=lambda: _bool_env("DOC_ASSISTANT_SKILLS_ENABLED", True)
@@ -245,7 +257,7 @@ class SkillSettings:
 
 @dataclass(frozen=True)
 class AgentSettings:
-    """Agent and tool-calling runtime limits."""
+    """Agent 对话与工具调用运行时限制。"""
 
     chat_history_window: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_CHAT_HISTORY_WINDOW", 12))
     tool_call_max_iterations: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS", 6))
@@ -263,7 +275,7 @@ class MemorySettings:
 
 @dataclass(frozen=True)
 class WebSearchSettings:
-    """网页搜索配置。"""
+    """网页搜索配置（RAG 不足时的外部搜索回退）。"""
 
     web_search_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_WEB_SEARCH_ENABLED", False))
     web_search_provider: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_WEB_SEARCH_PROVIDER", "duckduckgo"))
@@ -282,7 +294,7 @@ class WebSearchSettings:
 
 @dataclass(frozen=True)
 class SecuritySettings:
-    """API 安全 / CORS 配置。"""
+    """API 鉴权、频率限制与 CORS 配置。"""
 
     api_keys: tuple[str, ...] = field(default_factory=lambda: _csv_env("DOC_ASSISTANT_API_KEYS"))
     rate_limit_enabled: bool = field(default_factory=lambda: _bool_env("DOC_ASSISTANT_RATE_LIMIT_ENABLED", True))
@@ -305,8 +317,8 @@ class SecuritySettings:
 class Settings:
     """应用全局配置单例。
 
-    分组子配置可通过 ``settings.storage``、``settings.llm`` 等访问；
-    为向后兼容，所有字段也可直接 ``settings.top_k`` 访问（通过 ``__getattr__``）。
+    分组子配置通过 ``settings.storage``、``settings.llm`` 等访问；
+    为向后兼容，字段也可直接 ``settings.top_k`` 访问（通过 ``__getattr__`` 代理）。
     """
 
     storage: StorageSettings = field(default_factory=StorageSettings)
@@ -318,7 +330,7 @@ class Settings:
     memory: MemorySettings = field(default_factory=MemorySettings)
     web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
-    # ── Tenant / runtime ────────────────────────────────────────────────
+    # ── 顶层运行时配置 ────────────────────────────────────────────────────
     default_tenant_id: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_DEFAULT_TENANT_ID", "default"))
     max_upload_bytes: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_MAX_UPLOAD_BYTES", 20 * 1024 * 1024))
     background_max_workers: int = field(default_factory=lambda: _int_env("DOC_ASSISTANT_BACKGROUND_MAX_WORKERS", 4))
@@ -326,7 +338,7 @@ class Settings:
     pdf_ocr_lang: str = field(default_factory=lambda: os.getenv("DOC_ASSISTANT_PDF_OCR_LANG", "eng"))
 
     def __getattr__(self, name: str) -> Any:
-        """向后兼容：``settings.top_k`` 自动委托到对应子配置。"""
+        """向后兼容：将未找到的属性委托给子配置对象查找。"""
         for sub in (
             "storage", "llm", "embedding", "retrieval", "skill",
             "agent", "memory", "web_search", "security",
@@ -337,6 +349,7 @@ class Settings:
         raise AttributeError(f"Settings has no attribute '{name}'")
 
     def __post_init__(self) -> None:
+        """构造后校验：确保各配置值在合法范围内。"""
         r = self.retrieval
         _validate_positive("chunk_size", r.chunk_size)
         if r.chunk_overlap < 0:
@@ -375,10 +388,7 @@ class Settings:
             raise ValueError("memory_prompt_max_tokens must be greater than 0.")
 
     def with_overrides(self, **kwargs: Any) -> Settings:
-        """返回应用了临时覆盖项的新 Settings 副本（测试或单次请求用）。
-
-        支持直接传子配置字段名（如 ``top_k=3``），自动路由到对应子对象。
-        """
+        """返回应用临时覆盖项的新 Settings 副本，支持子配置字段名（如 top_k=3）。"""
         sub_mapping: dict[str, str] = {}
         sub_fields: dict[str, dict[str, Any]] = {}
         for sub_name in (
@@ -405,7 +415,7 @@ class Settings:
         return replace(self, **top_level_kwargs)
 
     def ensure_directories(self) -> None:
-        """创建 data/ 下 uploads、vector_store、各 SQLite 库所在目录（应用启动时调用）。"""
+        """创建 data/ 下所有必需子目录（应用启动时调用）。"""
         s = self.storage
         s.upload_dir.mkdir(parents=True, exist_ok=True)
         s.vector_store_dir.mkdir(parents=True, exist_ok=True)
@@ -416,6 +426,7 @@ class Settings:
         s.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def __repr__(self) -> str:
+        """安全 repr，只展示非敏感字段。"""
         return (
             f"Settings(default_tenant_id={self.default_tenant_id!r}, "
             f"llm=LLMSettings(chat_provider={self.llm.chat_provider!r}, "
@@ -424,8 +435,10 @@ class Settings:
 
 
 def _validate_positive(name: str, value: int) -> None:
+    """校验值为正数，否则抛出 ValueError。"""
     if value <= 0:
         raise ValueError(f"{name} must be greater than 0.")
 
 
+# ── 全局单例 ──────────────────────────────────────────────────────────
 settings = Settings()

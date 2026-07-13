@@ -335,45 +335,100 @@ class MemoryStore:
         task_id: str | None = None,
         memory_id: str | None = None,
     ) -> MemoryRecord:
-        now = datetime.now(timezone.utc)
-        memory = MemoryRecord(
-            memory_id=memory_id or uuid4().hex,
+        memory = _new_memory(
             tenant_id=tenant_id,
             user_id=user_id,
-            scope=scope,  # type: ignore[arg-type]
-            type=type,  # type: ignore[arg-type]
-            key=_normalize_key(key),
-            content=content.strip(),
+            scope=scope,
+            type=type,
+            key=key,
+            content=content,
             value_json=value_json,
-            source=source,  # type: ignore[arg-type]
+            source=source,
             confidence=confidence,
-            created_at=now,
-            updated_at=now,
             expires_at=expires_at,
-            visibility=visibility,  # type: ignore[arg-type]
+            visibility=visibility,
             supersedes_id=supersedes_id,
-            status=status,  # type: ignore[arg-type]
+            status=status,
             source_message_id=source_message_id,
             conversation_id=conversation_id,
             task_id=task_id,
-            superseded_conflicting=_superseded_conflicting(value_json),
-            superseded_from_content=_superseded_from_content(value_json),
+            memory_id=memory_id,
         )
-        _validate_memory(memory)
         with self._connect() as connection, self._lock:
-            connection.execute(
-                """
-                INSERT INTO memories (
-                    memory_id, tenant_id, user_id, scope, type, key, content, value_json,
-                    source, confidence, created_at, updated_at, expires_at, visibility,
-                    permissions_json, supersedes_id, status, source_message_id,
-                    conversation_id, task_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _memory_values(memory),
-            )
+            _insert_memory(connection, memory)
         return memory
+
+    def create_or_supersede_memory(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        scope: str,
+        type: str,
+        key: str,
+        content: str,
+        value_json: dict | None,
+        source: str,
+        confidence: float,
+        expires_at: datetime | None = None,
+        visibility: str = "private",
+        source_message_id: str | None = None,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+    ) -> tuple[MemoryRecord, str | None, bool]:
+        """Atomically reuse or supersede the active row for one memory key."""
+        normalized_key = _normalize_key(key)
+        with self._connect() as connection, self._lock:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM memories
+                WHERE tenant_id = ? AND user_id = ? AND scope = ? AND type = ?
+                  AND key = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (tenant_id, user_id, scope, type, normalized_key),
+            ).fetchone()
+            previous = _row_to_memory(row) if row else None
+            if previous and _same_memory_values(
+                previous,
+                content=content,
+                value_json=value_json,
+                visibility=visibility,
+                task_id=task_id,
+                expires_at=expires_at,
+            ):
+                return previous, None, False
+
+            memory = _new_memory(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                scope=scope,
+                type=type,
+                key=normalized_key,
+                content=content,
+                value_json=value_json,
+                source=source,
+                confidence=confidence,
+                expires_at=expires_at,
+                visibility=visibility,
+                supersedes_id=previous.memory_id if previous else None,
+                source_message_id=source_message_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+            )
+            if previous:
+                connection.execute(
+                    """
+                    UPDATE memories
+                    SET status = 'stale', updated_at = ?
+                    WHERE memory_id = ? AND status = 'active'
+                    """,
+                    (memory.updated_at.isoformat(), previous.memory_id),
+                )
+            _insert_memory(connection, memory)
+        return memory, previous.memory_id if previous else None, True
 
     def get_memory(self, tenant_id: str, user_id: str, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection:
@@ -507,33 +562,42 @@ class MemoryStore:
         memory_id: str,
         update: MemoryUpdate,
     ) -> MemoryRecord | None:
-        current = self.get_memory(tenant_id, user_id, memory_id)
-        if current is None or current.user_id != user_id:
-            return None
-
-        updated = MemoryRecord(
-            memory_id=current.memory_id,
-            tenant_id=current.tenant_id,
-            user_id=current.user_id,
-            scope=current.scope,
-            type=current.type,
-            key=_normalize_key(update.key) if update.key is not None else current.key,
-            content=update.content.strip() if update.content is not None else current.content,
-            value_json=current.value_json if is_unset(update.value_json) else update.value_json,
-            source=update.source if update.source is not None else current.source,
-            confidence=update.confidence if update.confidence is not None else current.confidence,
-            created_at=current.created_at,
-            updated_at=datetime.now(timezone.utc),
-            expires_at=current.expires_at if is_unset(update.expires_at) else update.expires_at,
-            visibility=update.visibility if update.visibility is not None else current.visibility,
-            supersedes_id=current.supersedes_id,
-            status=update.status if update.status is not None else current.status,
-            source_message_id=current.source_message_id,
-            conversation_id=current.conversation_id,
-            task_id=current.task_id,
-        )
-        _validate_memory(updated)
         with self._connect() as connection, self._lock:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM memories
+                WHERE tenant_id = ? AND user_id = ? AND memory_id = ?
+                """,
+                (tenant_id, user_id, memory_id),
+            ).fetchone()
+            if row is None:
+                return None
+            current = _row_to_memory(row)
+            updated = MemoryRecord(
+                memory_id=current.memory_id,
+                tenant_id=current.tenant_id,
+                user_id=current.user_id,
+                scope=current.scope,
+                type=current.type,
+                key=_normalize_key(update.key) if update.key is not None else current.key,
+                content=update.content.strip() if update.content is not None else current.content,
+                value_json=current.value_json if is_unset(update.value_json) else update.value_json,
+                source=update.source if update.source is not None else current.source,
+                confidence=update.confidence
+                if update.confidence is not None
+                else current.confidence,
+                created_at=current.created_at,
+                updated_at=datetime.now(timezone.utc),
+                expires_at=current.expires_at if is_unset(update.expires_at) else update.expires_at,
+                visibility=update.visibility if update.visibility is not None else current.visibility,
+                supersedes_id=current.supersedes_id,
+                status=update.status if update.status is not None else current.status,
+                source_message_id=current.source_message_id,
+                conversation_id=current.conversation_id,
+                task_id=current.task_id,
+            )
+            _validate_memory(updated)
             connection.execute(
                 """
                 UPDATE memories
@@ -785,6 +849,31 @@ class MemoryStore:
                     ON messages (conversation_id, created_at);
                 """
             )
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT memory_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY tenant_id, user_id, scope, type, key
+                               ORDER BY updated_at DESC, rowid DESC
+                           ) AS rank
+                    FROM memories
+                    WHERE status = 'active'
+                )
+                UPDATE memories
+                SET status = 'stale', updated_at = ?
+                WHERE memory_id IN (SELECT memory_id FROM ranked WHERE rank > 1)
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_key
+                ON memories (tenant_id, user_id, scope, type, key)
+                WHERE status = 'active'
+                """
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -816,6 +905,87 @@ class MemoryStore:
             return
         connection.close()
         self._local.connection = None
+
+
+def _new_memory(
+    *,
+    tenant_id: str,
+    user_id: str,
+    scope: str,
+    type: str,
+    key: str,
+    content: str,
+    value_json: dict | None,
+    source: str,
+    confidence: float,
+    expires_at: datetime | None = None,
+    visibility: str = "private",
+    supersedes_id: str | None = None,
+    status: str = "active",
+    source_message_id: str | None = None,
+    conversation_id: str | None = None,
+    task_id: str | None = None,
+    memory_id: str | None = None,
+) -> MemoryRecord:
+    now = datetime.now(timezone.utc)
+    memory = MemoryRecord(
+        memory_id=memory_id or uuid4().hex,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        scope=scope,  # type: ignore[arg-type]
+        type=type,  # type: ignore[arg-type]
+        key=_normalize_key(key),
+        content=content.strip(),
+        value_json=value_json,
+        source=source,  # type: ignore[arg-type]
+        confidence=confidence,
+        created_at=now,
+        updated_at=now,
+        expires_at=expires_at,
+        visibility=visibility,  # type: ignore[arg-type]
+        supersedes_id=supersedes_id,
+        status=status,  # type: ignore[arg-type]
+        source_message_id=source_message_id,
+        conversation_id=conversation_id,
+        task_id=task_id,
+        superseded_conflicting=_superseded_conflicting(value_json),
+        superseded_from_content=_superseded_from_content(value_json),
+    )
+    _validate_memory(memory)
+    return memory
+
+
+def _insert_memory(connection: sqlite3.Connection, memory: MemoryRecord) -> None:
+    connection.execute(
+        """
+        INSERT INTO memories (
+            memory_id, tenant_id, user_id, scope, type, key, content, value_json,
+            source, confidence, created_at, updated_at, expires_at, visibility,
+            permissions_json, supersedes_id, status, source_message_id,
+            conversation_id, task_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _memory_values(memory),
+    )
+
+
+def _same_memory_values(
+    memory: MemoryRecord,
+    *,
+    content: str,
+    value_json: dict | None,
+    visibility: str,
+    task_id: str | None,
+    expires_at: datetime | None,
+) -> bool:
+    return (
+        memory.content == content.strip()
+        and memory.value_json == value_json
+        and memory.visibility == visibility
+        and memory.task_id == task_id
+        and memory.expires_at == expires_at
+    )
 
 
 def _memory_values(memory: MemoryRecord) -> tuple[object, ...]:

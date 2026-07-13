@@ -11,9 +11,8 @@ from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Annotated, Any
 
-from langchain.tools import tool
 from langchain_core.messages.utils import convert_to_messages
-from langchain_core.tools import BaseTool, InjectedToolCallId
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from pydantic import BaseModel, Field, field_validator
 
 from doc_assistant.agent._helpers import _remap_metadata, _remap_source_refs
@@ -23,13 +22,13 @@ from doc_assistant.grounding.evidence import build_evidence_profile
 from doc_assistant.grounding.guard import validate_answer
 from doc_assistant.memory.history import merge_chat_history
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryUsage
+from doc_assistant.retrieval.document_identity import document_identity
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.services.qa_service import DocumentQAService
-from doc_assistant.tools.document_search import DocumentSearchTool, SearchDocumentsInput
+from doc_assistant.tools.document_search import SearchDocumentsInput, document_search_result
 from doc_assistant.tools.web_search import (
     WebSearchClient,
     WebSearchInput,
-    WebSearchTool,
     WebSource,
     build_web_search_client,
     web_source,
@@ -148,15 +147,7 @@ class ToolCallingChatService:
         self.qa_service = qa_service
         self.chat_model = qa_service.chat_model
         self.vector_store = qa_service.vector_store
-        self.document_search_tool = DocumentSearchTool(
-            self.vector_store,
-            default_top_k=settings.top_k,
-        )
         self.web_search_client = web_search_client or build_web_search_client()
-        self.web_search_tool = WebSearchTool(
-            self.web_search_client,
-            default_max_results=settings.web_search_max_results,
-        )
 
     def ask(
         self,
@@ -467,8 +458,9 @@ class ToolCallingChatService:
     ) -> dict[str, Any]:
         try:
             result = handler()
-        except Exception as exc:
-            result = {"error": str(exc)}
+        except Exception:
+            logger.exception("Tool execution failed", extra={"tool_name": name})
+            result = {"error": "tool_execution_failed"}
             with state.lock:
                 state.tool_calls.append(ToolCallTrace(tool_call_id, name, arguments, result))
             raise
@@ -481,17 +473,19 @@ class ToolCallingChatService:
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        execution = self.document_search_tool.execute(arguments["query"], arguments.get("top_k"))
+        query = str(arguments["query"])
+        documents = self.vector_store.search(query, k=arguments.get("top_k") or settings.top_k)
 
         results = []
-        for hit in execution.hits:
+        for document in documents:
+            identity = document_identity(document)
             with state.lock:
-                source_id = state.document_source_ids.get(hit.identity)
+                source_id = state.document_source_ids.get(identity)
                 is_new_source = source_id is None
                 if source_id is None:
                     source_id = f"D{len(state.citations) + 1}"
-                    state.document_source_ids[hit.identity] = source_id
-                item = {"source_id": source_id, **hit.result}
+                    state.document_source_ids[identity] = source_id
+                item = {"source_id": source_id, **document_search_result(document)}
                 if is_new_source:
                     state.citations.append(
                         Citation(
@@ -513,7 +507,7 @@ class ToolCallingChatService:
                     )
             results.append(item)
 
-        return {"query": execution.query, "result_count": len(results), "results": results}
+        return {"query": query, "result_count": len(results), "results": results}
 
     def _review_clause(
         self,
@@ -545,14 +539,19 @@ class ToolCallingChatService:
         arguments: dict[str, Any],
         state: _ToolExecutionState,
     ) -> dict[str, Any]:
-        execution = self.web_search_tool.execute(
-            arguments["query"],
-            max_results=arguments.get("max_results"),
+        query = str(arguments["query"])
+        search_results = self.web_search_client.search(
+            query,
+            max_results=_clamp_int(
+                int(arguments.get("max_results") or settings.web_search_max_results),
+                minimum=1,
+                maximum=10,
+            ),
             recency_days=arguments.get("recency_days"),
             domains=arguments.get("domains"),
         )
         results = []
-        for result in execution.results:
+        for result in search_results:
             with state.lock:
                 source_id = f"W{len(state.web_sources) + 1}"
                 source = web_source(source_id, result)
@@ -568,7 +567,7 @@ class ToolCallingChatService:
                 }
             )
 
-        return {"query": execution.query, "result_count": len(results), "results": results}
+        return {"query": query, "result_count": len(results), "results": results}
 
 
 def _append_qa_answer(
@@ -618,5 +617,3 @@ def _qa_answer_tool_result(
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
-
-

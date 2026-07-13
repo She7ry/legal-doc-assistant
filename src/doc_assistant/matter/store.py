@@ -55,10 +55,16 @@ class MatterStore:
         """Persist one immutable Agent task result, preserving later human decisions."""
         incoming_profile = result.get("matter_profile")
         if not isinstance(incoming_profile, dict):
-            incoming_profile = {
-                "matter_id": matter_id,
-                "open_questions": ["Matter profile was not produced."],
-            }
+            incoming_profile = {}
+        incoming_findings = [item for item in _as_dict_list(result.get("findings")) if item]
+        incoming_artifacts = [item for item in _as_dict_list(result.get("artifacts")) if item]
+        profile_has_content = any(
+            value not in (None, "", [], {})
+            for key, value in incoming_profile.items()
+            if key != "matter_id"
+        )
+        if not profile_has_content and not incoming_findings and not incoming_artifacts:
+            raise ValueError("Agent result does not contain Matter content.")
         incoming_profile = {**incoming_profile, "matter_id": matter_id}
         task_id = _clean_text(result.get("task_id")) or matter_id
         now = datetime.now(timezone.utc)
@@ -115,7 +121,7 @@ class MatterStore:
                 user_id=user_id,
                 matter_id=matter_id,
                 task_id=task_id,
-                artifacts=_as_dict_list(result.get("artifacts")),
+                artifacts=incoming_artifacts,
                 now=now,
             )
             self._sync_findings(
@@ -124,7 +130,7 @@ class MatterStore:
                 user_id=user_id,
                 matter_id=matter_id,
                 task_id=task_id,
-                findings=_as_dict_list(result.get("findings")),
+                findings=incoming_findings,
                 now=now,
             )
 

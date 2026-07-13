@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Lock, Thread
+from time import sleep
+from types import SimpleNamespace
 
 from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
 from doc_assistant.memory.schemas import MemoryCandidate, MemoryRecord, MemoryUpdate
 from doc_assistant.memory.service import MemoryService, extract_memory_write_intents
@@ -65,15 +69,41 @@ class FakeMemoryVectorStore:
         self.upserted.append(memory.memory_id)
         return memory.memory_id
 
-    def delete_memory(self, memory_id: str) -> None:
+    def delete_memory(self, memory_id: str) -> bool:
         self.deleted.append(memory_id)
+        return True
 
     def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
         del query, tenant_id, user_id
         return [
-            MemoryCandidate(memory=memory_record_factory(memory_id), score=score)
+            MemoryCandidate(
+                memory=memory_record_factory(memory_id),
+                score=score,
+                retrieval_source="vector",
+            )
             for memory_id, score in self.results[: k or len(self.results)]
         ]
+
+
+class CoordinatedMemoryStore(MemoryStore):
+    """Expose the old lock-free reads to a barrier for deterministic regressions."""
+
+    def __init__(self, db_path, *, lookup_barrier=None, read_barrier=None) -> None:
+        self.lookup_barrier = lookup_barrier
+        self.read_barrier = read_barrier
+        super().__init__(db_path)
+
+    def find_active_memory_by_key(self, *args, **kwargs):
+        result = super().find_active_memory_by_key(*args, **kwargs)
+        if self.lookup_barrier:
+            self.lookup_barrier.wait(timeout=5)
+        return result
+
+    def get_memory(self, *args, **kwargs):
+        result = super().get_memory(*args, **kwargs)
+        if self.read_barrier:
+            self.read_barrier.wait(timeout=5)
+        return result
 
 
 class FakeMemoryEmbeddingModel:
@@ -113,6 +143,8 @@ def build_qdrant_memory_vector_store() -> MemoryVectorStore:
     vector_store.collection_name = "memories"
     vector_store.vector_store = QdrantClient(":memory:")
     vector_store.embedding_model = FakeMemoryEmbeddingModel()
+    vector_store._collection_lock = Lock()
+    vector_store._validated_vector_size = None
     return vector_store
 
 
@@ -130,6 +162,49 @@ def test_memory_store_creates_lean_schema(tmp_path) -> None:
     assert {"retrieval_logs", "feedback_events", "memories_fts"}.isdisjoint(tables)
     assert {"embedding_id", "last_accessed_at", "access_count"}.isdisjoint(memory_columns)
     assert {"task_id", "expires_at"}.issubset(memory_columns)
+
+
+def test_memory_store_repairs_duplicate_active_keys_before_unique_index(tmp_path) -> None:
+    db_path = tmp_path / "memory.sqlite3"
+    store = MemoryStore(db_path)
+    original = store.create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="fact",
+        key="duplicate",
+        content="Older value.",
+        value_json=None,
+        source="explicit",
+        confidence=0.9,
+    )
+    store.close()
+
+    newer_at = (original.updated_at + timedelta(seconds=1)).isoformat()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX idx_memories_active_key")
+        connection.execute(
+            """
+            INSERT INTO memories (
+                memory_id, tenant_id, user_id, scope, type, key, content, value_json,
+                source, confidence, created_at, updated_at, expires_at, visibility,
+                permissions_json, supersedes_id, status, source_message_id,
+                conversation_id, task_id
+            )
+            SELECT 'newer', tenant_id, user_id, scope, type, key, 'Newer value.', value_json,
+                   source, confidence, created_at, ?, expires_at, visibility,
+                   permissions_json, supersedes_id, status, source_message_id,
+                   conversation_id, task_id
+            FROM memories WHERE memory_id = ?
+            """,
+            (newer_at, original.memory_id),
+        )
+
+    repaired = MemoryStore(db_path)
+    active = repaired.list_memories("tenant-a", "user-a")
+
+    assert [memory.memory_id for memory in active] == ["newer"]
+    assert repaired.get_memory("tenant-a", "user-a", original.memory_id).status == "stale"
 
 
 def test_explicit_memory_write_only(tmp_path) -> None:
@@ -246,6 +321,93 @@ def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
 
     assert second.memory_id == first.memory_id
     assert len(service.list_memories("tenant-a", "user-a", status=None, include_expired=True)) == 1
+
+
+def test_concurrent_memory_creates_leave_one_active_key(tmp_path) -> None:
+    db_path = tmp_path / "memory.sqlite3"
+    lookup_barrier = Barrier(2)
+    start = Barrier(2)
+    services = [
+        MemoryService(
+            store=CoordinatedMemoryStore(db_path, lookup_barrier=lookup_barrier),
+            vector_store=None,
+        )
+        for _ in range(2)
+    ]
+    errors: list[BaseException] = []
+
+    def create(service: MemoryService, content: str) -> None:
+        try:
+            start.wait(timeout=5)
+            service.create_memory(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                scope="user",
+                type="preference",
+                key="answer_style",
+                content=content,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        Thread(target=create, args=(services[0], "Prefer concise answers.")),
+        Thread(target=create, args=(services[1], "Prefer detailed answers.")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    memories = MemoryStore(db_path).list_memories(
+        "tenant-a", "user-a", status=None, include_expired=True
+    )
+    assert sum(memory.status == "active" for memory in memories) == 1
+
+
+def test_concurrent_memory_updates_preserve_distinct_fields(tmp_path) -> None:
+    db_path = tmp_path / "memory.sqlite3"
+    memory = MemoryService(store=MemoryStore(db_path), vector_store=None).create_memory(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        scope="user",
+        type="preference",
+        key="answer_style",
+        content="Original answer style.",
+        confidence=0.5,
+    )
+    read_barrier = Barrier(2)
+    start = Barrier(2)
+    stores = [
+        CoordinatedMemoryStore(db_path, read_barrier=read_barrier),
+        CoordinatedMemoryStore(db_path, read_barrier=read_barrier),
+    ]
+    errors: list[BaseException] = []
+
+    def update(store: MemoryStore, patch: MemoryUpdate) -> None:
+        try:
+            start.wait(timeout=5)
+            store.update_memory("tenant-a", "user-a", memory.memory_id, patch)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        Thread(target=update, args=(stores[0], MemoryUpdate(content="Updated answer style."))),
+        Thread(target=update, args=(stores[1], MemoryUpdate(confidence=0.95))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    updated = MemoryStore(db_path).get_memory("tenant-a", "user-a", memory.memory_id)
+    assert updated is not None
+    assert updated.content == "Updated answer style."
+    assert updated.confidence == 0.95
 
 
 def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
@@ -587,3 +749,81 @@ def test_memory_vector_search_discards_unreadable_backend_results() -> None:
 
     assert {candidate.memory.memory_id for candidate in results} == {"own-private", "team-shared"}
     vector_store.vector_store.close()
+
+
+def test_memory_search_initializes_payload_indexes_only_once() -> None:
+    barrier = Barrier(2)
+
+    class CoordinatedEmbeddingModel(FakeMemoryEmbeddingModel):
+        def embed_query(self, text: str) -> list[float]:
+            barrier.wait(timeout=5)
+            return super().embed_query(text)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.collection_checks = 0
+            self.payload_indexes: list[tuple[str, models.PayloadSchemaType]] = []
+            self.queries = 0
+
+        def collection_exists(self, _collection_name: str) -> bool:
+            self.collection_checks += 1
+            return True
+
+        def get_collection(self, _collection_name: str):
+            sleep(0.05)
+            vectors = {"dense": SimpleNamespace(size=3)}
+            return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors)))
+
+        def create_payload_index(self, **kwargs) -> None:
+            self.payload_indexes.append((kwargs["field_name"], kwargs["field_schema"]))
+
+        def query_points(self, **_kwargs):
+            self.queries += 1
+            return SimpleNamespace(points=[])
+
+    client = FakeClient()
+    vector_store = MemoryVectorStore.__new__(MemoryVectorStore)
+    vector_store.tenant_id = "tenant-a"
+    vector_store.collection_name = "memories"
+    vector_store.vector_store = client
+    vector_store.embedding_model = CoordinatedEmbeddingModel()
+    vector_store._collection_lock = Lock()
+    vector_store._validated_vector_size = None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                vector_store.search,
+                "answer style",
+                tenant_id="tenant-a",
+                user_id="user-a",
+                k=1,
+            )
+            for _ in range(2)
+        ]
+        assert [future.result() for future in futures] == [[], []]
+
+    assert client.payload_indexes == [
+        ("tenant_id", models.PayloadSchemaType.KEYWORD),
+        ("user_id", models.PayloadSchemaType.KEYWORD),
+        ("status", models.PayloadSchemaType.KEYWORD),
+        ("visibility", models.PayloadSchemaType.KEYWORD),
+    ]
+    assert client.collection_checks == 1
+    assert client.queries == 2
+
+
+def test_memory_vector_delete_failure_is_reported(caplog) -> None:
+    class FailingClient:
+        def collection_exists(self, _collection_name: str) -> bool:
+            raise RuntimeError("Qdrant unavailable")
+
+    vector_store = MemoryVectorStore.__new__(MemoryVectorStore)
+    vector_store.collection_name = "memories"
+    vector_store.vector_store = FailingClient()
+
+    with caplog.at_level("WARNING"):
+        deleted = vector_store.delete_memory("memory-a")
+
+    assert deleted is False
+    assert "Memory vector delete failed" in caplog.text

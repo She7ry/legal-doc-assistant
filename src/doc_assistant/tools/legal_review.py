@@ -72,10 +72,10 @@ def review_clause(
             qa_service._build_messages(task_prompt)
         )
         metadata = clause_review_metadata(clause_type, profile, output, citations)
-    except (OutputParserException, ValidationError) as exc:
-        logger.warning("Clause review structured output was invalid: %s", exc)
+    except (OutputParserException, ValidationError):
+        logger.warning("Clause review structured output was invalid", exc_info=True)
         metadata = empty_clause_review_metadata(clause_type, profile)
-        metadata["structured_output_error"] = str(exc)
+        metadata["structured_output_error"] = "invalid_structured_output"
     content = render_clause_review(metadata, citations)
     verify_support = "verify-citation-support" in skill_context.selected_skills
     guard_result = validate_answer(
@@ -143,10 +143,10 @@ def check_conflict(
             qa_service._build_messages(task_prompt)
         )
         metadata = conflict_metadata(output, citations)
-    except (OutputParserException, ValidationError) as exc:
-        logger.warning("Conflict check structured output was invalid: %s", exc)
+    except (OutputParserException, ValidationError):
+        logger.warning("Conflict check structured output was invalid", exc_info=True)
         metadata = empty_conflict_metadata()
-        metadata["structured_output_error"] = str(exc)
+        metadata["structured_output_error"] = "invalid_structured_output"
     content = render_conflict_check(metadata)
     verify_support = "verify-citation-support" in skill_context.selected_skills
     guard_result = validate_answer(

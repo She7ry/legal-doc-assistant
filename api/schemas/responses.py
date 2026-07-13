@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from doc_assistant.matter._domain import _formal_report_blockers
+
 
 class _AttrModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True, use_enum_values=True)
@@ -52,27 +54,9 @@ class CitationOut(BaseModel):
         )
 
 
-class MemoryUsageOut(_AttrModel):
-    memory_id: str
-    type: str
-    key: str
-    content: str
-    source: str
-    confidence: float
-    scope: str
-    score: float | None = None
-    superseded_conflicting: bool = False
-    superseded_from_content: str | None = None
-
-    @classmethod
-    def from_usage(cls, usage) -> MemoryUsageOut:
-        return cls.model_validate(usage)
-
-
 class AskResponse(BaseModel):
     content: str
     citations: list[CitationOut]
-    memories_used: list[MemoryUsageOut] = Field(default_factory=list)
     confidence: str | None = None
     guard_warnings: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] | None = None
@@ -233,6 +217,8 @@ class MatterRecordOut(_AttrModel):
     updated_at: datetime
     artifacts: list[MatterArtifactRecordOut] = Field(default_factory=list)
     findings: list[MatterFindingRecordOut] = Field(default_factory=list)
+    formal_report_blockers: list[str] = Field(default_factory=list)
+    can_generate_formal_report: bool = False
 
     @field_validator("artifacts", "findings", mode="before")
     @classmethod
@@ -241,7 +227,16 @@ class MatterRecordOut(_AttrModel):
 
     @classmethod
     def from_record(cls, matter) -> MatterRecordOut:
-        return cls.model_validate(matter)
+        blockers = _formal_report_blockers(
+            matter.matter_profile,
+            matter.findings or [],
+        )
+        return cls.model_validate(matter).model_copy(
+            update={
+                "formal_report_blockers": blockers,
+                "can_generate_formal_report": not blockers,
+            }
+        )
 
 
 class MatterEventOut(_AttrModel):
@@ -482,52 +477,9 @@ class DocumentTextResponse(BaseModel):
     document: DocumentInfo
     chunks: list[DocumentTextChunkOut]
     total_chunks: int
-
-
-class MemoryOut(_AttrModel):
-    memory_id: str
-    scope: str
-    type: str
-    key: str
-    content: str
-    value: dict[str, Any] | None = Field(validation_alias="value_json")
-    source: str
-    confidence: float
-    created_at: datetime
-    updated_at: datetime
-    expires_at: datetime | None
-    visibility: str
-    supersedes_id: str | None
-    status: str
-    source_message_id: str | None
-    conversation_id: str | None
-    task_id: str | None
-    superseded_conflicting: bool = False
-    superseded_from_content: str | None = None
-
-    @classmethod
-    def from_memory(cls, memory) -> MemoryOut:
-        return cls.model_validate(memory)
-
-
-class MemoryListResponse(BaseModel):
-    memories: list[MemoryOut]
-    total: int
-    offset: int = 0
-    limit: int | None = None
-
-
-class MemoryBatchDeleteResponse(BaseModel):
-    deleted: list[MemoryOut]
-    not_found: list[str]
-    total_deleted: int
-
-
-class MemoryMaintenanceResponse(BaseModel):
-    expired_stale: int = 0
-    limit_stale: int = 0
-    vector_deleted: int = 0
-    vector_upserted: int = 0
+    offset: int
+    limit: int
+    next_offset: int | None = None
 
 
 class ErrorResponse(BaseModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -7,10 +8,32 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api import dependencies
+from api.logging_config import LOGGING_CONFIG
 from api.main import app
+from api.schemas.responses import AskResponse
 from doc_assistant.memory.service import MemoryService
 from doc_assistant.memory.store import MemoryStore
 from doc_assistant.retrieval import vector_store
+
+
+def test_application_log_formatter_handles_missing_and_present_context() -> None:
+    config = LOGGING_CONFIG["formatters"]["application"]
+    formatter = config["()"](fmt=config["fmt"], defaults=config["defaults"])
+
+    plain = formatter.format(logging.makeLogRecord({"msg": "plain message"}))
+    contextual = formatter.format(
+        logging.makeLogRecord(
+            {
+                "msg": "operation complete",
+                "request_id": "request-1",
+                "operation": "retrieve",
+                "duration_ms": 12.5,
+            }
+        )
+    )
+
+    assert "request_id=- operation=- duration_ms=-" in plain
+    assert "request_id=request-1 operation=retrieve duration_ms=12.5" in contextual
 
 
 def test_normalize_tenant_id_defaults_to_configured_tenant(monkeypatch) -> None:
@@ -58,12 +81,27 @@ def test_protected_routes_require_api_key_when_configured(monkeypatch) -> None:
     assert response.json()["code"] == "http_401"
 
 
+def test_memory_details_are_not_exposed_by_api() -> None:
+    assert not any(path.startswith("/api/v1/memories") for path in app.openapi()["paths"])
+    assert "memories_used" not in AskResponse.model_fields
+
+
 def test_document_text_endpoint_returns_indexed_chunks() -> None:
     class FakeVectorStore:
-        def get_document_text(self, *, document_key=None, file_id=None, document_version=None):
+        def get_document_text(
+            self,
+            *,
+            document_key=None,
+            file_id=None,
+            document_version=None,
+            offset=0,
+            limit=100,
+        ):
             assert document_key == "doc-key"
             assert file_id is None
             assert document_version is None
+            assert offset == 0
+            assert limit == 100
             return {
                 "document": {
                     "file_name": "contract.pdf",
@@ -88,12 +126,23 @@ def test_document_text_endpoint_returns_indexed_chunks() -> None:
                     }
                 ],
                 "total_chunks": 1,
+                "offset": 0,
+                "limit": 100,
+                "next_offset": None,
             }
 
     app.dependency_overrides[dependencies.get_vector_store] = lambda: FakeVectorStore()
     try:
         client = TestClient(app)
         response = client.get("/api/v1/documents/text", params={"document_key": "doc-key"})
+        oversized = client.get(
+            "/api/v1/documents/text",
+            params={"document_key": "doc-key", "limit": 201},
+        )
+        negative_offset = client.get(
+            "/api/v1/documents/text",
+            params={"document_key": "doc-key", "offset": -1},
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -101,6 +150,11 @@ def test_document_text_endpoint_returns_indexed_chunks() -> None:
     data = response.json()
     assert data["document"]["document_key"] == "doc-key"
     assert data["chunks"][0]["text"] == "Payment is due within 30 days."
+    assert data["offset"] == 0
+    assert data["limit"] == 100
+    assert data["next_offset"] is None
+    assert oversized.status_code == 422
+    assert negative_offset.status_code == 422
 
 
 def test_health_returns_runtime_diagnostics_and_request_id() -> None:

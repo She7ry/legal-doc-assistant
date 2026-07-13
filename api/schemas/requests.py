@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -79,42 +78,6 @@ class MatterFindingUpdateRequest(BaseModel):
         pattern="^(pending|approved|waived|needs_info|resolved)$",
     )
     note: str | None = Field(default=None, max_length=1000)
-
-
-class MemoryCreateRequest(BaseModel):
-    scope: str = Field(default="user", pattern="^(user|org|session|task)$")
-    type: str = Field(default="preference", pattern="^(preference|fact|task_state|correction)$")
-    key: str = Field(..., min_length=1, max_length=120)
-    content: str = Field(..., min_length=1, max_length=2000)
-    value: dict[str, Any] | None = None
-    source: str = Field(default="explicit", pattern="^(explicit|inferred|imported|system_generated)$")
-    confidence: float = Field(default=0.95, ge=0, le=1)
-    expires_at: datetime | None = None
-    visibility: str = Field(default="private", pattern="^(private|team|org)$")
-
-
-class MemoryUpdateRequest(BaseModel):
-    key: str | None = Field(default=None, min_length=1, max_length=120)
-    content: str | None = Field(default=None, min_length=1, max_length=2000)
-    value: dict[str, Any] | None = None
-    source: str | None = Field(default=None, pattern="^(explicit|inferred|imported|system_generated)$")
-    confidence: float | None = Field(default=None, ge=0, le=1)
-    expires_at: datetime | None = None
-    visibility: str | None = Field(default=None, pattern="^(private|team|org)$")
-    status: str | None = Field(default=None, pattern="^(active|stale|deleted)$")
-
-
-class MemoryBatchCreateRequest(BaseModel):
-    memories: list[MemoryCreateRequest] = Field(..., min_length=1, max_length=100)
-
-
-class MemoryBatchDeleteRequest(BaseModel):
-    memory_ids: list[str] = Field(..., min_length=1, max_length=100)
-
-
-class MemoryConversationSummaryRequest(BaseModel):
-    conversation_id: str = Field(..., min_length=1, max_length=128)
-    limit: int = Field(default=40, ge=2, le=200)
 
 
 class ClauseReviewRequest(BaseModel):

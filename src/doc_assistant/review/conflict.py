@@ -13,14 +13,11 @@ from pydantic import BaseModel, Field
 from doc_assistant.schemas.citation import Citation
 from doc_assistant.utils.coercion import (
     as_str,
-    coerce_bool,
-    coerce_conflict_status,
     coerce_conflict_type,
-    coerce_risk_level,
     format_source_refs,
-    optional_str,
     source_id_list,
 )
+from doc_assistant.utils.text import optional_text
 
 
 class ConflictItemOutput(BaseModel):
@@ -57,75 +54,38 @@ def empty_conflict_metadata() -> dict[str, Any]:
 
 
 def conflict_metadata(output: ConflictCheckOutput, citations: list[Citation]) -> dict[str, Any]:
-    data = output.model_dump()
-
-    raw_conflicts = data.get("conflicts")
     conflicts: list[dict[str, Any]] = []
-    if isinstance(raw_conflicts, list):
-        for raw_conflict in raw_conflicts:
-            if not isinstance(raw_conflict, dict):
-                continue
-            contract_citations = source_id_list(
-                raw_conflict.get("contract_citations")
-                or raw_conflict.get("contract_citation"),
-                citations,
-                prefix="C",
-            )
-            policy_citations = source_id_list(
-                raw_conflict.get("policy_citations")
-                or raw_conflict.get("policy_citation"),
-                citations,
-                prefix="P",
-            )
-            severity = coerce_risk_level(raw_conflict.get("severity"))
-            needs_human_review = coerce_bool(raw_conflict.get("needs_human_review"))
-            if needs_human_review is None:
-                needs_human_review = severity == "Needs human review"
-            conflicts.append(
-                {
-                    "topic": as_str(raw_conflict.get("topic"), "Unspecified topic"),
-                    "conflict_type": coerce_conflict_type(
-                        raw_conflict.get("conflict_type")
-                    ),
-                    "severity": severity,
-                    "contract_position": as_str(
-                        raw_conflict.get("contract_position")
-                    ),
-                    "policy_position": as_str(raw_conflict.get("policy_position")),
-                    "why_conflict": as_str(
-                        raw_conflict.get("why_conflict")
-                        or raw_conflict.get("explanation")
-                        or raw_conflict.get("reason")
-                    ),
-                    "recommended_action": as_str(
-                        raw_conflict.get("recommended_action")
-                        or raw_conflict.get("next_step")
-                    ),
-                    "contract_citations": contract_citations,
-                    "policy_citations": policy_citations,
-                    "needs_human_review": needs_human_review,
-                    "confidence": optional_str(raw_conflict.get("confidence")),
-                }
-            )
+    for conflict in output.conflicts:
+        conflicts.append(
+            {
+                "topic": as_str(conflict.topic, "Unspecified topic"),
+                "conflict_type": coerce_conflict_type(conflict.conflict_type),
+                "severity": conflict.severity,
+                "contract_position": as_str(conflict.contract_position),
+                "policy_position": as_str(conflict.policy_position),
+                "why_conflict": as_str(conflict.why_conflict),
+                "recommended_action": as_str(conflict.recommended_action),
+                "contract_citations": source_id_list(
+                    conflict.contract_citations, citations, prefix="C"
+                ),
+                "policy_citations": source_id_list(
+                    conflict.policy_citations, citations, prefix="P"
+                ),
+                "needs_human_review": conflict.needs_human_review,
+                "confidence": optional_text(conflict.confidence),
+            }
+        )
 
-    overall_status = coerce_conflict_status(data.get("overall_status"))
+    overall_status = output.overall_status
     if overall_status == "Insufficient information" and conflicts:
         overall_status = "Potential conflict"
-    needs_human_review = coerce_bool(data.get("needs_human_review"))
-    if needs_human_review is None:
-        needs_human_review = overall_status == "Insufficient information" or any(
-            conflict.get("needs_human_review") for conflict in conflicts
-        )
 
     return {
         "structured": True,
         "overall_status": overall_status,
         "conflicts": conflicts,
-        "needs_human_review": needs_human_review,
-        "supporting_citations": source_id_list(
-            data.get("supporting_citations"),
-            citations,
-        ),
+        "needs_human_review": output.needs_human_review,
+        "supporting_citations": source_id_list(output.supporting_citations, citations),
     }
 
 

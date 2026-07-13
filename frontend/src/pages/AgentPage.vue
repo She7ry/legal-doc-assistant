@@ -324,12 +324,7 @@ interface AgentToolCallTrace {
 
 const result = computed(() => task.value?.result ?? null);
 const toolCalls = computed(() => result.value?.steps.flatMap(stepToolCalls) ?? []);
-const currentMatterId = computed(
-  () =>
-    task.value?.matter_id ||
-    stringValue(recordValue(result.value?.matter_profile), "matter_id") ||
-    form.matterId,
-);
+const currentMatterId = computed(() => task.value?.matter_id || "");
 const events = computed(() => task.value?.events ?? []);
 const clarificationQuestions = computed(() => {
   if (task.value?.status !== "needs_input") {

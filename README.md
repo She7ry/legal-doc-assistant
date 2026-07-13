@@ -16,6 +16,7 @@
 | 检索策略 | Qdrant Hybrid（Dense + BM25 Sparse + RRF + MMR） |
 | 默认 LLM | DeepSeek（Chat）/ DashScope（Embedding） / 任意 OpenAI-compatible |
 | Embedding | DashScope text-embedding-v3 |
+| MCP Demo | MCP Python SDK + 官方 GitHub MCP Server（stdio） |
 | 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
 | 数据持久化 | SQLite（任务/记忆/Matter） |
 | 测试 | pytest + pytest-asyncio + coverage |
@@ -52,7 +53,7 @@ Model → Tools → Observe → Model → Grounded Report
 - **ReAct 工具调用**：模型按需调用 `search_documents`、`review_clause`、`check_conflict`
 - **引用重编号**：多个工具返回的引用统一重编号为 `D1/D2/...`，避免来源冲突
 - **Answer Guard**：二次校验引用有效性、过强法律结论和证据缺失
-- **Matter 管理**：审查报告和引用轨迹持久化为 Matter 记录
+- **Matter 管理**：报告完成后用结构化输出提取 Matter 画像、findings 和 artifacts；提取失败不创建空记录
 - **SSE 实时推送**：任务进度通过 Server-Sent Events 流式推送
 
 ### 条款审查与冲突检测
@@ -116,11 +117,11 @@ legal_doc_assistant/
 │   ├── review/                   # 条款分类、审查与冲突规则
 │   ├── services/
 │   │   ├── qa_service.py         # 问答核心逻辑
-│   │   ├── tool_calling_service.py  # Tool Calling 编排
-│   │   └── review_service.py     # 条款审查业务编排
+│   │   └── tool_calling_service.py  # Tool Calling 编排
 │   ├── graphs/                   # LangGraph 状态图定义
 │   ├── memory/                   # 记忆策略、存储、检索
 │   ├── matter/                   # Matter 持久化与导出
+│   ├── mcp/                      # MCP Client 与 GitHub Host demo
 │   ├── tools/                    # 外部工具（Web Search 等）
 │   ├── prompts/                  # 分层 Prompt 模板
 │   ├── evaluation/               # RAG 评估指标与 CLI
@@ -197,6 +198,60 @@ npm.cmd run dev
 - 前端界面：http://127.0.0.1:5173
 
 ---
+
+## MCP Host/Client Demo（官方 GitHub Server）
+
+这里不再由项目自己实现工具提供方。本项目是 **Host**，内部基于 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 的通用 **Client** 通过 `stdio` 启动并连接独立的[官方 GitHub MCP Server](https://github.com/github/github-mcp-server)；GitHub Server 才负责提供工具并访问 GitHub API。
+
+```text
+Host: Legal Document Assistant + Chat Model
+  └─ Client: doc_assistant.mcp.client（MCP Python SDK）
+       └─ JSON-RPC 2.0 over stdio
+            └─ Server: ghcr.io/github/github-mcp-server（独立 Docker 进程）
+                 └─ GitHub API
+```
+
+角色、能力和协议边界如下：
+
+- **角色层**：`github_demo.py` 负责 Host 编排；`client.py` 负责 MCP 会话；官方 GitHub 镜像是独立 Server。
+- **能力层**：Client 动态发现 Server 声明的 Tools、Resources、Resource Templates 和 Prompts。演示中的模型只绑定 `get_me`、`search_repositories`、`get_file_contents` 三个只读 Tool；另外两类能力只做发现和展示，不把它们伪装成 Tool。
+- **协议层**：Client 与 Server 使用 MCP SDK 实现的 JSON-RPC 2.0，并以 `stdio` 连接本地子进程。本 demo 不实现已弃用的 HTTP+SSE 双端点，也没有额外套一层自定义 REST 协议。
+
+### 准备和运行
+
+先安装 [Docker](https://docs.docker.com/engine/install/)，再创建权限尽可能小、仓库范围受限的 fine-grained GitHub PAT：
+
+```powershell
+$env:GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat_..."
+python -m pip install -e . -c constraints-py311.txt
+
+# 只连接 Server 并查看它实际声明的能力，不调用 LLM
+github-mcp-demo --list-capabilities
+
+# 完整 Host 循环：LLM 选择 Tool → MCP Client 调用 Server → LLM 汇总结果
+github-mcp-demo "查找与 Model Context Protocol 相关的 GitHub 仓库并概括前三个结果"
+```
+
+Host 默认等价于启动以下独立 Server；PAT 只传给子进程，不进入 prompt 或日志：
+
+```powershell
+docker run -i --rm `
+  -e GITHUB_PERSONAL_ACCESS_TOKEN `
+  -e GITHUB_READ_ONLY `
+  -e GITHUB_TOOLS `
+  ghcr.io/github/github-mcp-server
+```
+
+其中 Host 强制传入：
+
+```text
+GITHUB_READ_ONLY=1
+GITHUB_TOOLS=get_me,get_file_contents,search_repositories
+```
+
+只读模式在 Server 侧过滤写工具，Host 侧再按同一 allow-list 过滤一次动态发现结果。GitHub 返回的仓库内容按不可信外部数据处理，并限制送回模型的单次 Tool 结果长度。
+
+若已在本机安装官方 `github-mcp-server` 二进制，可设置 `GITHUB_MCP_COMMAND` 为二进制路径、`GITHUB_MCP_ARGS=stdio` 来覆盖默认 Docker 命令。覆盖项仍会收到同一组只读环境变量；不要把 token 写进参数或提交到仓库。
 
 ## 配置说明
 
@@ -367,6 +422,8 @@ PDF OCR 默认禁用。启用时需安装 `pdf2image`、`pytesseract` 及本地 
 
 Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `needs_input`
 
+后台执行器使用 SQLite 原子 claim 与进程内线程池，适用于单机部署；当前没有跨主机 lease/heartbeat，不应以多主机 active-active 方式运行。
+
 ### Matter 管理
 
 | 方法 | 路径 | 描述 |
@@ -382,19 +439,6 @@ Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `
 | GET | `/api/v1/matters/{matter_id}/events` | 获取审计事件 |
 | GET | `/api/v1/matters/{matter_id}/artifacts/export` | 批量导出 ZIP |
 | GET | `/api/v1/matters/{matter_id}/artifacts/{id}/export` | 单 artifact 导出 |
-
-### 用户记忆
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| GET | `/api/v1/memories` | 列出活跃记忆 |
-| POST | `/api/v1/memories` | 创建记忆条目 |
-| POST | `/api/v1/memories/batch` | 批量创建记忆 |
-| POST | `/api/v1/memories/maintenance` | 执行维护（过期清理等） |
-| POST | `/api/v1/memories/summarize-conversation` | 对话摘要压缩 |
-| PATCH | `/api/v1/memories/{memory_id}` | 更新记忆 |
-| DELETE | `/api/v1/memories/{memory_id}` | 软删除记忆 |
-| POST | `/api/v1/memories/batch-delete` | 批量删除记忆 |
 
 ### 审查
 
@@ -461,9 +505,6 @@ $headers = @{
 | `conflict_check.txt` | 合同/政策冲突检测 |
 | `tool_calling_system.txt` | Tool 使用策略 |
 | `answer_repair.txt` | 引用不合格时的二次修复 |
-| `legal_issue_spotting.txt` | 法律争点识别 |
-| `lawyer_work_product.txt` | 律师工作底稿生成 |
-| `plain_language_explain.txt` | 通俗语言解释 |
 | `general_chat.txt` | 通用对话 |
 
 ### Skill 执行链
@@ -542,7 +583,8 @@ pytest
 pytest tests/test_qa_service.py -v
 
 # 覆盖率
-pytest --cov=src/doc_assistant --cov-report=term-missing
+python -m coverage run -m pytest
+python -m coverage report -m
 ```
 
 ### 代码检查
@@ -577,7 +619,7 @@ npm.cmd run build
 
 ### Agent 工作流设计
 
-Agent 任务入口直接调用 Tool Calling ReAct 循环。模型先判断是否需要工具，再在白名单工具内调用文档检索、条款审查或冲突检测；工具返回的引用统一重编号，最终报告经过 Answer Guard 与证据画像校验后返回。前端展示报告、引用、证据画像和 tool trace，不再展示计划、结构化 findings、artifacts 或人工 gates。
+Agent 任务入口直接调用 Tool Calling ReAct 循环。模型先判断是否需要工具，再在白名单工具内调用文档检索、条款审查或冲突检测；工具返回的引用统一重编号，最终报告经过 Answer Guard 与证据画像校验。报告完成后，已有 LangChain 结构化输出能力会从报告与真实引用中提取 Matter 画像、findings 和 artifacts；解析失败时任务仍成功，但不会创建占位 Matter。
 
 ### 引用与证据链
 
@@ -611,7 +653,7 @@ Agent 任务入口直接调用 Tool Calling ReAct 循环。模型先判断是否
 
 项目使用 GitHub Actions（`.github/workflows/ci.yml`）：
 
-- **后端**：Python 3.11 + pytest 单元测试
+- **后端**：Python 3.11 + constraints 安装 + Ruff + pytest
 - **前端**：Node 20 + TypeScript 编译 + Vite 构建
 - **RAG 评估门控**：可选，需配置 LLM API secrets 后启用
 
