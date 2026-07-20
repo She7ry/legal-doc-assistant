@@ -64,16 +64,6 @@
             </el-select>
           </el-form-item>
 
-          <el-form-item label="Matter ID">
-            <el-input
-              v-model="form.matterId"
-              maxlength="128"
-              clearable
-              :disabled="loading"
-              placeholder="留空时自动创建新事项；填入已有 ID 可继续同一 Matter"
-            />
-          </el-form-item>
-
           <div class="agent-form-row">
             <el-form-item label="用户模式">
               <el-radio-group v-model="form.userRole" :disabled="loading">
@@ -128,13 +118,6 @@
           :stroke-width="10"
         />
         <p class="job-stage">{{ stageLabel(task.stage) }}</p>
-
-        <div v-if="currentMatterId" class="agent-matter-actions">
-          <el-tag effect="plain">Matter: {{ currentMatterId }}</el-tag>
-          <el-button :icon="Collection" size="small" @click="openMatter(currentMatterId)">
-            打开事项
-          </el-button>
-        </div>
 
         <el-alert
           v-if="task.error"
@@ -267,9 +250,8 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { Collection, MagicStick, Refresh } from "@element-plus/icons-vue";
+import { MagicStick, Refresh } from "@element-plus/icons-vue";
 
 import { getAgentTask, resumeAgentTask, runAgentTask, streamAgentTaskEvents } from "../api/agent";
 import { formatApiError } from "../api/http";
@@ -282,7 +264,6 @@ import CitationList from "../components/CitationList.vue";
 import EvidencePanel from "../components/EvidencePanel.vue";
 
 const AGENT_CONVERSATION_STORAGE_KEY = "legal-doc-assistant.agentConversationId";
-const router = useRouter();
 
 const focusAreaOptions = [
   { label: "付款", value: "payment" },
@@ -306,7 +287,6 @@ const form = reactive({
   focusAreas: ["payment", "termination", "liability limitation"],
   userRole: "ordinary" as "ordinary" | "lawyer",
   maxSteps: 6,
-  matterId: "",
 });
 const resumeForm = reactive({
   clarificationAnswers: "",
@@ -324,7 +304,6 @@ interface AgentToolCallTrace {
 
 const result = computed(() => task.value?.result ?? null);
 const toolCalls = computed(() => result.value?.steps.flatMap(stepToolCalls) ?? []);
-const currentMatterId = computed(() => task.value?.matter_id || "");
 const events = computed(() => task.value?.events ?? []);
 const clarificationQuestions = computed(() => {
   if (task.value?.status !== "needs_input") {
@@ -368,9 +347,7 @@ async function runTask() {
       user_role: form.userRole,
       max_steps: form.maxSteps,
       conversation_id: conversationId.value,
-      matter_id: cleanMatterId(form.matterId),
     });
-    form.matterId = task.value.matter_id || form.matterId;
     await streamCurrentTaskEvents();
   } catch (error) {
     await refreshCurrentTask();
@@ -398,9 +375,7 @@ async function resumeTask() {
       user_role: form.userRole,
       max_steps: form.maxSteps,
       conversation_id: conversationId.value,
-      matter_id: cleanMatterId(form.matterId || task.value.matter_id || ""),
     });
-    form.matterId = task.value.matter_id || form.matterId;
     resumeForm.clarificationAnswers = "";
     if (task.value.status !== "needs_input") {
       await streamCurrentTaskEvents(latestEventId(task.value.events));
@@ -433,7 +408,6 @@ async function streamCurrentTaskEvents(afterEventId = 0) {
     afterEventId,
   );
   task.value = await getAgentTask(taskId);
-  form.matterId = task.value.matter_id || form.matterId;
 }
 
 async function refreshCurrentTask() {
@@ -442,7 +416,6 @@ async function refreshCurrentTask() {
   }
   try {
     task.value = await getAgentTask(task.value.task_id);
-    form.matterId = task.value.matter_id || form.matterId;
   } catch {
     // Keep the existing local task state if status refresh also fails.
   }
@@ -487,7 +460,6 @@ function resetForm() {
   form.focusAreas = ["payment", "termination", "liability limitation"];
   form.userRole = "ordinary";
   form.maxSteps = 6;
-  form.matterId = "";
   resumeForm.clarificationAnswers = "";
   conversationId.value = createConversationId();
 }
@@ -613,19 +585,6 @@ function toolResultSummary(result: Record<string, unknown>) {
 
 function shortText(value: string) {
   return value.length > 280 ? `${value.slice(0, 277)}...` : value;
-}
-
-function cleanMatterId(value: string) {
-  const text = value.trim();
-  return text || null;
-}
-
-function openMatter(matterId: string) {
-  const normalized = matterId.trim();
-  if (!normalized) {
-    return;
-  }
-  void router.push({ path: "/matters", query: { matter_id: normalized } });
 }
 
 function stringValue(item: Record<string, unknown>, key: string) {

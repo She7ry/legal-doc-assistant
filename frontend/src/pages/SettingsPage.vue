@@ -13,23 +13,6 @@
           <el-input v-model="form.apiBaseUrl" placeholder="http://localhost:8000" />
         </el-form-item>
 
-        <el-form-item label="X-API-Key">
-          <el-input
-            v-model="form.apiKey"
-            type="password"
-            show-password
-            placeholder="后端未启用 DOC_ASSISTANT_API_KEYS 时可留空"
-          />
-        </el-form-item>
-
-        <el-form-item label="X-Tenant-Id">
-          <el-input v-model="form.tenantId" placeholder="default" />
-        </el-form-item>
-
-        <el-form-item label="X-User-Id">
-          <el-input v-model="form.userId" placeholder="local-user" />
-        </el-form-item>
-
         <div class="panel-actions panel-actions--left">
           <el-button :icon="Refresh" @click="reset">恢复默认</el-button>
           <el-button :icon="Connection" :loading="checking" @click="testConnection">
@@ -83,9 +66,6 @@ const checking = ref(false);
 const connectionResult = ref<HealthResponse | null>(null);
 const form = reactive({
   apiBaseUrl: settings.apiBaseUrl,
-  apiKey: settings.apiKey,
-  tenantId: settings.tenantId,
-  userId: settings.userId,
 });
 
 const connectionAlertType = computed(() =>
@@ -127,9 +107,6 @@ function save() {
 function reset() {
   settings.reset();
   form.apiBaseUrl = settings.apiBaseUrl;
-  form.apiKey = settings.apiKey;
-  form.tenantId = settings.tenantId;
-  form.userId = settings.userId;
   ElMessage.success("已恢复默认配置");
 }
 

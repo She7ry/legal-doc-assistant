@@ -5,7 +5,7 @@
         <div class="brand-mark">LD</div>
         <div class="brand-copy">
           <strong>Legal Assistant</strong>
-          <span>企业文档审查工作台</span>
+          <span>个人法律文档工作台</span>
         </div>
       </div>
 
@@ -17,10 +17,6 @@
         <el-menu-item index="/agent">
           <el-icon><MagicStick /></el-icon>
           <span>Agent 审查</span>
-        </el-menu-item>
-        <el-menu-item index="/matters">
-          <el-icon><Collection /></el-icon>
-          <span>事项库</span>
         </el-menu-item>
         <el-menu-item index="/documents">
           <el-icon><Files /></el-icon>
@@ -58,11 +54,8 @@
             aria-label="刷新服务状态"
             @click="refreshHealth"
           />
-          <el-tag effect="plain" type="info">Tenant: {{ settings.tenantId }}</el-tag>
-          <el-tag effect="plain" type="info">User: {{ settings.userId }}</el-tag>
-          <el-tag effect="plain" :type="settings.hasApiKey ? 'success' : 'warning'">
-            {{ settings.hasApiKey ? "API Key 已配置" : "本地免密或未配置" }}
-          </el-tag>
+          <el-tag effect="plain" type="info">{{ auth.user?.username }}</el-tag>
+          <el-button size="small" @click="handleLogout">退出登录</el-button>
         </div>
       </el-header>
 
@@ -75,11 +68,10 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   CircleCheck,
   CircleClose,
-  Collection,
   Document,
   Files,
   MagicStick,
@@ -92,10 +84,11 @@ import {
 import { checkHealth } from "../api/health";
 import { formatApiError } from "../api/http";
 import type { HealthResponse } from "../api/types";
-import { useSettingsStore } from "../stores/settings";
+import { useAuthStore } from "../stores/auth";
 
 const route = useRoute();
-const settings = useSettingsStore();
+const router = useRouter();
+const auth = useAuthStore();
 const health = ref<HealthResponse | null>(null);
 const healthError = ref("");
 const healthLoading = ref(false);
@@ -106,11 +99,6 @@ const routeMeta = computed(() => {
       return {
         title: "Agent 审查",
         subtitle: "拆解法律文档任务，跟踪工具执行、证据和人工复核点",
-      };
-    case "/matters":
-      return {
-        title: "事项库",
-        subtitle: "查看 Matter Profile、结构化交付物和待确认信息",
       };
     case "/documents":
       return {
@@ -125,7 +113,7 @@ const routeMeta = computed(() => {
     case "/settings":
       return {
         title: "系统设置",
-        subtitle: "配置 API 地址、租户和访问密钥",
+        subtitle: "配置后端 API 地址",
       };
     default:
       return {
@@ -190,5 +178,10 @@ async function refreshHealth() {
   } finally {
     healthLoading.value = false;
   }
+}
+
+async function handleLogout() {
+  await auth.logout();
+  await router.replace({ name: "login" });
 }
 </script>

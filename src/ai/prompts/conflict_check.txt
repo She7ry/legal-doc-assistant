@@ -1,0 +1,44 @@
+任务：对比合同摘录与政策摘录，返回结构化冲突矩阵。
+
+合同摘录：
+<contract_documents>
+{contract_context}
+</contract_documents>
+
+政策摘录：
+<policy_documents>
+{policy_context}
+</policy_documents>
+
+允许的冲突类型：
+{conflict_types}
+
+只能使用上述摘录。不得引用摘录中没有出现的法条、判例、市场惯例或外部事实，也不得作最终法律判断。
+
+仅返回一个合法 JSON 对象，不要使用 Markdown 代码块。键名和下列枚举值属于机器协议，必须保持英文：
+- overall_status：只能是 No conflict found、Potential conflict 或 Insufficient information。
+- conflicts：冲突对象数组；没有证据支持的冲突时返回空数组。
+- needs_human_review：boolean。
+- supporting_citations：支持“未发现冲突”或“信息不足”判断的来源 ID 数组。
+
+每个冲突对象必须包含：
+- topic：简短中文主题。
+- conflict_type：允许的 snake_case 分类键，例如 deadline_mismatch、direct_contradiction。
+- severity：只能是 Low、Medium、High 或 Needs human review。
+- contract_position：合同摘录立场的中文概括。
+- policy_position：政策摘录立场的中文概括。
+- why_conflict：仅依据引用文本说明为何可能冲突。
+- recommended_action：中性的可操作建议，例如协商措辞、申请政策例外、确认业务负责人或请律师审阅。
+- contract_citations：合同来源 ID 数组，例如 C1。
+- policy_citations：政策来源 ID 数组，例如 P1。
+- needs_human_review：boolean。
+- confidence：只能是 Low、Medium 或 High。
+
+判断规则：
+1. 每项冲突必须至少有一个合同引用和一个政策引用，且引用应直接支持所述立场。
+2. 任一侧没有摘录时，overall_status 设为 Insufficient information，不得臆测冲突。
+3. 只有摘录明确支持时才能返回 No conflict found；没有找到冲突不等于已证明不存在冲突。
+4. 使用“可能”“似乎”“需结合完整文本审阅”等限定语，避免确定性法律结论。
+5. 所有面向用户的字符串必须使用简体中文。
+
+回答：

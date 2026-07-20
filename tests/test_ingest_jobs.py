@@ -6,22 +6,22 @@ from threading import Barrier
 from threading import enumerate as enumerate_threads
 from types import SimpleNamespace
 
-from api.jobs import IngestJobStatus, IngestJobStore
-from api.task_queue import shutdown_background_tasks, submit_background_task
-from doc_assistant.schemas.citation import IngestResult
+from ai.rag.schemas import IngestResult
+from backend.jobs import IngestJobStatus, IngestJobStore
+from backend.task_queue import shutdown_background_tasks, submit_background_task
 
 
-def test_ingest_job_store_hides_jobs_from_other_tenants(tmp_path) -> None:
-    store = IngestJobStore()
-    job = store.create("tenant-a", "contract.txt", tmp_path / "contract.txt")
+def test_ingest_job_store_hides_jobs_from_other_users(tmp_path) -> None:
+    store = IngestJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create("user-a", "contract.txt", tmp_path / "contract.txt")
 
-    assert store.get(job.job_id, "tenant-a") is not None
-    assert store.get(job.job_id, "tenant-b") is None
+    assert store.get(job.job_id, "user-a") is not None
+    assert store.get(job.job_id, "user-b") is None
 
 
 def test_ingest_job_store_tracks_success_result(tmp_path) -> None:
-    store = IngestJobStore()
-    job = store.create("tenant-a", "contract.txt", tmp_path / "contract.txt")
+    store = IngestJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create("user-a", "contract.txt", tmp_path / "contract.txt")
     result = IngestResult(
         file_id="abc",
         file_name="contract.txt",
@@ -29,11 +29,11 @@ def test_ingest_job_store_tracks_success_result(tmp_path) -> None:
         chunk_count=2,
     )
 
-    store.mark_running(job.job_id)
+    assert store.claim(job.job_id)
     store.update_progress(job.job_id, "embedding", 70, "sample warning")
     store.mark_succeeded(job.job_id, result)
 
-    finished = store.get(job.job_id, "tenant-a")
+    finished = store.get(job.job_id, "user-a")
     assert finished is not None
     assert finished.status == IngestJobStatus.SUCCEEDED
     assert finished.stage == "completed"
@@ -47,7 +47,7 @@ def test_ingest_job_store_tracks_success_result(tmp_path) -> None:
 def test_ingest_job_store_persists_jobs_to_sqlite(tmp_path) -> None:
     db_path = tmp_path / "jobs.sqlite3"
     first_store = IngestJobStore(db_path)
-    job = first_store.create("tenant-a", "contract.txt", tmp_path / "contract.txt")
+    job = first_store.create("user-a", "contract.txt", tmp_path / "contract.txt")
     result = IngestResult(
         file_id="abc",
         file_name="contract.txt",
@@ -59,11 +59,11 @@ def test_ingest_job_store_persists_jobs_to_sqlite(tmp_path) -> None:
         warnings=["empty page"],
     )
 
-    first_store.mark_running(job.job_id)
+    assert first_store.claim(job.job_id)
     first_store.mark_succeeded(job.job_id, result)
 
     second_store = IngestJobStore(db_path)
-    loaded = second_store.get(job.job_id, "tenant-a")
+    loaded = second_store.get(job.job_id, "user-a")
 
     assert loaded is not None
     assert loaded.status == IngestJobStatus.SUCCEEDED
@@ -75,7 +75,7 @@ def test_ingest_job_store_claims_sqlite_job_once_and_does_not_restart_running(tm
     db_path = tmp_path / "jobs.sqlite3"
     first_store = IngestJobStore(db_path)
     second_store = IngestJobStore(db_path)
-    job = first_store.create("tenant-a", "contract.txt", tmp_path / "contract.txt")
+    job = first_store.create("user-a", "contract.txt", tmp_path / "contract.txt")
     barrier = Barrier(2)
 
     def claim(store: IngestJobStore) -> bool:
@@ -87,14 +87,14 @@ def test_ingest_job_store_claims_sqlite_job_once_and_does_not_restart_running(tm
 
     assert sum(claimed) == 1
     assert first_store.list_restartable() == []
-    loaded = second_store.get(job.job_id, "tenant-a")
+    loaded = second_store.get(job.job_id, "user-a")
     assert loaded is not None
     assert loaded.status == IngestJobStatus.RUNNING
 
 
 def test_background_executor_rebuilds_across_lifespans(monkeypatch) -> None:
-    from api import main as api_main
-    from doc_assistant.models import language_model
+    from ai import llm as language_model
+    from backend import main as api_main
 
     completed: list[str] = []
     monkeypatch.setattr(api_main, "configure_logging", lambda: None)
@@ -102,15 +102,9 @@ def test_background_executor_rebuilds_across_lifespans(monkeypatch) -> None:
         api_main,
         "settings",
         SimpleNamespace(
-            default_tenant_id="default",
-            api_keys=("test",),
             ensure_directories=lambda: None,
         ),
     )
-    monkeypatch.setattr(api_main, "_vector_store", lambda _tenant_id: None)
-    monkeypatch.setattr(api_main, "_memory_service", lambda _tenant_id: None)
-    monkeypatch.setattr(api_main, "_qa_service", lambda _tenant_id: None)
-    monkeypatch.setattr(api_main, "_agent_service", lambda _tenant_id: None)
     monkeypatch.setattr(api_main, "_recover_background_work", lambda: None)
     monkeypatch.setattr(language_model, "build_chat_model", lambda: object())
 

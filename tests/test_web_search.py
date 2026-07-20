@@ -2,38 +2,47 @@ from __future__ import annotations
 
 import pytest
 
-from doc_assistant.tools.web_search import DuckDuckGoSearchClient
+from ai.agent.tools.web_search import BRAVE_SEARCH_URL, BraveSearchClient
 
 
 class FakeResponse:
     status_code = 200
-    text = """
-    <html>
-      <a class="result__a" href="https://example.com/news">Example title</a>
-      <div class="result__snippet">Example snippet</div>
-    </html>
-    """
+    text = ""
+
+    @staticmethod
+    def json() -> dict:
+        return {
+            "web": {
+                "results": [
+                    {
+                        "title": "Example title",
+                        "url": "https://example.com/news",
+                        "description": "Example snippet",
+                        "age": "2 days ago",
+                    }
+                ]
+            }
+        }
 
 
 class FakeSession:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def get(self, url, *, params, headers, timeout):
+    def get(self, url, *, params, timeout):
         self.calls.append(
             {
                 "url": url,
                 "params": params,
-                "headers": headers,
                 "timeout": timeout,
             }
         )
         return FakeResponse()
 
 
-def test_duckduckgo_search_uses_recency_and_sanitized_domain_filters() -> None:
+def test_brave_search_maps_results_and_filters() -> None:
     session = FakeSession()
-    client = DuckDuckGoSearchClient(timeout_seconds=5, max_retries=1)
+    client = BraveSearchClient("test-key", timeout_seconds=5, max_retries=1)
     client.session = session
 
     results = client.search(
@@ -43,14 +52,16 @@ def test_duckduckgo_search_uses_recency_and_sanitized_domain_filters() -> None:
         domains=["https://Example.com/path"],
     )
 
-    assert session.calls[0]["params"]["df"] == "w"
+    assert session.calls[0]["url"] == BRAVE_SEARCH_URL
+    assert session.calls[0]["params"]["freshness"] == "pw"
     assert session.calls[0]["params"]["q"] == "supplier news site:example.com"
     assert results[0].title == "Example title"
     assert results[0].snippet == "Example snippet"
+    assert results[0].source == "example.com"
 
 
 def test_web_search_rejects_domain_operator_injection() -> None:
-    client = DuckDuckGoSearchClient(max_retries=1)
+    client = BraveSearchClient("test-key", max_retries=1)
 
     with pytest.raises(ValueError):
         client.search(
@@ -61,7 +72,7 @@ def test_web_search_rejects_domain_operator_injection() -> None:
 
 
 def test_web_search_uses_requests_retry_adapter() -> None:
-    client = DuckDuckGoSearchClient(max_retries=3)
+    client = BraveSearchClient("test-key", max_retries=3)
     retry = client.session.get_adapter("https://").max_retries
 
     assert retry.total == 2

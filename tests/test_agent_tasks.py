@@ -3,13 +3,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from api.agent_tasks import AgentTaskStatus, AgentTaskStore
+from backend.agent_tasks import AgentTaskStatus, AgentTaskStore
 
 
-def test_agent_task_store_hides_tasks_from_other_tenants_and_users() -> None:
-    store = AgentTaskStore()
+def test_agent_task_store_hides_tasks_from_other_users(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     task = store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="Review payment terms.",
         focus_areas=["payment"],
@@ -18,15 +17,13 @@ def test_agent_task_store_hides_tasks_from_other_tenants_and_users() -> None:
         conversation_id=None,
     )
 
-    assert store.get(task.task_id, "tenant-a", "user-a") is not None
-    assert store.get(task.task_id, "tenant-b", "user-a") is None
-    assert store.get(task.task_id, "tenant-a", "user-b") is None
+    assert store.get(task.task_id, "user-a") is not None
+    assert store.get(task.task_id, "user-b") is None
 
 
-def test_agent_task_store_tracks_progress_events_and_result() -> None:
-    store = AgentTaskStore()
+def test_agent_task_store_tracks_progress_events_and_result(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     task = store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="Review termination.",
         focus_areas=["termination"],
@@ -35,7 +32,7 @@ def test_agent_task_store_tracks_progress_events_and_result() -> None:
         conversation_id="conversation-1",
     )
 
-    store.mark_running(task.task_id)
+    assert store.claim(task.task_id)
     store.update_progress(
         task.task_id,
         event_type="step_completed",
@@ -47,7 +44,7 @@ def test_agent_task_store_tracks_progress_events_and_result() -> None:
     )
     store.mark_succeeded(task.task_id, {"task_id": task.task_id, "status": "completed"})
 
-    finished = store.get(task.task_id, "tenant-a", "user-a")
+    finished = store.get(task.task_id, "user-a")
     assert finished is not None
     assert finished.status == AgentTaskStatus.SUCCEEDED
     assert finished.stage == "completed"
@@ -61,10 +58,9 @@ def test_agent_task_store_tracks_progress_events_and_result() -> None:
     ]
 
 
-def test_agent_task_store_marks_task_as_needing_input() -> None:
-    store = AgentTaskStore()
+def test_agent_task_store_marks_task_as_needing_input(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     task = store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="帮我看看",
         focus_areas=[],
@@ -75,7 +71,7 @@ def test_agent_task_store_marks_task_as_needing_input() -> None:
 
     store.mark_needs_input(task.task_id, ["请说明具体审查目标。"])
 
-    loaded = store.get(task.task_id, "tenant-a", "user-a")
+    loaded = store.get(task.task_id, "user-a")
     assert loaded is not None
     assert loaded.status == AgentTaskStatus.NEEDS_INPUT
     assert loaded.stage == "needs_input"
@@ -86,10 +82,9 @@ def test_agent_task_store_marks_task_as_needing_input() -> None:
     assert loaded.events[-1].payload == {"questions": ["请说明具体审查目标。"]}
 
 
-def test_agent_task_store_resumes_task_with_supplemental_input() -> None:
-    store = AgentTaskStore()
+def test_agent_task_store_resumes_task_with_supplemental_input(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     task = store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="review this",
         focus_areas=[],
@@ -130,7 +125,6 @@ def test_agent_task_store_persists_tasks_to_sqlite(tmp_path) -> None:
     db_path = tmp_path / "agent_tasks.sqlite3"
     first_store = AgentTaskStore(db_path)
     task = first_store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="Review liability.",
         focus_areas=["liability limitation"],
@@ -139,11 +133,11 @@ def test_agent_task_store_persists_tasks_to_sqlite(tmp_path) -> None:
         conversation_id=None,
     )
 
-    first_store.mark_running(task.task_id)
+    assert first_store.claim(task.task_id)
     first_store.mark_failed(task.task_id, "model unavailable")
 
     second_store = AgentTaskStore(db_path)
-    loaded = second_store.get(task.task_id, "tenant-a", "user-a")
+    loaded = second_store.get(task.task_id, "user-a")
 
     assert loaded is not None
     assert loaded.status == AgentTaskStatus.FAILED
@@ -157,7 +151,6 @@ def test_agent_task_store_claims_sqlite_task_once_and_does_not_restart_running(t
     first_store = AgentTaskStore(db_path)
     second_store = AgentTaskStore(db_path)
     task = first_store.create(
-        tenant_id="tenant-a",
         user_id="user-a",
         objective="Review liability.",
         focus_areas=["liability limitation"],
@@ -176,7 +169,7 @@ def test_agent_task_store_claims_sqlite_task_once_and_does_not_restart_running(t
 
     assert sum(claimed) == 1
     assert first_store.list_restartable() == []
-    loaded = second_store.get(task.task_id, "tenant-a", "user-a")
+    loaded = second_store.get(task.task_id, "user-a")
     assert loaded is not None
     assert loaded.status == AgentTaskStatus.RUNNING
     assert [event.event_type for event in loaded.events or []].count("running") == 1

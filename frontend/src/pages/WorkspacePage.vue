@@ -6,8 +6,8 @@
         <strong>{{ documentTotal }}</strong>
       </div>
       <div class="metric">
-        <span>当前租户</span>
-        <strong>{{ settings.tenantId }}</strong>
+        <span>当前用户</span>
+        <strong>{{ auth.user?.username }}</strong>
       </div>
       <div class="metric">
         <span>API 地址</span>
@@ -40,8 +40,10 @@ import type { IngestJobResponse } from "../api/types";
 import ChatPanel from "../components/ChatPanel.vue";
 import DocumentUploader from "../components/DocumentUploader.vue";
 import IngestJobStatus from "../components/IngestJobStatus.vue";
+import { useAuthStore } from "../stores/auth";
 import { useSettingsStore } from "../stores/settings";
 
+const auth = useAuthStore();
 const settings = useSettingsStore();
 const documentTotal = ref(0);
 const activeJob = ref<IngestJobResponse | null>(null);

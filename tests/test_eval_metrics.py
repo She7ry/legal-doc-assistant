@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from doc_assistant.evaluation.metrics import (
+from ai.rag.evaluation.metrics import (
     SourceCandidate,
     aggregate_scores,
     score_generation_case,
@@ -8,7 +8,7 @@ from doc_assistant.evaluation.metrics import (
     source_candidate_from_citation,
     source_matches,
 )
-from doc_assistant.schemas.citation import Citation
+from ai.rag.schemas import Citation
 from scripts.run_rag_eval import _evaluate_thresholds, _parse_min_score
 
 
@@ -59,19 +59,15 @@ def test_generation_metrics_score_answer_and_citation() -> None:
         "citation_accuracy": 1.0,
         "refusal_accuracy": None,
         "unsupported_claim_count": None,
-        "skill_selection_accuracy": None,
-        "skill_token_cost": None,
     }
 
 
-def test_generation_metrics_score_unsupported_claims_and_skill_selection() -> None:
+def test_generation_metrics_score_unsupported_claims() -> None:
     scores = score_generation_case(
-        {"answer_type": "answerable", "expected_skills": ["ground-answer"]},
+        {"answer_type": "answerable"},
         "A claim [S1].",
         [],
         {
-            "selected_skills": ["ground-answer"],
-            "skill_token_cost": 321,
             "citation_support": [
                 {"claim": "A claim", "status": "unsupported"},
                 {"claim": "Another claim", "status": "supported"},
@@ -80,8 +76,6 @@ def test_generation_metrics_score_unsupported_claims_and_skill_selection() -> No
     )
 
     assert scores["unsupported_claim_count"] == 1.0
-    assert scores["skill_selection_accuracy"] == 1.0
-    assert scores["skill_token_cost"] == 321.0
 
 
 def test_refusal_accuracy_scores_unanswerable_case() -> None:

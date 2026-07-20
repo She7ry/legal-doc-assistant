@@ -15,11 +15,11 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 from qdrant_client import QdrantClient, models
 
-from doc_assistant.memory.schemas import MemoryCandidate, MemoryRecord, MemoryUpdate
-from doc_assistant.memory.service import MemoryService, extract_memory_write_intents
-from doc_assistant.memory.store import MemoryStore
-from doc_assistant.memory.vector_store import MemoryVectorStore
-from doc_assistant.services.qa_service import DocumentQAService
+from ai.memory.schemas import MemoryCandidate, MemoryRecord, MemoryUpdate
+from ai.memory.service import MemoryService, extract_memory_write_intents
+from ai.memory.store import MemoryStore
+from ai.memory.vector_store import MemoryVectorStore
+from ai.rag.qa_service import DocumentQAService
 
 
 class RecordingChatModel(BaseChatModel):
@@ -41,7 +41,7 @@ class RecordingChatModel(BaseChatModel):
 
 
 class SingleDocumentVectorStore:
-    tenant_id = "tenant-a"
+    user_id = "user-a"
 
     def search(self, query: str, k: int | None = None) -> list[Document]:
         return [
@@ -53,7 +53,7 @@ class SingleDocumentVectorStore:
 
 
 class EmptyDocumentVectorStore:
-    tenant_id = "tenant-a"
+    user_id = "user-a"
 
     def search(self, query: str, k: int | None = None) -> list[Document]:
         return []
@@ -73,8 +73,8 @@ class FakeMemoryVectorStore:
         self.deleted.append(memory_id)
         return True
 
-    def search(self, query: str, *, tenant_id: str, user_id: str, k: int | None = None):
-        del query, tenant_id, user_id
+    def search(self, query: str, *, user_id: str, k: int | None = None):
+        del query, user_id
         return [
             MemoryCandidate(
                 memory=memory_record_factory(memory_id),
@@ -123,7 +123,6 @@ def build_memory_service(tmp_path) -> MemoryService:
 def memory_record_factory(memory_id: str) -> MemoryRecord:
     return MemoryRecord(
         memory_id=memory_id,
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
@@ -139,7 +138,7 @@ def memory_record_factory(memory_id: str) -> MemoryRecord:
 
 def build_qdrant_memory_vector_store() -> MemoryVectorStore:
     vector_store = MemoryVectorStore.__new__(MemoryVectorStore)
-    vector_store.tenant_id = "tenant-a"
+    vector_store.user_id = "user-a"
     vector_store.collection_name = "memories"
     vector_store.vector_store = QdrantClient(":memory:")
     vector_store.embedding_model = FakeMemoryEmbeddingModel()
@@ -168,7 +167,6 @@ def test_memory_store_repairs_duplicate_active_keys_before_unique_index(tmp_path
     db_path = tmp_path / "memory.sqlite3"
     store = MemoryStore(db_path)
     original = store.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
@@ -186,12 +184,12 @@ def test_memory_store_repairs_duplicate_active_keys_before_unique_index(tmp_path
         connection.execute(
             """
             INSERT INTO memories (
-                memory_id, tenant_id, user_id, scope, type, key, content, value_json,
+                memory_id, user_id, scope, type, key, content, value_json,
                 source, confidence, created_at, updated_at, expires_at, visibility,
                 permissions_json, supersedes_id, status, source_message_id,
                 conversation_id, task_id
             )
-            SELECT 'newer', tenant_id, user_id, scope, type, key, 'Newer value.', value_json,
+            SELECT 'newer', user_id, scope, type, key, 'Newer value.', value_json,
                    source, confidence, created_at, ?, expires_at, visibility,
                    permissions_json, supersedes_id, status, source_message_id,
                    conversation_id, task_id
@@ -201,38 +199,37 @@ def test_memory_store_repairs_duplicate_active_keys_before_unique_index(tmp_path
         )
 
     repaired = MemoryStore(db_path)
-    active = repaired.list_memories("tenant-a", "user-a")
+    active = repaired.list_memories("user-a")
 
     assert [memory.memory_id for memory in active] == ["newer"]
-    assert repaired.get_memory("tenant-a", "user-a", original.memory_id).status == "stale"
+    assert repaired.get_memory("user-a", original.memory_id).status == "stale"
 
 
 def test_explicit_memory_write_only(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = service.ensure_context("user-a", "conversation-a")
     message_id = service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="hello",
     )
 
-    assert service.write_memories_from_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        message_id=message_id,
-        content="hello",
-    ) == []
+    assert (
+        service.write_memories_from_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            message_id=message_id,
+            content="hello",
+        )
+        == []
+    )
 
     explicit_id = service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="请记住：以后回答用中文并保持简洁",
     )
     created = service.write_memories_from_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         message_id=explicit_id,
@@ -254,29 +251,39 @@ def test_memory_policy_splits_multiple_explicit_intents() -> None:
     assert all(intent.source == "explicit" for intent in intents)
 
 
+def test_like_and_dislike_statements_are_exact_profile_preferences() -> None:
+    liked = extract_memory_write_intents("我喜欢用项目符号")
+    disliked = extract_memory_write_intents("我不喜欢用项目符号")
+
+    assert liked[0].type == disliked[0].type == "preference"
+    assert liked[0].key == disliked[0].key
+    assert liked[0].value_json["polarity"] == "like"
+    assert disliked[0].value_json["polarity"] == "dislike"
+
+
 def test_implicit_memory_is_not_written(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = service.ensure_context("user-a", "conversation-a")
     message_id = service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Our company mainly provides IP agency services.",
     )
 
-    assert service.write_memories_from_user_message(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        conversation_id=conversation_id,
-        message_id=message_id,
-        content="Our company mainly provides IP agency services.",
-    ) == []
+    assert (
+        service.write_memories_from_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            message_id=message_id,
+            content="Our company mainly provides IP agency services.",
+        )
+        == []
+    )
 
 
 def test_memory_supersedes_existing_active_key(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     first = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -284,7 +291,6 @@ def test_memory_supersedes_existing_active_key(tmp_path) -> None:
         content="Prefer detailed answers.",
     )
     second = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -293,15 +299,12 @@ def test_memory_supersedes_existing_active_key(tmp_path) -> None:
     )
 
     assert second.supersedes_id == first.memory_id
-    assert [memory.memory_id for memory in service.list_memories("tenant-a", "user-a")] == [
-        second.memory_id
-    ]
+    assert [memory.memory_id for memory in service.list_memories("user-a")] == [second.memory_id]
 
 
 def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     first = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -310,7 +313,6 @@ def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
         value_json={"text": "Prefer concise answers."},
     )
     second = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -320,7 +322,7 @@ def test_duplicate_memory_write_reuses_existing_active_memory(tmp_path) -> None:
     )
 
     assert second.memory_id == first.memory_id
-    assert len(service.list_memories("tenant-a", "user-a", status=None, include_expired=True)) == 1
+    assert len(service.list_memories("user-a", status=None, include_expired=True)) == 1
 
 
 def test_concurrent_memory_creates_leave_one_active_key(tmp_path) -> None:
@@ -340,7 +342,6 @@ def test_concurrent_memory_creates_leave_one_active_key(tmp_path) -> None:
         try:
             start.wait(timeout=5)
             service.create_memory(
-                tenant_id="tenant-a",
                 user_id="user-a",
                 scope="user",
                 type="preference",
@@ -361,16 +362,13 @@ def test_concurrent_memory_creates_leave_one_active_key(tmp_path) -> None:
 
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
-    memories = MemoryStore(db_path).list_memories(
-        "tenant-a", "user-a", status=None, include_expired=True
-    )
+    memories = MemoryStore(db_path).list_memories("user-a", status=None, include_expired=True)
     assert sum(memory.status == "active" for memory in memories) == 1
 
 
 def test_concurrent_memory_updates_preserve_distinct_fields(tmp_path) -> None:
     db_path = tmp_path / "memory.sqlite3"
     memory = MemoryService(store=MemoryStore(db_path), vector_store=None).create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -389,7 +387,7 @@ def test_concurrent_memory_updates_preserve_distinct_fields(tmp_path) -> None:
     def update(store: MemoryStore, patch: MemoryUpdate) -> None:
         try:
             start.wait(timeout=5)
-            store.update_memory("tenant-a", "user-a", memory.memory_id, patch)
+            store.update_memory("user-a", memory.memory_id, patch)
         except BaseException as exc:
             errors.append(exc)
 
@@ -404,7 +402,7 @@ def test_concurrent_memory_updates_preserve_distinct_fields(tmp_path) -> None:
 
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
-    updated = MemoryStore(db_path).get_memory("tenant-a", "user-a", memory.memory_id)
+    updated = MemoryStore(db_path).get_memory("user-a", memory.memory_id)
     assert updated is not None
     assert updated.content == "Updated answer style."
     assert updated.confidence == 0.95
@@ -413,7 +411,6 @@ def test_concurrent_memory_updates_preserve_distinct_fields(tmp_path) -> None:
 def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     first = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
@@ -421,50 +418,74 @@ def test_memory_retrieval_uses_vector_ranking(tmp_path) -> None:
         content="Patent license agreements often need indemnity review.",
     )
     second = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
         key="billing_preference",
         content="Invoices are reviewed by finance.",
     )
-    service.vector_store = FakeMemoryVectorStore([(second.memory_id, 0.99), (first.memory_id, 0.95)])
+    service.vector_store = FakeMemoryVectorStore(
+        [(second.memory_id, 0.99), (first.memory_id, 0.95)]
+    )
 
     results = service.retrieve_relevant_memories(
-        tenant_id="tenant-a",
         user_id="user-a",
         query="patent license indemnity",
         limit=3,
     )
 
-    assert [candidate.memory.memory_id for candidate in results] == [second.memory_id, first.memory_id]
+    assert [candidate.memory.memory_id for candidate in results] == [
+        second.memory_id,
+        first.memory_id,
+    ]
     assert results[0].retrieval_source == "vector"
+
+
+def test_profile_preferences_are_loaded_from_sqlite_without_vector_search(tmp_path) -> None:
+    vector_store = FakeMemoryVectorStore()
+    service = MemoryService(
+        store=MemoryStore(tmp_path / "memory.sqlite3"),
+        vector_store=vector_store,  # type: ignore[arg-type]
+    )
+    memory = service.create_memory(
+        user_id="user-a",
+        scope="user",
+        type="preference",
+        key="answer_style",
+        content="Prefer concise answers.",
+    )
+
+    results = service.retrieve_relevant_memories(user_id="user-a", query="payment terms")
+
+    assert [candidate.memory.memory_id for candidate in results] == [memory.memory_id]
+    assert results[0].retrieval_source == "profile"
+    assert vector_store.upserted == []
 
 
 def test_vector_hydration_filters_stale_results(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     stale = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
         key="old_context",
         content="Old stale context.",
     )
-    service.delete_memory("tenant-a", "user-a", stale.memory_id)
+    service.delete_memory("user-a", stale.memory_id)
     service.vector_store = FakeMemoryVectorStore([(stale.memory_id, 0.99)])
 
-    assert service.retrieve_relevant_memories(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        query="arbitration Singapore",
-    ) == []
+    assert (
+        service.retrieve_relevant_memories(
+            user_id="user-a",
+            query="arbitration Singapore",
+        )
+        == []
+    )
 
 
 def test_format_for_prompt_keeps_high_priority_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     memory = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -475,7 +496,7 @@ def test_format_for_prompt_keeps_high_priority_memory(tmp_path) -> None:
 
     prompt = service.format_for_prompt([MemoryCandidate(memory=memory, score=0.8)])
 
-    assert "Relevant memory" in prompt
+    assert "相关的用户记忆" in prompt
     assert "Prefer concise Chinese answers." in prompt
 
 
@@ -486,7 +507,6 @@ def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> 
         vector_store=vector_store,  # type: ignore[arg-type]
     )
     expired = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="session",
         type="fact",
@@ -495,7 +515,7 @@ def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> 
         expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
     )
 
-    stale = service.cleanup_expired_memories("tenant-a", "user-a")
+    stale = service.cleanup_expired_memories("user-a")
 
     assert [memory.memory_id for memory in stale] == [expired.memory_id]
     assert vector_store.deleted[-1] == expired.memory_id
@@ -504,7 +524,6 @@ def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> 
 def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     memory = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
@@ -515,7 +534,6 @@ def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
     )
 
     cleared = service.update_memory(
-        "tenant-a",
         "user-a",
         memory.memory_id,
         MemoryUpdate(value_json=None, expires_at=None),
@@ -528,9 +546,8 @@ def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
 
 def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = service.ensure_context("user-a", "conversation-a")
     service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="session",
         type="task_state",
@@ -542,13 +559,12 @@ def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -
     )
     for index in range(12):
         service.record_user_message(
-            tenant_id="tenant-a",
             user_id="user-a",
             conversation_id=conversation_id,
             content=f"Question {index}",
         )
 
-    history = service.load_conversation_history("tenant-a", "user-a", conversation_id, limit=20)
+    history = service.load_conversation_history("user-a", conversation_id, limit=20)
 
     assert history[0]["role"] == "system"
     assert [message["content"] for message in history[1:]] == [
@@ -558,22 +574,19 @@ def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -
 
 def test_manual_conversation_summary_creates_session_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
-    conversation_id = service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = service.ensure_context("user-a", "conversation-a")
     service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Please review the notice clause.",
     )
     service.record_assistant_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="The notice clause requires 10 business days of prior notice.",
     )
 
     memory = service.summarize_conversation_to_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
     )
@@ -584,6 +597,34 @@ def test_manual_conversation_summary_creates_session_memory(tmp_path) -> None:
     assert "10 business days" in memory.content
 
 
+def test_conversation_summary_is_automatically_indexed_every_ten_messages(tmp_path) -> None:
+    vector_store = FakeMemoryVectorStore()
+    service = MemoryService(
+        store=MemoryStore(tmp_path / "memory.sqlite3"),
+        vector_store=vector_store,  # type: ignore[arg-type]
+    )
+    conversation_id = service.ensure_context("user-a", "conversation-a")
+    for index in range(5):
+        service.record_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Question {index}",
+        )
+        service.record_assistant_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Answer {index}",
+        )
+
+    summary = next(
+        memory
+        for memory in service.list_memories("user-a")
+        if memory.key == "conversation_summary_conversation-a"
+    )
+    assert summary.value_json["message_count"] == 10
+    assert summary.memory_id in vector_store.upserted
+
+
 def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) -> None:
     vector_store = FakeMemoryVectorStore()
     service = MemoryService(
@@ -591,7 +632,6 @@ def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) ->
         vector_store=vector_store,  # type: ignore[arg-type]
     )
     active = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
@@ -599,16 +639,15 @@ def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) ->
         content="Active fact.",
     )
     deleted = service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="fact",
         key="deleted_fact",
         content="Deleted fact.",
     )
-    service.delete_memory("tenant-a", "user-a", deleted.memory_id)
+    service.delete_memory("user-a", deleted.memory_id)
 
-    result = service.repair_vector_index("tenant-a", "user-a")
+    result = service.repair_vector_index("user-a")
 
     assert deleted.memory_id in vector_store.deleted
     assert active.memory_id in vector_store.upserted
@@ -619,7 +658,6 @@ def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) ->
 def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None:
     memory_service = build_memory_service(tmp_path)
     memory = memory_service.create_memory(
-        tenant_id="tenant-a",
         user_id="user-a",
         scope="user",
         type="preference",
@@ -632,7 +670,7 @@ def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None
         vector_store=SingleDocumentVectorStore(),
         chat_model=chat_model,
         memory_service=memory_service,
-        tenant_id="tenant-a",
+        user_id="user-a",
     )
 
     answer = service.ask(
@@ -649,15 +687,13 @@ def test_document_qa_separates_memory_from_retrieved_documents(tmp_path) -> None
 
 def test_document_qa_merges_persisted_history_when_client_history_is_missing(tmp_path) -> None:
     memory_service = build_memory_service(tmp_path)
-    conversation_id = memory_service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = memory_service.ensure_context("user-a", "conversation-a")
     memory_service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Earlier question about renewal.",
     )
     memory_service.record_assistant_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Earlier answer about renewal.",
@@ -667,7 +703,7 @@ def test_document_qa_merges_persisted_history_when_client_history_is_missing(tmp
         vector_store=EmptyDocumentVectorStore(),
         chat_model=chat_model,
         memory_service=memory_service,
-        tenant_id="tenant-a",
+        user_id="user-a",
     )
 
     service.ask(
@@ -681,20 +717,20 @@ def test_document_qa_merges_persisted_history_when_client_history_is_missing(tmp
     assert "Earlier answer about renewal." in prompt
 
 
-def test_memory_vector_search_filters_by_tenant_user_and_visibility() -> None:
+def test_memory_vector_search_filters_by_user() -> None:
     vector_store = build_qdrant_memory_vector_store()
-    vector_store.upsert_memory(memory_record_factory("tenant-a-private"))
+    vector_store.upsert_memory(memory_record_factory("user-a-private"))
     vector_store.upsert_memory(
         replace(
-            memory_record_factory("tenant-b-private"),
-            tenant_id="tenant-b",
+            memory_record_factory("user-b-private"),
+            user_id="user-b",
             content="Concise answer style.",
         )
     )
 
-    results = vector_store.search("answer style", tenant_id="tenant-b", user_id="user-a", k=3)
+    results = vector_store.search("answer style", user_id="user-a", k=3)
 
-    assert [candidate.memory.memory_id for candidate in results] == ["tenant-b-private"]
+    assert [candidate.memory.memory_id for candidate in results] == ["user-a-private"]
     vector_store.vector_store.close()
 
 
@@ -711,7 +747,7 @@ def test_memory_vector_search_reconstructs_full_metadata() -> None:
         )
     )
 
-    results = vector_store.search("concise answers", tenant_id="tenant-a", user_id="user-a", k=1)
+    results = vector_store.search("concise answers", user_id="user-a", k=1)
 
     assert len(results) == 1
     assert results[0].retrieval_source == "vector"
@@ -719,35 +755,23 @@ def test_memory_vector_search_reconstructs_full_metadata() -> None:
     vector_store.vector_store.close()
 
 
-def test_memory_vector_search_discards_unreadable_backend_results() -> None:
+def test_memory_vector_search_discards_other_users_results() -> None:
     vector_store = build_qdrant_memory_vector_store()
     memories = [
         replace(memory_record_factory("own-private"), content="Concise own memory."),
-        replace(
-            memory_record_factory("team-shared"),
-            user_id="user-b",
-            visibility="team",
-            content="Concise shared team memory.",
-        ),
         replace(
             memory_record_factory("other-private"),
             user_id="user-b",
             visibility="private",
             content="Concise private memory.",
         ),
-        replace(
-            memory_record_factory("wrong-tenant"),
-            tenant_id="tenant-b",
-            visibility="org",
-            content="Concise wrong tenant memory.",
-        ),
     ]
     for memory in memories:
         vector_store.upsert_memory(memory)
 
-    results = vector_store.search("answer style", tenant_id="tenant-a", user_id="user-a", k=4)
+    results = vector_store.search("answer style", user_id="user-a", k=4)
 
-    assert {candidate.memory.memory_id for candidate in results} == {"own-private", "team-shared"}
+    assert {candidate.memory.memory_id for candidate in results} == {"own-private"}
     vector_store.vector_store.close()
 
 
@@ -783,7 +807,7 @@ def test_memory_search_initializes_payload_indexes_only_once() -> None:
 
     client = FakeClient()
     vector_store = MemoryVectorStore.__new__(MemoryVectorStore)
-    vector_store.tenant_id = "tenant-a"
+    vector_store.user_id = "user-a"
     vector_store.collection_name = "memories"
     vector_store.vector_store = client
     vector_store.embedding_model = CoordinatedEmbeddingModel()
@@ -795,7 +819,6 @@ def test_memory_search_initializes_payload_indexes_only_once() -> None:
             executor.submit(
                 vector_store.search,
                 "answer style",
-                tenant_id="tenant-a",
                 user_id="user-a",
                 k=1,
             )
@@ -804,10 +827,8 @@ def test_memory_search_initializes_payload_indexes_only_once() -> None:
         assert [future.result() for future in futures] == [[], []]
 
     assert client.payload_indexes == [
-        ("tenant_id", models.PayloadSchemaType.KEYWORD),
         ("user_id", models.PayloadSchemaType.KEYWORD),
         ("status", models.PayloadSchemaType.KEYWORD),
-        ("visibility", models.PayloadSchemaType.KEYWORD),
     ]
     assert client.collection_checks == 1
     assert client.queries == 2

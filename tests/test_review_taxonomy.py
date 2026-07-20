@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from doc_assistant.review.taxonomy import resolve_clause_profile
+from ai.review.taxonomy import resolve_clause_profile
 
 
 def test_resolve_clause_profile_matches_chinese_alias() -> None:
@@ -8,4 +8,4 @@ def test_resolve_clause_profile_matches_chinese_alias() -> None:
 
     assert profile.key == "termination"
     assert "终止合同" in profile.expanded_query("终止条款")
-    assert "Risk scoring weights:" in profile.risk_rules_prompt()
+    assert "高风险判断依据：" in profile.risk_rules_prompt()

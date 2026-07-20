@@ -113,7 +113,6 @@ export interface AgentTaskRequest {
   user_role: "ordinary" | "lawyer";
   max_steps: number;
   conversation_id?: string | null;
-  matter_id?: string | null;
 }
 
 export interface AgentTaskResumeRequest {
@@ -123,7 +122,6 @@ export interface AgentTaskResumeRequest {
   user_role?: "ordinary" | "lawyer" | null;
   max_steps?: number | null;
   conversation_id?: string | null;
-  matter_id?: string | null;
 }
 
 export interface AgentStepResult {
@@ -143,15 +141,12 @@ export interface AgentTaskResponse {
   status: string;
   objective: string;
   steps: AgentStepResult[];
-  findings: Record<string, unknown>[];
   human_review_required: boolean;
   report: string;
   citations: Citation[];
   confidence: string | null;
   guard_warnings: string[];
   evidence: EvidenceProfile | null;
-  matter_profile: Record<string, unknown> | null;
-  artifacts: Record<string, unknown>[];
   metadata: Record<string, unknown>;
 }
 
@@ -175,7 +170,6 @@ export interface AgentTaskRecordResponse {
   user_role: "ordinary" | "lawyer" | string;
   max_steps: number;
   conversation_id: string | null;
-  matter_id: string | null;
   stage: string;
   progress: number;
   submitted_at: string;
@@ -184,92 +178,6 @@ export interface AgentTaskRecordResponse {
   result: AgentTaskResponse | null;
   error: string | null;
   events: AgentTaskEvent[];
-}
-
-export interface MatterArtifactRecord {
-  artifact_id: string;
-  matter_id: string;
-  artifact_type: string;
-  title: string;
-  summary: string;
-  items: Record<string, unknown>[];
-  source_finding_ids: string[];
-  citations: string[];
-  metadata: Record<string, unknown>;
-  source_task_id: string;
-  version: number;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MatterFindingRecord {
-  finding_id: string;
-  matter_id: string;
-  category: string;
-  severity: string;
-  summary: string;
-  recommended_action: string;
-  citations: string[];
-  source_step_id: string;
-  clause_reference: string;
-  evidence_coverage: string;
-  support_level: string;
-  unsupported_reason: string;
-  source_quote: string;
-  location_label: string;
-  needs_human_review: boolean;
-  human_review_status: "pending" | "approved" | "waived" | "needs_info" | "resolved" | "not_required" | string;
-  status: string;
-  metadata: Record<string, unknown>;
-  source_task_id: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MatterRecord {
-  matter_id: string;
-  title: string;
-  status: string;
-  matter_profile: Record<string, unknown>;
-  source_task_id: string;
-  latest_task_id: string;
-  created_at: string;
-  updated_at: string;
-  artifacts: MatterArtifactRecord[];
-  findings: MatterFindingRecord[];
-  formal_report_blockers: string[];
-  can_generate_formal_report: boolean;
-}
-
-export interface MatterListResponse {
-  matters: MatterRecord[];
-  total: number;
-}
-
-export type MatterConfirmationGateStatus = "pending" | "approved" | "waived" | "needs_info";
-
-export interface MatterConfirmationGateUpdateRequest {
-  status: MatterConfirmationGateStatus;
-  note?: string | null;
-  confirmed_value?: string | null;
-}
-
-export interface MatterFormalReportCreateRequest {
-  note?: string | null;
-}
-
-export interface MatterArtifactUpdateRequest {
-  title?: string | null;
-  summary?: string | null;
-  items?: Record<string, unknown>[] | null;
-  status?: "draft" | "active" | "needs_review" | "approved" | "archived" | string | null;
-  note?: string | null;
-}
-
-export interface MatterFindingUpdateRequest {
-  human_review_status: "pending" | "approved" | "waived" | "needs_info" | "resolved";
-  note?: string | null;
 }
 
 export interface ClauseReviewRequest {
@@ -395,6 +303,17 @@ export interface ApiErrorPayload {
   request_id?: string;
 }
 
+export interface AuthRequest {
+  username: string;
+  password: string;
+}
+
+export interface AuthUser {
+  user_id: string;
+  username: string;
+  created_at: string;
+}
+
 export type HealthState = "ok" | "degraded" | "error" | string;
 
 export interface HealthCheck {
@@ -407,7 +326,6 @@ export interface HealthResponse {
   status: HealthState;
   version: string;
   auth_required: boolean;
-  default_tenant_id: string;
   providers: {
     chat?: {
       provider?: string;

@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+
+from ai.config.settings import settings
+from ai.rag.ingestion.loader import SUPPORTED_EXTENSIONS, save_uploaded_file
+from ai.rag.retrieval.vector_store import DocumentVectorStore
+from backend.dependencies import JobStoreDep, UserIdDep, VectorStoreDep
+from backend.jobs import IngestJobRecord, IngestJobStore
+from backend.schemas.responses import (
+    DocumentInfo,
+    DocumentListResponse,
+    DocumentTextResponse,
+    IngestJobResponse,
+)
+from backend.task_queue import submit_background_task
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+@router.post(
+    "/ingest",
+    response_model=IngestJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload and index a document",
+)
+def ingest_document(
+    vector_store: VectorStoreDep,
+    user_id: UserIdDep,
+    job_store: JobStoreDep,
+    file: Annotated[UploadFile, File()],
+) -> IngestJobResponse:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type '{suffix}'. Accepted: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
+    content = _read_upload_content(file)
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
+
+    file_name = file.filename or "uploaded_document"
+    saved_path = save_uploaded_file(file_name, content, user_id=user_id)
+    job = job_store.create(user_id=user_id, file_name=file_name, saved_path=saved_path)
+    enqueue_ingest_job(job, vector_store, job_store)
+    return IngestJobResponse.model_validate(job)
+
+
+@router.get(
+    "/jobs/{job_id}",
+    response_model=IngestJobResponse,
+    summary="Get an ingest job status",
+)
+def get_ingest_job(
+    job_id: str,
+    user_id: UserIdDep,
+    job_store: JobStoreDep,
+) -> IngestJobResponse:
+    record = job_store.get(job_id, user_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingest job not found.")
+    return IngestJobResponse.model_validate(record)
+
+
+@router.get(
+    "/text",
+    response_model=DocumentTextResponse,
+    summary="Get indexed document text chunks for preview",
+)
+def get_document_text(
+    vector_store: VectorStoreDep,
+    document_key: str | None = Query(default=None, min_length=1, max_length=128),
+    file_id: str | None = Query(default=None, min_length=1, max_length=128),
+    document_version: int | None = Query(default=None, ge=1),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> DocumentTextResponse:
+    if not document_key and not file_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Provide document_key or file_id.",
+        )
+    try:
+        preview = vector_store.get_document_text(
+            document_key=document_key,
+            file_id=file_id,
+            document_version=document_version,
+            offset=offset,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("Failed to load document text")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document text service is unavailable.",
+        ) from exc
+
+    if preview is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document text not found.")
+    return DocumentTextResponse(**preview)
+
+
+@router.get(
+    "",
+    response_model=DocumentListResponse,
+    summary="List indexed documents",
+)
+def list_documents(vector_store: VectorStoreDep) -> DocumentListResponse:
+    try:
+        indexed_documents = vector_store.list_documents()
+    except Exception as exc:
+        logger.exception("Failed to query indexed documents")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document index service is unavailable.",
+        ) from exc
+
+    docs = [DocumentInfo(**document) for document in indexed_documents]
+    return DocumentListResponse(documents=docs, total=len(docs))
+
+
+def _read_upload_content(file: UploadFile) -> bytes:
+    content = bytearray()
+    while True:
+        chunk = file.file.read(1024 * 1024)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Uploaded file exceeds {settings.max_upload_bytes} bytes.",
+            )
+    return bytes(content)
+
+
+def _run_ingest_job(
+    job_id: str,
+    saved_path,
+    file_name: str,
+    vector_store: DocumentVectorStore,
+    job_store: IngestJobStore,
+) -> None:
+    if not job_store.claim(job_id):
+        return
+
+    def update_progress(stage: str, progress: int, warning: str | None = None) -> None:
+        job_store.update_progress(job_id, stage, progress, warning)
+
+    try:
+        result = vector_store.ingest_file(
+            saved_path,
+            file_name=file_name,
+            progress_callback=update_progress,
+        )
+    except Exception:
+        logger.exception("Document ingest job failed", extra={"job_id": job_id})
+        job_store.mark_failed(job_id, "Document ingestion failed.")
+        return
+
+    job_store.mark_succeeded(job_id, result)
+
+
+def enqueue_ingest_job(
+    record: IngestJobRecord,
+    vector_store: DocumentVectorStore,
+    job_store: IngestJobStore,
+) -> bool:
+    return submit_background_task(
+        f"ingest:{record.job_id}",
+        _run_ingest_job,
+        record.job_id,
+        record.saved_path,
+        record.file_name,
+        vector_store,
+        job_store,
+    )

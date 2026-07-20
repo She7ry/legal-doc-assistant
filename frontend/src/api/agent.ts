@@ -49,11 +49,7 @@ export async function streamAgentTaskEvents(
     `${apiBaseUrl}/api/v1/agent/tasks/${taskId}/events?after_event_id=${afterEventId}`,
     {
       method: "GET",
-      headers: {
-        ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
-        ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
-        ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
-      },
+      credentials: "include",
     },
   );
 

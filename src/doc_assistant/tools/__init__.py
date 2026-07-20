@@ -1,1 +1,0 @@
-"""Agent-callable tools."""

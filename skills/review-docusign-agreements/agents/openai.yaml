@@ -1,0 +1,12 @@
+interface:
+  display_name: "Review DocuSign Agreements"
+  short_description: "Query and review DocuSign agreements with cited findings"
+  default_prompt: "Use $review-docusign-agreements to find expiring supplier agreements and produce a cited legal review."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "docusign"
+      description: "Read-only DocuSign agreement queries"
+      transport: "streamable_http"
+      url: "https://mcp-d.docusign.com/mcp"

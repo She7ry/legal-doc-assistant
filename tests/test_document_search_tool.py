@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from langchain_core.documents import Document
 
-from doc_assistant.tools.document_search import (
+from ai.agent.tools.document_search import (
     SearchDocumentsInput,
     document_search_result,
 )

@@ -12,10 +12,10 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_deepseek import ChatDeepSeek
 
-from api.routers.chat import _stream_answer_events
-from doc_assistant.models import language_model
-from doc_assistant.schemas.citation import Citation
-from doc_assistant.services.qa_service import DocumentQAService
+from ai import llm as language_model
+from ai.rag.qa_service import DocumentQAService
+from ai.rag.schemas import Citation
+from backend.routers.chat import _stream_answer_events
 
 
 class EmptyVectorStore:
@@ -133,7 +133,7 @@ def test_format_chat_history_keeps_recent_user_and_assistant_messages() -> None:
         ]
     )
 
-    assert history == "User: hello\nAssistant: Hi, how can I help?"
+    assert history == "用户：hello\n助手：Hi, how can I help?"
 
 
 def test_stream_prepared_answer_yields_chat_chunks() -> None:
@@ -197,7 +197,7 @@ def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
     assert answer.content == "Termination requires 30 days written notice [S1]."
 
 
-def test_complex_question_uses_multi_query_retrieval_and_records_skill_metadata() -> None:
+def test_complex_question_uses_one_retrieval_query_and_checks_citation_support() -> None:
     vector_store = StaticVectorStore(
         [
             Document(
@@ -217,11 +217,9 @@ def test_complex_question_uses_multi_query_retrieval_and_records_skill_metadata(
 
     answer = service.ask("Compare payment terms; identify the termination notice period.")
 
-    assert len(vector_store.queries) >= 2
-    assert "decompose-retrieval-query" in answer.metadata["selected_skills"]
-    assert answer.metadata["skill_token_cost"] > 0
-    assert len(answer.metadata["retrieval_queries"]) >= 2
-    assert answer.metadata["evidence_sufficiency"]["status"] == "sufficient"
+    assert vector_store.queries == [
+        "Compare payment terms; identify the termination notice period."
+    ]
     assert all(check["status"] == "supported" for check in answer.metadata["citation_support"])
 
 
@@ -300,7 +298,7 @@ def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() 
             "citation": "S1",
         }
     ]
-    assert "Risk level: Medium" in answer.content
+    assert "风险等级：中" in answer.content
     assert "[S1]" in answer.content
 
 
@@ -371,7 +369,7 @@ def test_check_conflict_returns_structured_conflict_matrix() -> None:
     assert answer.metadata["conflicts"][0]["conflict_type"] == "deadline_mismatch"
     assert answer.metadata["conflicts"][0]["contract_citations"] == ["C1"]
     assert answer.metadata["conflicts"][0]["policy_citations"] == ["P1"]
-    assert "Conflict 1: Payment timeline" in answer.content
+    assert "冲突 1：Payment timeline" in answer.content
     assert "[C1]" in answer.content
     assert "[P1]" in answer.content
 

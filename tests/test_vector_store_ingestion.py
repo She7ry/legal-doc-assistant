@@ -11,17 +11,20 @@ import pytest
 from langchain_core.documents import Document
 from qdrant_client import QdrantClient, models
 
-from doc_assistant.retrieval import _ingestion as ingestion_module
-from doc_assistant.retrieval import _qdrant_retriever as retriever_module
-from doc_assistant.retrieval._chunking import (
+from ai.rag.ingestion import indexer as ingestion_module
+from ai.rag.ingestion.chunking import (
     chunk_text_with_heading,
     split_legal_sections,
 )
-from doc_assistant.retrieval._ingestion import DocumentIngester, document_key_for_file_name
-from doc_assistant.retrieval._qdrant_backend import metadata_is_active
-from doc_assistant.retrieval._qdrant_repository import QdrantDocumentRepository
-from doc_assistant.retrieval._qdrant_retriever import QdrantRetriever, QueryCache
-from doc_assistant.retrieval.vector_store import DocumentVectorStore
+from ai.rag.ingestion.indexer import (
+    DocumentIngester,
+    document_key_for_file_name,
+)
+from ai.rag.retrieval import retriever as retriever_module
+from ai.rag.retrieval.backend import metadata_is_active
+from ai.rag.retrieval.repository import QdrantDocumentRepository
+from ai.rag.retrieval.retriever import QdrantRetriever, QueryCache
+from ai.rag.retrieval.vector_store import DocumentVectorStore
 
 
 class FakeEmbeddingModel:
@@ -85,7 +88,7 @@ def test_ingest_file_replaces_active_version_and_invalidates_cache(monkeypatch) 
         cache_clear_count += 1
 
     ingester = DocumentIngester(
-        tenant_id="tenant-a",
+        user_id="user-a",
         repository=repository,  # type: ignore[arg-type]
         splitter=object(),  # type: ignore[arg-type]
         invalidate_cache=clear_cache,
@@ -132,7 +135,7 @@ def test_ingest_rolls_back_qdrant_chunks_when_upsert_fails() -> None:
 
     repository = FailingRepository()
     ingester = DocumentIngester(
-        tenant_id="tenant-a",
+        user_id="user-a",
         repository=repository,  # type: ignore[arg-type]
         splitter=object(),  # type: ignore[arg-type]
         invalidate_cache=lambda: None,
@@ -182,7 +185,7 @@ def test_incomplete_legacy_active_version_is_rebuilt(monkeypatch) -> None:
     }
     repository = FakeRepository()
     ingester = DocumentIngester(
-        tenant_id="tenant-a",
+        user_id="user-a",
         repository=repository,  # type: ignore[arg-type]
         splitter=object(),  # type: ignore[arg-type]
         invalidate_cache=lambda: None,
@@ -215,7 +218,7 @@ def test_partial_upsert_with_failed_rollback_stays_inactive_and_retries(
     client = QdrantClient(":memory:")
     repository = QdrantDocumentRepository(client, "documents", FakeEmbeddingModel())
     ingester = DocumentIngester(
-        tenant_id="tenant-a",
+        user_id="user-a",
         repository=repository,
         splitter=object(),  # type: ignore[arg-type]
         invalidate_cache=lambda: None,
@@ -539,7 +542,7 @@ def test_search_cache_avoids_repeating_qdrant_query(monkeypatch) -> None:
     repository = FakeRepository()
     retriever = QdrantRetriever(
         repository=repository,  # type: ignore[arg-type]
-        tenant_id="default",
+        user_id="default",
         cache=QueryCache(ttl_seconds=300, max_size=8),
     )
     monkeypatch.setattr(
@@ -573,7 +576,7 @@ def test_search_trace_hashes_query(
     repository = FakeRepository()
     retriever = QdrantRetriever(
         repository=repository,  # type: ignore[arg-type]
-        tenant_id="default",
+        user_id="default",
         cache=QueryCache(ttl_seconds=300, max_size=8),
     )
     monkeypatch.setattr(

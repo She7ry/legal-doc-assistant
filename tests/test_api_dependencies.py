@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from api import dependencies
-from api.logging_config import LOGGING_CONFIG
-from api.main import app
-from api.schemas.responses import AskResponse
-from doc_assistant.memory.service import MemoryService
-from doc_assistant.memory.store import MemoryStore
-from doc_assistant.retrieval import vector_store
+from ai.memory.service import MemoryService
+from ai.memory.store import MemoryStore
+from ai.rag.retrieval import vector_store
+from backend import dependencies
+from backend.logging_config import LOGGING_CONFIG
+from backend.main import app
+from backend.schemas.responses import AskResponse
 
 
 def test_application_log_formatter_handles_missing_and_present_context() -> None:
@@ -36,43 +34,14 @@ def test_application_log_formatter_handles_missing_and_present_context() -> None
     assert "request_id=request-1 operation=retrieve duration_ms=12.5" in contextual
 
 
-def test_normalize_tenant_id_defaults_to_configured_tenant(monkeypatch) -> None:
-    monkeypatch.setattr(dependencies, "settings", SimpleNamespace(default_tenant_id="default"))
-
-    assert dependencies.normalize_tenant_id(None) == "default"
-
-
-def test_normalize_tenant_id_rejects_unsafe_values(monkeypatch) -> None:
-    monkeypatch.setattr(dependencies, "settings", SimpleNamespace(default_tenant_id="default"))
-
-    with pytest.raises(ValueError):
-        dependencies.normalize_tenant_id("../other")
-
-
-def test_normalize_user_id_defaults_and_rejects_unsafe_values() -> None:
-    assert dependencies.normalize_user_id(None) == "local-user"
-
+def test_normalize_user_id_rejects_unsafe_values() -> None:
+    assert dependencies.normalize_user_id("abc123") == "abc123"
     with pytest.raises(ValueError):
         dependencies.normalize_user_id("../other")
 
 
-def test_require_api_key_accepts_configured_key(monkeypatch) -> None:
-    monkeypatch.setattr(dependencies, "settings", SimpleNamespace(api_keys=("secret",)))
-
-    dependencies.require_api_key(x_api_key="secret", credentials=None)
-
-
-def test_require_api_key_rejects_bad_key(monkeypatch) -> None:
-    monkeypatch.setattr(dependencies, "settings", SimpleNamespace(api_keys=("secret",)))
-
-    with pytest.raises(HTTPException) as exc_info:
-        dependencies.require_api_key(x_api_key="wrong", credentials=None)
-
-    assert exc_info.value.status_code == 401
-
-
-def test_protected_routes_require_api_key_when_configured(monkeypatch) -> None:
-    monkeypatch.setattr(dependencies, "settings", SimpleNamespace(api_keys=("secret",)))
+@pytest.mark.real_auth
+def test_protected_routes_require_authenticated_session() -> None:
     client = TestClient(app)
 
     response = client.get("/api/v1/documents")
@@ -183,21 +152,19 @@ def test_health_returns_runtime_diagnostics_and_request_id() -> None:
 
 def test_chat_conversation_messages_endpoint_restores_history(tmp_path) -> None:
     memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
-    conversation_id = memory_service.ensure_context("tenant-a", "user-a", "conversation-a")
+    conversation_id = memory_service.ensure_context("user-a", "conversation-a")
     memory_service.record_user_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Earlier question.",
     )
     memory_service.record_assistant_message(
-        tenant_id="tenant-a",
         user_id="user-a",
         conversation_id=conversation_id,
         content="Earlier answer.",
     )
     app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
-    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
     app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
     try:
         client = TestClient(app)
@@ -218,7 +185,7 @@ def test_chat_conversation_messages_endpoint_restores_history(tmp_path) -> None:
 def test_chat_conversation_management_endpoints(tmp_path) -> None:
     memory_service = MemoryService(store=MemoryStore(tmp_path / "memory.sqlite3"), vector_store=None)
     app.dependency_overrides[dependencies.get_memory_service] = lambda: memory_service
-    app.dependency_overrides[dependencies.get_tenant_id] = lambda: "tenant-a"
+    app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
     app.dependency_overrides[dependencies.get_user_id] = lambda: "user-a"
     try:
         client = TestClient(app)
@@ -227,13 +194,11 @@ def test_chat_conversation_management_endpoints(tmp_path) -> None:
             json={"conversation_id": "conversation-a", "title": "Lease review"},
         )
         memory_service.record_user_message(
-            tenant_id="tenant-a",
             user_id="user-a",
             conversation_id="conversation-a",
             content="Earlier question.",
         )
         memory_service.record_assistant_message(
-            tenant_id="tenant-a",
             user_id="user-a",
             conversation_id="conversation-a",
             content="Earlier answer.",
@@ -269,8 +234,6 @@ def test_chat_conversation_management_endpoints(tmp_path) -> None:
     assert archived_list.json()["conversations"][0]["status"] == "archived"
 
 
-def test_collection_name_for_tenant_preserves_default_collection(monkeypatch) -> None:
-    monkeypatch.setattr(vector_store, "settings", SimpleNamespace(default_tenant_id="default"))
-
-    assert vector_store.collection_name_for_tenant("legal_documents", "default") == "legal_documents"
-    assert vector_store.collection_name_for_tenant("legal_documents", "acme") == "legal_documents_acme"
+def test_collection_name_for_user_always_creates_a_private_collection() -> None:
+    assert vector_store.collection_name_for_user("legal_documents", "default") == "legal_documents_default"
+    assert vector_store.collection_name_for_user("legal_documents", "acme") == "legal_documents_acme"

@@ -35,12 +35,31 @@ import "element-plus/dist/index.css";
 
 import App from "./App.vue";
 import { router } from "./app/router";
+import { useAuthStore } from "./stores/auth";
 import "./styles/main.css";
 
 const app = createApp(App);
+const pinia = createPinia();
 
-app.use(createPinia());
+app.use(pinia);
 app.use(router);
+router.beforeEach(async (to) => {
+  const auth = useAuthStore(pinia);
+  if (!auth.initialized) {
+    try {
+      await auth.loadCurrentUser();
+    } catch {
+      auth.user = null;
+    }
+  }
+  if (!auth.user && to.name !== "login") {
+    return { name: "login", query: { redirect: to.fullPath } };
+  }
+  if (auth.user && to.name === "login") {
+    return { name: "workspace" };
+  }
+  return true;
+});
 [
   ElAlert,
   ElAside,

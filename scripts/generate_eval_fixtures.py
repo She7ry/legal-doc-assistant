@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from textwrap import wrap
 
-from doc_assistant.config.settings import settings
-from doc_assistant.evaluation.constants import DEFAULT_REFUSAL_TERMS
-from doc_assistant.ingestion.document_loader import file_sha256, load_documents
-from doc_assistant.retrieval.vector_store import (
+from ai.config.settings import settings
+from ai.rag.evaluation.constants import DEFAULT_REFUSAL_TERMS
+from ai.rag.ingestion.loader import file_sha256, load_documents
+from ai.rag.retrieval.vector_store import (
     INGESTION_CHUNK_SEPARATORS,
     split_documents_for_ingestion,
 )

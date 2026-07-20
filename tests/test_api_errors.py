@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from api import dependencies
-from api.main import app
-from doc_assistant.services.qa_service import PreparedQAAnswer
+from ai.rag.qa_service import PreparedQAAnswer
+from backend import dependencies
+from backend.main import app
 
 
 def test_internal_value_error_returns_safe_500_and_validation_stays_4xx() -> None:

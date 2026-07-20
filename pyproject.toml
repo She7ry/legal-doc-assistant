@@ -5,16 +5,19 @@ description = "A citation-first RAG assistant for contracts, policies, and compl
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "python-dotenv>=1.0,<2.0",
+    "pydantic-settings>=2.0,<3.0",
     "langchain-core>=1.0,<2.0",
     "langchain-community>=0.4,<1.0",
     "langchain-deepseek>=1.0,<2.0",
     "langchain-openai>=1.0,<2.0",
     "langchain-text-splitters>=1.0,<2.0",
     "langgraph>=1.0,<2.0",
+    "httpx>=0.28,<1.0",
     "mcp>=1.28,<2",
     "qdrant-client>=1.15,<2.0",
     "pypdf>=5.0,<7.0",
+    "python-docx>=1.1,<2.0",
+    "reportlab>=4.0,<5.0",
     "dashscope>=1.20,<2.0",
     "requests>=2.31,<3.0",
     "fastapi>=0.115,<1.0",
@@ -29,14 +32,12 @@ dev = [
     "coverage[toml]>=7.0,<8.0",
     "ruff>=0.8,<1.0",
 ]
-eval = [
-    "reportlab>=4.0,<5.0",
-]
+eval = []
 
 [project.scripts]
-run-rag-eval = "doc_assistant.evaluation.cli:run_eval"
-generate-eval-fixtures = "doc_assistant.evaluation.cli:generate_fixtures"
-github-mcp-demo = "doc_assistant.mcp.github_demo:main"
+run-rag-eval = "ai.rag.evaluation.cli:run_eval"
+generate-eval-fixtures = "ai.rag.evaluation.cli:generate_fixtures"
+docusign-mcp-auth = "ai.mcp.docusign:main"
 
 [tool.ruff]
 line-length = 100
@@ -49,6 +50,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["real_auth: run with the real registered-user authentication dependency"]
 
 [tool.mypy]
 python_version = "3.10"

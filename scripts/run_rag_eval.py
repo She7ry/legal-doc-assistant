@@ -11,19 +11,19 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from doc_assistant.config.settings import settings
-from doc_assistant.evaluation.metrics import (
+from ai.config.settings import settings
+from ai.rag.evaluation.metrics import (
     aggregate_scores,
     score_generation_case,
     score_retrieval_case,
     source_candidate_from_citation,
     source_candidate_from_document,
 )
-from doc_assistant.retrieval.vector_store import (
+from ai.rag.qa_service import DocumentQAService
+from ai.rag.retrieval.vector_store import (
     INGESTION_CHUNK_SEPARATORS,
     DocumentVectorStore,
 )
-from doc_assistant.services.qa_service import DocumentQAService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RETRIEVAL_SCORE_KEYS = ("hit", "mrr", "ndcg", "precision", "recall")
@@ -32,8 +32,6 @@ GENERATION_SCORE_KEYS = (
     "citation_accuracy",
     "faithfulness",
     "refusal_accuracy",
-    "skill_selection_accuracy",
-    "skill_token_cost",
     "unsupported_claim_count",
 )
 
@@ -154,8 +152,6 @@ def main() -> None:
         "run_config": {
             "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
             "dataset_version": dataset.get("version"),
-            "skills_enabled": settings.skills_enabled,
-            "skills_allowlist": list(settings.skills_allowlist),
             "chat_provider": settings.chat_provider,
             "chat_model": settings.chat_model_name,
             "embedding_provider": settings.embedding_provider,
@@ -377,8 +373,6 @@ def _case_with_dataset_defaults(
         and dataset.get("default_refusal_terms")
     ):
         merged["required_refusal_terms"] = list(dataset["default_refusal_terms"])
-    if "expected_skills" not in merged and dataset.get("default_expected_skills"):
-        merged["expected_skills"] = list(dataset["default_expected_skills"])
     return merged
 
 
@@ -459,7 +453,6 @@ def _compare_with_baseline(
         lower_is_better = metric_path.endswith(
             (
                 "latency_seconds",
-                "skill_token_cost",
                 "unsupported_claim_count",
                 "evaluation_error_count",
             )

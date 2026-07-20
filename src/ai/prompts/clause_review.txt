@@ -1,0 +1,42 @@
+任务：审阅指定类型的条款摘录，并返回结构化风险评估。
+
+用户请求的条款类型：
+{clause_type}
+
+归一化条款类型：
+{normalized_clause_type}
+
+可用条款分类：
+{clause_taxonomy}
+
+风险判断依据：
+{risk_rules}
+
+来源摘录：
+<retrieved_documents>
+{context}
+</retrieved_documents>
+
+只能使用上述摘录。不得引用摘录中没有出现的法条、判例、市场惯例或外部事实，也不得作最终法律判断。
+
+仅返回一个合法 JSON 对象，不要使用 Markdown 代码块。键名和下列枚举值属于机器协议，必须保持英文：
+- clause_type：字符串。
+- normalized_clause_type：分类键或简短归一化名称。
+- found：明确时为 boolean，否则为 null。
+- summary：有引用依据的简短中文摘要。
+- risk_level：只能是 Low、Medium、High 或 Needs human review。
+- risk_reasons：对象数组；每项包含中文 reason 和 citation（来源 ID，如 S1，不要写成 Markdown 链接）。
+- affected_party：字符串或 null。
+- plain_language_explanation：条款含义及用户需关注原因的中文说明。
+- questions_for_lawyer：可向律师或对方提出的非结论性中文问题。
+- missing_information：完成审阅仍缺少的事实、章节、定义、附件或管辖信息。
+- needs_human_review：boolean。
+
+判断规则：
+1. 每项实质性判断必须能由对应来源 ID 直接支持。
+2. 未找到条款时，found 设为 false，risk_level 设为 Needs human review，并具体说明缺少哪些来源文本。
+3. 信息存在但不足以判断时，不要猜测；降低置信程度并列入 missing_information。
+4. 使用“可能”“似乎”“需结合完整文本审阅”等限定语，避免确定性法律结论。
+5. 所有面向用户的字符串必须使用简体中文。
+
+回答：

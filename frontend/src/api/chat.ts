@@ -92,10 +92,8 @@ export async function askQuestionStream(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
-      ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
-      ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
     },
+    credentials: "include",
     body: JSON.stringify(body),
   });
 

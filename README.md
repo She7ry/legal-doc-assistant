@@ -1,664 +1,72 @@
 # Legal Document Assistant
 
-基于 RAG（Retrieval-Augmented Generation）的法律文档分析与法律信息辅助系统。支持合同、政策、租约、隐私协议、校规及合规文档的智能问答、风险审查与冲突检测。
+面向合同、政策与合规文档的法律信息辅助系统。用户可以建立个人文档库，通过带原文引用的问答、条款审查和 Agent 任务整理风险与事项报告。
 
-系统以**引用优先（citation-first）**为核心设计原则——所有回答必须基于文档原文，标注来源引用。它帮助用户理解文档内容、识别风险、组织问题清单，为与律师沟通做好准备。本系统不替代律师，不提供最终法律意见、诉讼策略或个案判定。
+> 本项目用于辅助理解和整理法律文档，不替代律师，也不提供最终法律意见。
 
----
+## 主要功能
 
-## 技术栈
+- 注册、登录与个人数据隔离
+- 上传 PDF、DOCX、TXT、Markdown，后台完成解析与索引
+- 基于 Qdrant 混合检索的引用式问答和多轮对话
+- 条款风险审查、合同与政策冲突检测
+- 分层 Agent：简单任务使用工具调用，复杂任务使用 LangGraph 分步执行
+- 可选的 Web 搜索与 Docusign 只读协议查询
 
-| 层级 | 技术 |
-|------|------|
-| 后端框架 | FastAPI + Uvicorn |
-| LLM 编排 | LangChain + LangGraph |
-| 向量存储 | Qdrant |
-| 检索策略 | Qdrant Hybrid（Dense + BM25 Sparse + RRF + MMR） |
-| 默认 LLM | DeepSeek（Chat）/ DashScope（Embedding） / 任意 OpenAI-compatible |
-| Embedding | DashScope text-embedding-v3 |
-| MCP Demo | MCP Python SDK + 官方 GitHub MCP Server（stdio） |
-| 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
-| 数据持久化 | SQLite（任务/记忆/Matter） |
-| 测试 | pytest + pytest-asyncio + coverage |
-| 代码规范 | Ruff |
-
----
-
-## 核心功能
-
-### 文档管理与检索
-
-- 支持上传 PDF、DOCX、TXT、Markdown 格式文档
-- 法律章节感知的智能分块（legal-section-aware chunking）
-- Qdrant Hybrid 检索：Dense 语义搜索 + BM25 Sparse + RRF 融合排序
-- Qdrant 原生 MMR 多样性选择，减少近似重复
-- 后台异步文档摄入，支持进度查询与阶段性警告
-- 同名重复上传自动创建新版本，旧版本保留但不参与检索
-
-### 智能问答
-
-- 基于检索结果的引用式回答，每条回答标注 `[S1]`、`[S2]` 等来源编号
-- 支持多轮对话历史
-- Tool Calling 模式：模型自主决定调用 `search_documents` 或 `web_search`
-- Answer Guard 机制：二次校验引用有效性、过强法律结论和证据缺失
-
-### Agent 工作流
-
-基于 Tool Calling 的 ReAct-only 法律审查 Agent：
-
-```
-Model → Tools → Observe → Model → Grounded Report
-```
-
-- **ReAct 工具调用**：模型按需调用 `search_documents`、`review_clause`、`check_conflict`
-- **引用重编号**：多个工具返回的引用统一重编号为 `D1/D2/...`，避免来源冲突
-- **Answer Guard**：二次校验引用有效性、过强法律结论和证据缺失
-- **Matter 管理**：报告完成后用结构化输出提取 Matter 画像、findings 和 artifacts；提取失败不创建空记录
-- **SSE 实时推送**：任务进度通过 Server-Sent Events 流式推送
-
-### 条款审查与冲突检测
-
-- 条款审查：对特定条款类型进行风险等级评估
-- 冲突检测：比对合同条款与政策条款，识别冲突与矛盾
-
-### 用户记忆系统
-
-独立于文档 RAG 的记忆系统：
-
-- 存储用户偏好、对话上下文和 Agent 临时任务状态
-- 支持语义去重、置信度衰减、过期清理
-- LLM 驱动的自动记忆提取
-- 对话摘要压缩为 session memory
-- 记忆注入 prompt 时作为数据处理，不作为文档证据引用
-
-### 安全与多租户
-
-- API Key 认证（`X-API-Key` 或 `Authorization: Bearer`）
-- 多租户隔离（`X-Tenant-Id` 路由到独立存储）
-- 可配置 CORS 策略
-- 上传大小限制
-- Sliding-window API 限流
-
----
-
-## 项目结构
-
-```text
-legal_doc_assistant/
-├── api/                          # FastAPI 后端
-│   ├── main.py                   # 应用入口
-│   ├── dependencies.py           # 单例依赖注入
-│   ├── jobs.py                   # 文档摄入任务存储
-│   ├── agent_tasks.py            # Agent 任务存储
-│   ├── task_queue.py             # 后台任务队列
-│   ├── sse.py                    # SSE 事件流
-│   ├── routers/
-│   │   ├── documents.py          # 文档上传与查询
-│   │   ├── chat.py               # 问答与 Tool Calling
-│   │   ├── agent.py              # Agent 任务生命周期
-│   │   ├── matters.py            # Matter CRUD 与导出
-│   │   ├── memories.py           # 用户记忆管理
-│   │   ├── review.py             # 条款审查与冲突检测
-│   ├── middleware/
-│   │   └── rate_limit.py         # 限流中间件
-│   └── schemas/                  # Pydantic 请求/响应模型
-│
-├── src/doc_assistant/            # 核心业务逻辑
-│   ├── config/settings.py        # 全局配置（环境变量驱动）
-│   ├── models/                   # LLM 与 Embedding 适配器
-│   ├── ingestion/                # 文档加载、哈希、持久化
-│   ├── retrieval/                # Qdrant Dense/Sparse 混合检索
-│   ├── skills/                   # 只读 Skill catalog/selector/loader/renderer
-│   ├── agent/                    # ReAct Agent 子系统
-│   │   ├── service.py            # Agent 对外入口
-│   │   ├── react_task.py         # ReAct task adapter
-│   │   └── schemas.py            # Agent API 兼容模型
-│   ├── grounding/                # 引用、证据与答案校验
-│   ├── review/                   # 条款分类、审查与冲突规则
-│   ├── services/
-│   │   ├── qa_service.py         # 问答核心逻辑
-│   │   └── tool_calling_service.py  # Tool Calling 编排
-│   ├── graphs/                   # LangGraph 状态图定义
-│   ├── memory/                   # 记忆策略、存储、检索
-│   ├── matter/                   # Matter 持久化与导出
-│   ├── mcp/                      # MCP Client 与 GitHub Host demo
-│   ├── tools/                    # 外部工具（Web Search 等）
-│   ├── prompts/                  # 分层 Prompt 模板
-│   ├── evaluation/               # RAG 评估指标与 CLI
-│   ├── schemas/                  # 共享领域模型
-│   └── utils/                    # 工具函数
-│
-├── skills/                       # 可移植的业务 Agent Skills（仅 Markdown/reference）
-│   ├── grounded-rag-answer/
-│   ├── decompose-retrieval-query/
-│   ├── assess-evidence-sufficiency/
-│   └── verify-citation-support/
-│
-├── frontend/                     # Vue 3 前端
-│   ├── src/
-│   │   ├── pages/                # 页面组件
-│   │   ├── components/           # 通用组件
-│   │   ├── api/                  # HTTP 客户端
-│   │   ├── stores/               # Pinia 状态管理
-│   │   └── layouts/              # 布局组件
-│   └── package.json
-│
-├── data/                         # 运行时数据（不入版本控制）
-│   ├── uploads/                  # 上传文件
-│   ├── vector_store/             # Qdrant 本地持久化（默认）
-│   └── eval/                     # 评估数据集与报告
-│
-├── tests/                        # 单元/集成测试
-├── pyproject.toml                # Python 项目配置
-└── .env.example                  # 环境变量模板
-```
-
----
+后端使用 FastAPI、LangChain/LangGraph、Qdrant 和 SQLite；前端使用 Vue 3、TypeScript、Element Plus 和 Pinia。
 
 ## 快速开始
 
-### 环境要求
-
-- Python 3.10 ~ 3.12
-- Node.js 18+（前端开发）
-
-### 后端安装
+环境要求：Python 3.10～3.12、Node.js 18+。
 
 ```powershell
-cd E:\project\legal_doc_assistant
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
 Copy-Item .env.example .env
+
+npm.cmd --prefix frontend install
 ```
 
-编辑 `.env`，配置 LLM 和 Embedding 的 API Key。
-
-### 前端安装
+在 `.env` 中填写 Chat 与 Embedding 服务凭据，然后分别启动后端和前端：
 
 ```powershell
-cd frontend
-npm.cmd install
+uvicorn backend.main:app --reload
 ```
-
-> 如果 PowerShell 执行策略阻止了 `npm`，使用 `npm.cmd` 代替。
-
-### 启动服务
 
 ```powershell
-# 启动后端 API（默认 http://localhost:8000）
-uvicorn api.main:app --reload
-
-# 启动前端开发服务器（默认 http://127.0.0.1:5173）
-cd frontend
-npm.cmd run dev
+npm.cmd --prefix frontend run dev
 ```
 
-- 后端 API 文档：http://localhost:8000/docs
-- 前端界面：http://127.0.0.1:5173
+- 前端：http://127.0.0.1:5173
+- API 文档：http://127.0.0.1:8000/docs
+- 健康检查：http://127.0.0.1:8000/health
 
----
+具体可选项见 `.env.example`。
 
-## MCP Host/Client Demo（官方 GitHub Server）
+## 使用流程
 
-这里不再由项目自己实现工具提供方。本项目是 **Host**，内部基于 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 的通用 **Client** 通过 `stdio` 启动并连接独立的[官方 GitHub MCP Server](https://github.com/github/github-mcp-server)；GitHub Server 才负责提供工具并访问 GitHub API。
+1. 注册并登录。
+2. 在“文档”页面上传资料，等待索引完成。
+3. 在工作区进行带引用问答，或在“审查”页面检查条款和冲突。
+4. 对复杂任务创建 Agent 任务，查看并自行保存需要保留的报告。
+
+## 项目结构
 
 ```text
-Host: Legal Document Assistant + Chat Model
-  └─ Client: doc_assistant.mcp.client（MCP Python SDK）
-       └─ JSON-RPC 2.0 over stdio
-            └─ Server: ghcr.io/github/github-mcp-server（独立 Docker 进程）
-                 └─ GitHub API
+src/backend/
+                        FastAPI 接口、认证与后台任务
+src/ai/
+                        Agent、RAG、记忆、审查与 MCP 能力
+frontend/               Vue 前端
+tests/                  后端测试
 ```
 
-角色、能力和协议边界如下：
-
-- **角色层**：`github_demo.py` 负责 Host 编排；`client.py` 负责 MCP 会话；官方 GitHub 镜像是独立 Server。
-- **能力层**：Client 动态发现 Server 声明的 Tools、Resources、Resource Templates 和 Prompts。演示中的模型只绑定 `get_me`、`search_repositories`、`get_file_contents` 三个只读 Tool；另外两类能力只做发现和展示，不把它们伪装成 Tool。
-- **协议层**：Client 与 Server 使用 MCP SDK 实现的 JSON-RPC 2.0，并以 `stdio` 连接本地子进程。本 demo 不实现已弃用的 HTTP+SSE 双端点，也没有额外套一层自定义 REST 协议。
-
-### 准备和运行
-
-先安装 [Docker](https://docs.docker.com/engine/install/)，再创建权限尽可能小、仓库范围受限的 fine-grained GitHub PAT：
+## 开发检查
 
 ```powershell
-$env:GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat_..."
-python -m pip install -e . -c constraints-py311.txt
-
-# 只连接 Server 并查看它实际声明的能力，不调用 LLM
-github-mcp-demo --list-capabilities
-
-# 完整 Host 循环：LLM 选择 Tool → MCP Client 调用 Server → LLM 汇总结果
-github-mcp-demo "查找与 Model Context Protocol 相关的 GitHub 仓库并概括前三个结果"
+python -m pip install -e ".[dev]"
+python -m pytest
+ruff check .
+npm.cmd --prefix frontend run build
 ```
-
-Host 默认等价于启动以下独立 Server；PAT 只传给子进程，不进入 prompt 或日志：
-
-```powershell
-docker run -i --rm `
-  -e GITHUB_PERSONAL_ACCESS_TOKEN `
-  -e GITHUB_READ_ONLY `
-  -e GITHUB_TOOLS `
-  ghcr.io/github/github-mcp-server
-```
-
-其中 Host 强制传入：
-
-```text
-GITHUB_READ_ONLY=1
-GITHUB_TOOLS=get_me,get_file_contents,search_repositories
-```
-
-只读模式在 Server 侧过滤写工具，Host 侧再按同一 allow-list 过滤一次动态发现结果。GitHub 返回的仓库内容按不可信外部数据处理，并限制送回模型的单次 Tool 结果长度。
-
-若已在本机安装官方 `github-mcp-server` 二进制，可设置 `GITHUB_MCP_COMMAND` 为二进制路径、`GITHUB_MCP_ARGS=stdio` 来覆盖默认 Docker 命令。覆盖项仍会收到同一组只读环境变量；不要把 token 写进参数或提交到仓库。
-
-## 配置说明
-
-所有配置通过环境变量管理，写在 `.env` 文件中。
-
-### LLM 配置
-
-Chat 默认使用 DeepSeek，Embedding 默认使用阿里云 DashScope：
-
-```env
-# Chat: DeepSeek
-DOC_ASSISTANT_CHAT_PROVIDER=deepseek
-DOC_ASSISTANT_CHAT_API_KEY=<your-deepseek-key>
-DOC_ASSISTANT_CHAT_MODEL=deepseek-v4-pro
-DOC_ASSISTANT_CHAT_API=compatible
-DOC_ASSISTANT_CHAT_BASE_URL=
-
-# Embedding: DashScope
-DOC_ASSISTANT_EMBEDDING_PROVIDER=dashscope
-DOC_ASSISTANT_EMBEDDING_API_KEY=<your-dashscope-key>
-DOC_ASSISTANT_EMBEDDING_MODEL=text-embedding-v3
-```
-
-Chat 切换到其他 OpenAI-compatible 服务：
-
-```env
-DOC_ASSISTANT_CHAT_PROVIDER=openai-compatible
-DOC_ASSISTANT_CHAT_API_KEY=<provider-key>
-DOC_ASSISTANT_CHAT_MODEL=<provider-model>
-DOC_ASSISTANT_CHAT_BASE_URL=https://provider.example/v1
-```
-
-可通过 `DOC_ASSISTANT_CHAT_EXTRA_BODY` 传递 provider 特定参数：
-
-```env
-DOC_ASSISTANT_CHAT_EXTRA_BODY={"reasoning_effort":"high"}
-```
-
-### 检索配置
-
-```env
-DOC_ASSISTANT_TOP_K=5
-DOC_ASSISTANT_RETRIEVAL_MODE=hybrid       # hybrid | dense | bm25
-DOC_ASSISTANT_RETRIEVAL_FETCH_K=40
-DOC_ASSISTANT_RETRIEVAL_MIN_RELEVANCE=0
-DOC_ASSISTANT_RETRIEVAL_MMR_LAMBDA=0.85
-DOC_ASSISTANT_RETRIEVAL_BM25_K1=1.5
-DOC_ASSISTANT_RETRIEVAL_BM25_B=0.75
-DOC_ASSISTANT_RETRIEVAL_BM25_AVERAGE_LENGTH=256
-DOC_ASSISTANT_CHUNK_SIZE=900
-DOC_ASSISTANT_CHUNK_OVERLAP=120
-```
-
-默认使用 `data/vector_store` 下的嵌入式 Qdrant；设置 `DOC_ASSISTANT_QDRANT_URL` 和可选的 `DOC_ASSISTANT_QDRANT_API_KEY` 可连接 Qdrant 1.15+ 服务。`hybrid` 模式在 Qdrant 内执行 Dense/BM25 Sparse 检索、RRF 融合与 MMR 多样性选择。
-
-### Runtime Skill 配置
-
-```env
-DOC_ASSISTANT_SKILLS_ENABLED=true
-DOC_ASSISTANT_SKILLS_ROOT=
-DOC_ASSISTANT_SKILLS_ALLOWLIST=grounded-rag-answer,verify-citation-support,decompose-retrieval-query,assess-evidence-sufficiency
-DOC_ASSISTANT_SKILL_MAX_CATALOG_SIZE=32
-DOC_ASSISTANT_SKILL_MAX_FILE_BYTES=65536
-DOC_ASSISTANT_SKILL_MAX_REFERENCE_FILES=16
-DOC_ASSISTANT_SKILL_MAX_REFERENCE_BYTES=131072
-DOC_ASSISTANT_SKILL_MAX_LOADED_TOKENS=4000
-DOC_ASSISTANT_SKILL_MAX_SELECTED=4
-DOC_ASSISTANT_SKILL_QUERY_DECOMPOSITION_ENABLED=true
-DOC_ASSISTANT_SKILL_MAX_RETRIEVAL_QUERIES=4
-```
-
-Skill selector 只读取 `name + description`；正文和 reference 仅在选中后按需加载。运行时拒绝路径穿越、符号链接、名称冲突、超限文件和修改系统 Prompt/安全边界的指令。Skill 不执行自带脚本，也不能自行获得 shell、网络或动态 Python 权限。
-
-### Tool Calling 配置
-
-```env
-DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS=6
-
-# 默认禁用，避免敏感文档文本发送到公共搜索引擎
-DOC_ASSISTANT_WEB_SEARCH_ENABLED=false
-DOC_ASSISTANT_WEB_SEARCH_PROVIDER=duckduckgo   # duckduckgo | brave | bing
-DOC_ASSISTANT_WEB_SEARCH_API_KEY=
-DOC_ASSISTANT_WEB_SEARCH_MAX_RESULTS=5
-DOC_ASSISTANT_WEB_SEARCH_TIMEOUT_SECONDS=10
-```
-
-### Agent 配置
-
-Agent 任务入口复用 Tool Calling 配置。请求里的 `max_steps` 会作为本次 ReAct 工具调用轮次上限传入，默认工具轮次仍由 `DOC_ASSISTANT_TOOL_CALL_MAX_ITERATIONS` 控制。
-
-### 记忆配置
-
-```env
-DOC_ASSISTANT_MEMORY_DB_PATH=
-DOC_ASSISTANT_MEMORY_COLLECTION=user_memories
-DOC_ASSISTANT_MEMORY_TOP_K=5
-DOC_ASSISTANT_MEMORY_MIN_CONFIDENCE=0.55
-DOC_ASSISTANT_MEMORY_SEMANTIC_DEDUP_MIN_SCORE=0.88
-DOC_ASSISTANT_CHAT_HISTORY_WINDOW=12
-DOC_ASSISTANT_MEMORY_SESSION_TTL_HOURS=24
-DOC_ASSISTANT_MEMORY_TASK_TTL_HOURS=168
-DOC_ASSISTANT_MEMORY_MAX_ACTIVE_PER_USER=500
-DOC_ASSISTANT_MEMORY_DECAY_HALF_LIFE_DAYS=90
-DOC_ASSISTANT_MEMORY_LLM_EXTRACTION_ENABLED=true
-DOC_ASSISTANT_MEMORY_AUTO_SUMMARY_THRESHOLD=12
-DOC_ASSISTANT_MEMORY_PROMPT_MAX_TOKENS=800
-```
-
-### 安全与隔离配置
-
-```env
-DOC_ASSISTANT_API_KEYS=                         # 为空则禁用认证
-DOC_ASSISTANT_CORS_ORIGINS=http://localhost:3000,http://localhost:5173
-DOC_ASSISTANT_DEFAULT_TENANT_ID=default
-DOC_ASSISTANT_MAX_UPLOAD_BYTES=20971520         # 20MB
-```
-
-### 文档摄入配置
-
-```env
-DOC_ASSISTANT_INGEST_JOBS_DB_PATH=              # 默认 data/ingest_jobs.sqlite3
-DOC_ASSISTANT_AGENT_TASKS_DB_PATH=              # 默认 data/agent_tasks.sqlite3
-DOC_ASSISTANT_MATTER_DB_PATH=                   # 默认 data/matters.sqlite3
-DOC_ASSISTANT_PDF_OCR_ENABLED=false
-DOC_ASSISTANT_PDF_OCR_LANG=eng
-```
-
-PDF OCR 默认禁用。启用时需安装 `pdf2image`、`pytesseract` 及本地 OCR 运行时。
-
----
-
-## API 接口
-
-### 健康检查
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| GET | `/health` | 服务健康检查 |
-
-### 文档管理
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| POST | `/api/v1/documents/ingest` | 上传文档并排队摄入 |
-| GET | `/api/v1/documents/jobs/{job_id}` | 查询摄入任务状态 |
-| GET | `/api/v1/documents` | 列出已索引文档 |
-
-### 智能问答
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| POST | `/api/v1/chat/ask` | 基础问答（支持对话历史） |
-| POST | `/api/v1/chat/ask/stream` | SSE 流式问答 |
-| POST | `/api/v1/chat/tools` | Tool Calling 模式问答 |
-| GET | `/api/v1/chat/conversations` | 列出对话 |
-| POST | `/api/v1/chat/conversations` | 创建对话 |
-| PATCH | `/api/v1/chat/conversations/{id}` | 更新对话 |
-| GET | `/api/v1/chat/conversations/{id}/messages` | 获取对话历史消息 |
-
-### Agent 任务
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| POST | `/api/v1/agent/tasks` | 创建 Agent 审查任务 |
-| GET | `/api/v1/agent/tasks/{task_id}` | 查询任务状态与结果 |
-| POST | `/api/v1/agent/tasks/{task_id}/resume` | 补充上下文后恢复任务 |
-| GET | `/api/v1/agent/tasks/{task_id}/events` | SSE 实时进度流 |
-
-Agent 任务状态流转：`queued` → `running` → `succeeded` / `failed` / `needs_input`
-
-后台执行器使用 SQLite 原子 claim 与进程内线程池，适用于单机部署；当前没有跨主机 lease/heartbeat，不应以多主机 active-active 方式运行。
-
-### Matter 管理
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| GET | `/api/v1/matters` | 列出 Matter 记录 |
-| GET | `/api/v1/matters/{matter_id}` | 获取 Matter 详情 |
-| GET | `/api/v1/matters/{matter_id}/artifacts` | 列出生成的交付物 |
-| GET | `/api/v1/matters/{matter_id}/findings` | 列出审查发现 |
-| PATCH | `/api/v1/matters/{matter_id}/findings/{finding_id}` | 更新 finding 人工审核状态 |
-| PATCH | `/api/v1/matters/{matter_id}/confirmation-gates/{gate_id}` | 确认/放弃/请求补充 |
-| POST | `/api/v1/matters/{matter_id}/formal-report` | 生成正式报告 |
-| PATCH | `/api/v1/matters/{matter_id}/artifacts/{artifact_id}` | 更新交付物（版本化） |
-| GET | `/api/v1/matters/{matter_id}/events` | 获取审计事件 |
-| GET | `/api/v1/matters/{matter_id}/artifacts/export` | 批量导出 ZIP |
-| GET | `/api/v1/matters/{matter_id}/artifacts/{id}/export` | 单 artifact 导出 |
-
-### 审查
-
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| POST | `/api/v1/review/clause` | 条款风险评估 |
-| POST | `/api/v1/review/conflict` | 合同与政策冲突检测 |
-
----
-
-## 使用示例
-
-### 上传文档
-
-```powershell
-$headers = @{ "X-Tenant-Id" = "acme" }
-$job = Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8000/api/v1/documents/ingest" `
-  -Headers $headers `
-  -Form @{ file = Get-Item ".\contract.pdf" }
-
-# 查询摄入进度
-Invoke-RestMethod -Method Get `
-  -Uri "http://localhost:8000/api/v1/documents/jobs/$($job.job_id)" `
-  -Headers $headers
-```
-
-### Tool Calling 问答
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8000/api/v1/chat/tools" `
-  -ContentType "application/json" `
-  -Body '{
-    "question": "结合最近公开新闻和已上传合同，分析供应商履约风险。",
-    "enable_web_search": true,
-    "max_tool_iterations": 6
-  }'
-```
-
-### 认证请求
-
-设置 `DOC_ASSISTANT_API_KEYS` 后，请求需附带认证头：
-
-```powershell
-$headers = @{
-  "X-API-Key" = "your-api-key"
-  "X-Tenant-Id" = "acme"
-  "X-User-Id" = "user-001"
-}
-```
-
----
-
-## Prompt 体系
-
-系统采用分层 Prompt 架构，模板位于 `src/doc_assistant/prompts/`：
-
-| 模板文件 | 用途 |
-|----------|------|
-| `base_legal_assistant.txt` | 全局身份、安全边界、证据规则、司法管辖意识 |
-| `document_qa.txt` | 结构化文档问答输出 |
-| `clause_review.txt` | 条款审查与风险评级 |
-| `conflict_check.txt` | 合同/政策冲突检测 |
-| `tool_calling_system.txt` | Tool 使用策略 |
-| `answer_repair.txt` | 引用不合格时的二次修复 |
-| `general_chat.txt` | 通用对话 |
-
-### Skill 执行链
-
-```text
-用户任务 → metadata-only selector → bounded loader → ReAct/QA
-        → 多查询检索与证据充分性检查 → 生成 → AnswerGuard 引用支持校验
-```
-
-QA 与 Agent 结果的 `metadata` 会记录 `selected_skills`、`skill_versions`、`selection_reason` 和 `skill_token_cost`。复杂查询才启用 query decomposition；普通闲聊不注入 RAG skill。
-
----
-
-## 评估系统
-
-### 生成测试数据
-
-```powershell
-generate-eval-fixtures
-```
-
-### 运行 RAG 评估
-
-```powershell
-run-rag-eval --clean --concurrency 4
-```
-
-评估报告输出到 `data/eval/latest_report.json`。
-
-### CI 集成用法
-
-```powershell
-run-rag-eval --skip-ingest `
-  --baseline data/eval/baseline_report.json `
-  --fail-on-regression `
-  --min-score retrieval.at_5.recall=0.8 `
-  --min-score generation.citation_accuracy=0.9
-```
-
-### 检索指标
-
-| 指标 | 含义 |
-|------|------|
-| `recall` | 在 top-k 中找到的 gold source 比例 |
-| `hit` | top-k 中至少命中一个 gold source 则为 1 |
-| `precision` | top-k 中属于 gold source 的比例 |
-| `mrr` | 第一个匹配 source 的倒数排名 |
-| `ndcg` | 排序质量，靠前匹配权重更高 |
-
-### 生成指标
-
-| 指标 | 含义 |
-|------|------|
-| `answer_correctness` | 必需词汇出现且禁止词汇缺席 |
-| `faithfulness` | 回答中的数字和关键词有引用上下文支撑 |
-| `citation_accuracy` | 引用的 source ID 对应 gold source |
-| `refusal_accuracy` | 不可回答问题包含预期的拒答表述 |
-| `unsupported_claim_count` | AnswerGuard 识别的无依据陈述数量 |
-| `skill_selection_accuracy` | Skill 选择集合是否与评测标注一致 |
-| `skill_token_cost` | 注入的 Skill 指令估算 token 成本 |
-
-最后一次成功的 pre-skill 报告快照保存为 `data/eval/baseline_report.json`；当前数据集重跑若未完成，该文件会明确标记为不可直接比较。执行 A/B 时应固定数据集、模型、检索配置与来源版本，先以 `DOC_ASSISTANT_SKILLS_ENABLED=false` 重新生成 baseline，再以 `true` 运行对照；外部 skill 只有在指标稳定改善或明确补充能力后才允许进入启用名单。
-
-评估数据集 `data/eval/eval_dataset.json` 包含可回答、不可回答、中文查询和跨文档场景，并记录 chunking config hash 以检测分块变更后的陈旧预期。
-
----
-
-## 开发
-
-### 运行测试
-
-```powershell
-pytest
-
-# 单个测试模块
-pytest tests/test_qa_service.py -v
-
-# 覆盖率
-python -m coverage run -m pytest
-python -m coverage report -m
-```
-
-### 代码检查
-
-```powershell
-ruff check src/ api/ tests/
-ruff format --check src/ api/ tests/
-```
-
-### 安装开发依赖
-
-```powershell
-python -m pip install -e ".[dev,eval]"
-```
-
-### 前端生产构建
-
-```powershell
-cd frontend
-npm.cmd run build
-```
-
----
-
-## 架构设计要点
-
-### 记忆系统与文档 RAG 的隔离
-
-- **文档 RAG**：存储上传文档的分块，返回带引用标注的原文摘录
-- **用户记忆**：存储偏好、上下文、对话历史、任务状态和反馈元数据
-- 记忆仅作为 `<user_memory>` 数据注入 prompt，不参与文档证据引用
-
-### Agent 工作流设计
-
-Agent 任务入口直接调用 Tool Calling ReAct 循环。模型先判断是否需要工具，再在白名单工具内调用文档检索、条款审查或冲突检测；工具返回的引用统一重编号，最终报告经过 Answer Guard 与证据画像校验。报告完成后，已有 LangChain 结构化输出能力会从报告与真实引用中提取 Matter 画像、findings 和 artifacts；解析失败时任务仍成功，但不会创建占位 Matter。
-
-### 引用与证据链
-
-- QA 引用使用 `[S1]`、`[S2]` 编号；Agent ReAct 工具引用统一重编号为 `[D1]`、`[D2]`
-- Evidence profile 将回答拆成可审计主张，并关联原文摘录、位置和支持等级
-- Answer Guard 校验引用有效性，不合格时触发 `answer_repair` 二次修复
-
----
-
-## 路线图
-
-### 近期
-
-1. 文档原文并排审阅与可编辑 artifact 生命周期
-2. CI 发布 RAG baseline 报告并设置回归门控
-3. 记忆评估面板：precision、staleness、conflicts、leakage 指标
-
-### 中期
-
-1. 深化工作流策略：合同审查、版本比对、争议事实整理、合规检查、谈判准备
-2. 接入外部 reranker（cross-encoder 或 provider rerank API）实现两阶段检索
-
-### 远期
-
-1. JWT 认证与租户管理后台
-2. 按文档类型、语言和工作流类别扩展评估标签体系
-
----
-
-## CI/CD
-
-项目使用 GitHub Actions（`.github/workflows/ci.yml`）：
-
-- **后端**：Python 3.11 + constraints 安装 + Ruff + pytest
-- **前端**：Node 20 + TypeScript 编译 + Vite 构建
-- **RAG 评估门控**：可选，需配置 LLM API secrets 后启用
-
----
-
-## License
-
-Private project — 未开源。

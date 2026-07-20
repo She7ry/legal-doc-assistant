@@ -4,7 +4,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_deepseek import ChatDeepSeek
 from langchain_openai import ChatOpenAI
 
-from doc_assistant.models import language_model
+from ai import llm as language_model
 
 
 def _settings(provider: str):

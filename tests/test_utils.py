@@ -1,8 +1,13 @@
 from langchain_core.documents import Document
 
-from doc_assistant.retrieval.document_identity import document_identity
-from doc_assistant.utils.json import parse_json_object
-from doc_assistant.utils.text import as_text_list, compact_text, dedupe_texts, optional_text
+from ai.rag.retrieval.document_identity import document_identity
+from ai.utils.json import parse_json_object
+from ai.utils.text import (
+    as_text_list,
+    compact_text,
+    dedupe_texts,
+    optional_text,
+)
 
 
 def test_text_helpers_normalize_and_dedupe_scalars() -> None:

@@ -26,12 +26,7 @@ export async function apiRequest<T>(config: AxiosRequestConfig): Promise<T> {
     const response = await axios.request<T>({
       ...config,
       baseURL: settings.apiBaseUrl,
-      headers: {
-        ...(settings.apiKey ? { "X-API-Key": settings.apiKey } : {}),
-        ...(settings.tenantId ? { "X-Tenant-Id": settings.tenantId } : {}),
-        ...(settings.userId ? { "X-User-Id": settings.userId } : {}),
-        ...config.headers,
-      },
+      withCredentials: true,
     });
     return response.data;
   } catch (error) {
