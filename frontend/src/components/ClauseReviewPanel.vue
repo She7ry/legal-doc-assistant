@@ -49,7 +49,7 @@
         <div>
           <span>风险等级</span>
           <el-tag :type="riskTagType(result.risk_level)" effect="dark">
-            {{ result.risk_level }}
+            {{ levelLabel(result.risk_level) }}
           </el-tag>
         </div>
         <div>
@@ -106,7 +106,7 @@
       >
         <ul class="structured-list structured-list--compact">
           <li v-for="warning in result.guard_warnings" :key="warning">
-            {{ warning }}
+            {{ guardWarningLabel(warning) }}
           </li>
         </ul>
       </el-alert>
@@ -130,6 +130,7 @@ import { Search } from "@element-plus/icons-vue";
 import { reviewClause } from "../api/review";
 import { formatApiError } from "../api/http";
 import type { ClauseReviewResponse } from "../api/types";
+import { guardWarningLabel, levelLabel } from "../utils/legalDisplay";
 import CitationList from "./CitationList.vue";
 
 const clauseOptions = [

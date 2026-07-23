@@ -1,22 +1,41 @@
-
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from typing import Any
 
+import pytest
 from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import Field
 
 from ai.agent import clarification_questions_for_task, react_task
 from ai.agent import graph as _planned_task
 from ai.agent.react_task import run_react_agent_task
+from ai.agent.schemas import AgentTaskPause
 from ai.agent.tool_calling import ToolCallingAnswer, ToolCallTrace
 from ai.rag.qa_service import DocumentQAService
 from ai.rag.schemas import Citation, QAAnswer
+
+
+def _sqlite_checkpointer(path):
+    connection = sqlite3.connect(path, check_same_thread=False)
+    return connection, SqliteSaver(
+        connection,
+        serde=JsonPlusSerializer(
+            allowed_msgpack_modules=[
+                ("ai.agent.schemas", "AgentStepResult"),
+                ("ai.agent.schemas", "AgentTaskResult"),
+                ("ai.rag.grounding.guard", "AnswerGuardResult"),
+                ("ai.rag.schemas", "Citation"),
+            ]
+        ),
+    )
 
 
 class StaticVectorStore:
@@ -124,12 +143,13 @@ def test_legal_agent_runs_react_clause_review_with_citation_trace() -> None:
     assert [step.step_id for step in result.steps] == ["react"]
     assert result.report == "Termination requires 30 days written notice [D1]."
     assert result.steps[0].output["tool_calls"][0]["name"] == "review_clause"
-    assert result.steps[0].output["tool_calls"][0]["result"]["metadata"]["risk_reasons"][0][
-        "citation"
-    ] == "D1"
+    assert (
+        result.steps[0].output["tool_calls"][0]["result"]["metadata"]["risk_reasons"][0]["citation"]
+        == "D1"
+    )
     assert result.citations[0].source_id == "D1"
     assert qa_service.vector_store.queries == []
-    assert result.metadata["runtime"] == "react_tool_calling_v1"
+    assert result.metadata["runtime"] == "react_langgraph_v1"
     assert [event["event_type"] for event in events] == ["react_started", "react_completed"]
 
 
@@ -255,8 +275,8 @@ def test_complex_objective_uses_bounded_structured_planner(monkeypatch) -> None:
     model = AgentToolModel(
         plan_result={
             "steps": [
-                {"title": "Payment", "instruction": "Review payment obligations."},
-                {"title": "Termination", "instruction": "Review termination rights."},
+                {"title": "付款", "instruction": "审查付款义务。"},
+                {"title": "终止", "instruction": "审查终止权。"},
             ]
         }
     )
@@ -278,12 +298,12 @@ def test_complex_objective_uses_bounded_structured_planner(monkeypatch) -> None:
 
     result = run_react_agent_task(
         qa_service,
-        objective="Review payment and termination risk.",
+        objective="审查合同中的付款义务以及终止权风险。",
         task_id="task-planned",
     )
 
     assert [step.step_id for step in result.steps] == ["step-1", "step-2"]
-    assert [step.title for step in result.steps] == ["Payment", "Termination"]
+    assert [step.title for step in result.steps] == ["付款", "终止"]
     assert result.metadata["planning_mode"] == "planner"
     assert model.structured_invocations == 1
 
@@ -303,18 +323,110 @@ def test_l2_focus_plan_is_bounded_to_five_steps() -> None:
 def test_planner_failure_falls_back_to_single_react() -> None:
     model = AgentToolModel(
         tool_name="search_documents",
-        tool_args={"query": "payment termination", "top_k": 1},
+        tool_args={"query": "付款 终止", "top_k": 1},
         structured_error=True,
     )
     result = run_react_agent_task(
         DocumentQAService(vector_store=StaticVectorStore(), chat_model=model),
-        objective="Review payment and termination risk.",
+        objective="审查合同中的付款义务以及终止权风险。",
     )
 
     assert [step.step_id for step in result.steps] == ["react"]
-    assert result.metadata["runtime"] == "react_tool_calling_v1"
+    assert result.metadata["runtime"] == "react_langgraph_v1"
     assert model.structured_invocations == 1
 
+
+def test_agent_checkpoint_persists_interrupt_and_resumes_after_reopen(tmp_path) -> None:
+    checkpoint_path = tmp_path / "agent_checkpoints.sqlite3"
+    qa_service = DocumentQAService(vector_store=StaticVectorStore(), chat_model=AgentToolModel())
+
+    connection, checkpointer = _sqlite_checkpointer(checkpoint_path)
+    try:
+        paused = run_react_agent_task(
+            qa_service,
+            objective="帮我看看",
+            task_id="checkpoint-task",
+            checkpointer=checkpointer,
+        )
+    finally:
+        connection.close()
+
+    assert isinstance(paused, AgentTaskPause)
+    assert paused.questions
+
+    connection, checkpointer = _sqlite_checkpointer(checkpoint_path)
+    try:
+        result = run_react_agent_task(
+            qa_service,
+            objective="Review termination risk in the SaaS agreement.",
+            focus_areas=["termination"],
+            task_id="checkpoint-task",
+            checkpointer=checkpointer,
+        )
+    finally:
+        connection.close()
+
+    assert result.status == "completed"
+    assert result.metadata["checkpointing"] is True
+    with sqlite3.connect(checkpoint_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] > 0
+
+
+def test_planned_checkpoint_skips_completed_steps_after_worker_restart(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[str] = []
+    interrupted = False
+
+    class InterruptingToolCallingService:
+        def __init__(self, _qa_service) -> None:
+            pass
+
+        def ask(self, _question: str, **kwargs) -> ToolCallingAnswer:
+            nonlocal interrupted
+            step_id = str(kwargs["task_id"]).rsplit(":", 1)[-1]
+            calls.append(step_id)
+            if step_id == "step-2" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return ToolCallingAnswer(content="No material issue found for this step.")
+
+    qa_service = DocumentQAService(vector_store=StaticVectorStore(), chat_model=AgentToolModel())
+    monkeypatch.setattr(_planned_task, "ToolCallingChatService", InterruptingToolCallingService)
+    monkeypatch.setattr(
+        qa_service,
+        "_invoke_chat_messages",
+        lambda _messages: "No material issue was found in the planned review.",
+    )
+    checkpoint_path = tmp_path / "planned_checkpoints.sqlite3"
+
+    connection, checkpointer = _sqlite_checkpointer(checkpoint_path)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_react_agent_task(
+                qa_service,
+                objective="Review payment and termination risk.",
+                focus_areas=["payment", "termination"],
+                task_id="restart-task",
+                checkpointer=checkpointer,
+            )
+    finally:
+        connection.close()
+
+    connection, checkpointer = _sqlite_checkpointer(checkpoint_path)
+    try:
+        result = run_react_agent_task(
+            qa_service,
+            objective="Review payment and termination risk.",
+            focus_areas=["payment", "termination"],
+            task_id="restart-task",
+            checkpointer=checkpointer,
+        )
+    finally:
+        connection.close()
+
+    assert result.status in {"completed", "needs_human_review"}
+    assert calls == ["step-1", "step-2", "step-2"]
 
 
 def test_clarification_questions_detect_underspecified_task() -> None:

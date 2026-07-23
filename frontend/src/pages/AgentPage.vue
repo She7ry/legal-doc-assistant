@@ -199,7 +199,9 @@
         <div v-if="result.guard_warnings.length" class="answer-trust">
           <el-alert type="warning" title="报告守卫提示" :closable="false" show-icon>
             <ul class="structured-list structured-list--compact">
-              <li v-for="warning in result.guard_warnings" :key="warning">{{ warning }}</li>
+              <li v-for="warning in result.guard_warnings" :key="warning">
+                {{ guardWarningLabel(warning) }}
+              </li>
             </ul>
           </el-alert>
         </div>
@@ -233,11 +235,11 @@
             </div>
             <dl class="agent-tool-call__details">
               <div>
-                <dt>Arguments</dt>
+                <dt>参数</dt>
                 <dd><pre>{{ formatJson(call.arguments) }}</pre></dd>
               </div>
               <div>
-                <dt>Result</dt>
+                <dt>结果</dt>
                 <dd>{{ toolResultSummary(call.result) }}</dd>
               </div>
             </dl>
@@ -260,6 +262,7 @@ import type {
   AgentTaskEvent,
   AgentTaskRecordResponse,
 } from "../api/types";
+import { guardWarningLabel } from "../utils/legalDisplay";
 import CitationList from "../components/CitationList.vue";
 import EvidencePanel from "../components/EvidencePanel.vue";
 

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="DOC_ASSISTANT_",
         enable_decoding=False,
-        extra="ignore",
+        extra="forbid",
         frozen=True,
         populate_by_name=True,
     )
@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     project_root: Path = PROJECT_ROOT
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
-    memory_vector_store_dir: Path = PROJECT_ROOT / "data" / "memory_vector_store"
     ingest_jobs_db_path: Path = PROJECT_ROOT / "data" / "personal_ingest_jobs.sqlite3"
     agent_tasks_db_path: Path = PROJECT_ROOT / "data" / "personal_agent_tasks.sqlite3"
     memory_db_path: Path = PROJECT_ROOT / "data" / "personal_memory.sqlite3"
@@ -106,9 +105,10 @@ class Settings(BaseSettings):
     chunk_overlap: int = 120
 
     chat_history_window: int = 12
+    chat_context_max_tokens: int = 32_000
+    chat_max_output_tokens: int = 4_096
     tool_call_max_iterations: int = 6
     tool_call_history_window: int = 12
-    tool_call_context_max_chars: int = 24_000
     memory_top_k: int = 5
     memory_min_confidence: float = 0.55
     memory_prompt_max_tokens: int = 800
@@ -145,7 +145,25 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 20 * 1024 * 1024
     background_max_workers: int = 4
     pdf_ocr_enabled: bool = False
-    pdf_ocr_lang: str = "eng"
+    pdf_ocr_lang: str = "chi_sim+eng"
+    langsmith_tracing: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
+    langsmith_api_key: str = Field(
+        default="",
+        validation_alias="LANGSMITH_API_KEY",
+        repr=False,
+    )
+    langsmith_project: str = Field(
+        default="legal-doc-assistant",
+        validation_alias="LANGSMITH_PROJECT",
+    )
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        validation_alias="LANGSMITH_ENDPOINT",
+    )
+    langsmith_tracing_sampling_rate: float = Field(
+        default=1.0,
+        validation_alias="LANGSMITH_TRACING_SAMPLING_RATE",
+    )
 
     @field_validator("chat_extra_body", mode="before")
     @classmethod
@@ -177,8 +195,9 @@ class Settings(BaseSettings):
             "retrieval_fetch_k",
             "embedding_batch_size",
             "embedding_max_workers",
+            "chat_context_max_tokens",
+            "chat_max_output_tokens",
             "tool_call_max_iterations",
-            "tool_call_context_max_chars",
             "memory_top_k",
             "memory_prompt_max_tokens",
             "web_search_max_results",
@@ -191,6 +210,8 @@ class Settings(BaseSettings):
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be greater than 0")
+        if self.chat_max_output_tokens >= self.chat_context_max_tokens:
+            raise ValueError("chat_max_output_tokens must be smaller than chat_context_max_tokens")
         if self.chunk_overlap < 0 or self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be non-negative and smaller than chunk_size")
         if self.temperature < 0:
@@ -213,6 +234,8 @@ class Settings(BaseSettings):
             raise ValueError("retrieval_bm25_average_length must be greater than 0")
         if self.retrieval_min_relevance < 0:
             raise ValueError("retrieval_min_relevance must be greater than or equal to 0")
+        if not 0 <= self.langsmith_tracing_sampling_rate <= 1:
+            raise ValueError("langsmith_tracing_sampling_rate must be between 0 and 1")
         if self.docusign_mcp_enabled and not (
             self.docusign_client_id.strip() and self.docusign_client_secret.strip()
         ):
@@ -225,11 +248,14 @@ class Settings(BaseSettings):
             raise TypeError(f"Settings has no field '{next(iter(unknown))}'")
         return type(self)(**(self.model_dump() | kwargs))
 
+    @property
+    def chat_input_max_tokens(self) -> int:
+        return self.chat_context_max_tokens - self.chat_max_output_tokens
+
     def ensure_directories(self) -> None:
         for path in (
             self.upload_dir,
             self.vector_store_dir,
-            self.memory_vector_store_dir,
             self.ingest_jobs_db_path.parent,
             self.agent_tasks_db_path.parent,
             self.memory_db_path.parent,

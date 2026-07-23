@@ -9,15 +9,16 @@ from typing import Any
 
 from ai.agent._helpers import _clean_text
 from ai.agent.schemas import AgentPlanOutput, AgentStepResult
+from ai.config.settings import settings
+from ai.llm import structured_chat_output
 from ai.rag.qa_service import DocumentQAService
 from ai.rag.schemas import Citation
+from ai.utils.tokens import count_text_tokens, truncate_text_tokens
 
 logger = logging.getLogger(__name__)
 
 _COMPLEX_TASK = re.compile(
-    r"[;；\n]|\b(?:and|versus|vs\.?|compare|comparison|both)\b|"
-    r"(?:以及|并且|同时|比较|对比|分别|两者|多个|跨文档)",
-    re.IGNORECASE,
+    r"[;；\n]|(?:以及|并且|同时|比较|对比|分别|两者|多个|跨文档)"
 )
 
 
@@ -55,7 +56,7 @@ def plan_task(
 
     try:
         output = AgentPlanOutput.model_validate(
-            qa_service.chat_model.with_structured_output(AgentPlanOutput).invoke(
+            structured_chat_output(qa_service.chat_model, AgentPlanOutput).invoke(
                 qa_service._build_messages(_planner_prompt(objective, normalized_focus, user_role))
             )
         )
@@ -150,6 +151,7 @@ def _planner_prompt(objective: str, focus_areas: list[str], user_role: str) -> s
         "每个步骤都必须能单独使用文档检索和法律审阅工具完成。"
         "不要创建步骤依赖、递归子步骤或最终汇总步骤。"
         "每个步骤只需返回标题和明确的执行指令。"
+        "只返回合法 JSON 对象，格式为 {\"steps\":[{\"title\":\"...\",\"instruction\":\"...\"}]}。"
         f"\n\n任务目标：\n{objective.strip()}"
         f"\n\n已有关注点：\n{', '.join(focus_areas) or '无'}"
         f"\n\n目标读者：\n{user_role}"
@@ -162,33 +164,42 @@ def _synthesis_prompt(
     steps: list[AgentStepResult],
     citations: list[Citation],
 ) -> str:
-    step_blocks = []
-    for step in steps:
-        guard_status = "通过" if not step.guard_warnings else "; ".join(step.guard_warnings[:5])
-        source_ids = ", ".join(citation.source_id for citation in step.citations) or "无"
-        step_blocks.append(
-            f"[{step.step_id}] {step.title}\n"
-            f"状态：{step.status}\n校验：{guard_status}\n引用：{source_ids}\n"
-            f"摘要：\n{step.summary[:2000]}"
-        )
-    citation_lines = [
-        (
-            f"- {citation.source_id} | {citation.file_name}{citation.location_label()} | "
-            f"{(citation.exact_quote or citation.preview).strip()[:800]}"
-        )
-        for citation in citations
-    ]
-    step_context = "\n\n".join(step_blocks)
-    citation_context = "\n".join(citation_lines) or "无"
-    return (
+    base = (
         "根据以下独立步骤摘要，生成一份简洁、完整的最终法律工作成果。"
         "只能使用步骤摘要和所给引用中的事实；必须原样保留引用 ID，并在每个实质性段落后引用证据。"
         "明确披露失败或需要人工审阅的步骤，不要提及工具调用轨迹。默认使用简体中文。"
         f"\n\n任务目标：\n{objective.strip()}"
         f"\n\n目标读者：\n{user_role}"
-        f"\n\n步骤摘要：\n{step_context}"
-        f"\n\n可用引用：\n{citation_context}"
     )
+    available = max(100, settings.chat_input_max_tokens - count_text_tokens(base) - 20)
+    step_budget = available * 2 // 3
+    citation_budget = available - step_budget
+    per_step = max(1, step_budget // max(1, len(steps)))
+    per_citation = max(1, citation_budget // max(1, len(citations)))
+
+    step_blocks = []
+    for step in steps:
+        guard_status = "通过" if not step.guard_warnings else "; ".join(step.guard_warnings[:5])
+        source_ids = ", ".join(citation.source_id for citation in step.citations) or "无"
+        step_blocks.append(
+            truncate_text_tokens(
+                f"[{step.step_id}] {step.title}\n"
+                f"状态：{step.status}\n校验：{guard_status}\n引用：{source_ids}\n"
+                f"摘要：\n{step.summary}",
+                per_step,
+            )
+        )
+    citation_lines = [
+        truncate_text_tokens(
+            f"- {citation.source_id} | {citation.file_name}{citation.location_label()} | "
+            f"{(citation.exact_quote or citation.preview).strip()}",
+            per_citation,
+        )
+        for citation in citations
+    ]
+    step_context = "\n\n".join(step_blocks)
+    citation_context = "\n".join(citation_lines) or "无"
+    return base + f"\n\n步骤摘要：\n{step_context}\n\n可用引用：\n{citation_context}"
 
 
 def _fallback_report(steps: list[AgentStepResult]) -> str:

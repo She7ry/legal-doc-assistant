@@ -8,6 +8,7 @@ from typing import Any
 from langchain_core.exceptions import OutputParserException
 from pydantic import ValidationError
 
+from ai.llm import structured_chat_output
 from ai.rag.grounding.document_context import format_document_context
 from ai.rag.grounding.guard import validate_answer
 from ai.rag.schemas import QAAnswer
@@ -58,7 +59,7 @@ def review_clause(
         context=context,
     )
     try:
-        output = qa_service.chat_model.with_structured_output(ClauseReviewOutput).invoke(
+        output = structured_chat_output(qa_service.chat_model, ClauseReviewOutput).invoke(
             qa_service._build_messages(task_prompt)
         )
         metadata = clause_review_metadata(clause_type, profile, output, citations)
@@ -120,7 +121,7 @@ def check_conflict(
         conflict_types=conflict_types_prompt(),
     )
     try:
-        output = qa_service.chat_model.with_structured_output(ConflictCheckOutput).invoke(
+        output = structured_chat_output(qa_service.chat_model, ConflictCheckOutput).invoke(
             qa_service._build_messages(task_prompt)
         )
         metadata = conflict_metadata(output, citations)

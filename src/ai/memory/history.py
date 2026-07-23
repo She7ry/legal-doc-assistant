@@ -4,22 +4,29 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from ai.utils.tokens import count_message_tokens, truncate_text_tokens
+
 
 def is_conversation_summary_context(content: str) -> bool:
     normalized = content.strip().casefold()
     return normalized.startswith(("conversation summary:", "会话摘要：", "会话摘要:"))
 
 
-def format_chat_history(messages: list[dict[str, object]], max_messages: int = 12) -> str:
+def format_chat_history(
+    messages: list[dict[str, object]],
+    max_messages: int = 12,
+    *,
+    max_tokens: int | None = None,
+) -> str:
     clean = list(_history_messages(messages))
-    parts = [
-        f"会话摘要：{message['content']}"
-        for message in clean
-        if message["role"] == "system"
-    ]
+    summaries = [message for message in clean if message["role"] == "system"][-1:]
+    recent = _recent_chat_messages(clean, max_messages)
+    if max_tokens is not None:
+        summaries, recent = _fit_summary_and_recent(summaries, recent, max_tokens=max_tokens)
+    parts = [message["content"] for message in summaries]
     parts.extend(
         f"{'用户' if message['role'] == 'user' else '助手'}：{message['content']}"
-        for message in _recent_chat_messages(clean, max_messages)
+        for message in recent
     )
     return "\n".join(parts) if parts else "没有历史消息。"
 
@@ -30,16 +37,13 @@ def merge_chat_history(
     *,
     max_messages: int,
 ) -> list[dict[str, object]]:
-    system_context: list[dict[str, str]] = []
-    chat_messages: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for message in _history_messages([*persisted_history, *incoming_history]):
-        key = (message["role"], message["content"])
-        if key in seen:
-            continue
-        seen.add(key)
-        (system_context if message["role"] == "system" else chat_messages).append(message)
-    return [*system_context, *_recent_chat_messages(chat_messages, max_messages)]
+    persisted = list(_history_messages(persisted_history))
+    incoming = list(_history_messages(incoming_history))
+    summaries = [message for message in [*persisted, *incoming] if message["role"] == "system"]
+    persisted_chat = [message for message in persisted if message["role"] != "system"]
+    incoming_chat = [message for message in incoming if message["role"] != "system"]
+    merged = _merge_overlapping_history(persisted_chat, incoming_chat)
+    return [*summaries[-1:], *_recent_chat_messages(merged, max_messages)]
 
 
 def _history_messages(messages: Iterable[dict[str, object]]) -> Iterable[dict[str, str]]:
@@ -62,3 +66,70 @@ def _recent_chat_messages(
 ) -> list[dict[str, str]]:
     chat_messages = [message for message in messages if message["role"] != "system"]
     return chat_messages[-max(0, max_messages) :] if max_messages > 0 else []
+
+
+def _merge_overlapping_history(
+    persisted: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    if not persisted:
+        return incoming
+    if not incoming:
+        return persisted
+    if _contains_sequence(incoming, persisted):
+        return incoming
+    if _contains_sequence(persisted, incoming):
+        return persisted
+    for overlap in range(min(len(persisted), len(incoming)), 0, -1):
+        if persisted[-overlap:] == incoming[:overlap]:
+            return [*persisted, *incoming[overlap:]]
+        if incoming[-overlap:] == persisted[:overlap]:
+            return [*incoming, *persisted[overlap:]]
+    return incoming
+
+
+def _contains_sequence(
+    messages: list[dict[str, str]],
+    candidate: list[dict[str, str]],
+) -> bool:
+    width = len(candidate)
+    return any(
+        messages[index : index + width] == candidate for index in range(len(messages) - width + 1)
+    )
+
+
+def _fit_summary_and_recent(
+    summaries: list[dict[str, str]],
+    recent: list[dict[str, str]],
+    *,
+    max_tokens: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    remaining = max(0, max_tokens)
+    selected_summary: list[dict[str, str]] = []
+    if summaries and remaining:
+        summary_budget = max(1, remaining // 3)
+        summary = _bounded_message(summaries[-1], summary_budget)
+        if count_message_tokens([summary]) <= remaining:
+            selected_summary = [summary]
+            remaining -= count_message_tokens(selected_summary)
+
+    selected_recent: list[dict[str, str]] = []
+    for message in reversed(recent):
+        size = count_message_tokens([message])
+        if size <= remaining:
+            selected_recent.append(message)
+            remaining -= size
+            continue
+        if remaining > 8:
+            selected_recent.append(_bounded_message(message, remaining))
+        break
+    return selected_summary, list(reversed(selected_recent))
+
+
+def _bounded_message(message: dict[str, str], max_tokens: int) -> dict[str, str]:
+    empty = {**message, "content": ""}
+    content_budget = max(0, max_tokens - count_message_tokens([empty]))
+    return {
+        **message,
+        "content": truncate_text_tokens(message["content"], content_budget),
+    }

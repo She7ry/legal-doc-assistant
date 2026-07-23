@@ -22,12 +22,12 @@ class AuthRequest(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
-    content: str
+    content: str = Field(..., min_length=1, max_length=8000)
 
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
-    chat_history: list[ChatMessage] = Field(default_factory=list)
+    chat_history: list[ChatMessage] = Field(default_factory=list, max_length=50)
     conversation_id: str | None = Field(default=None, max_length=128)
     task_id: str | None = Field(default=None, max_length=128)
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from ai.rag.evaluation.metrics import (
     SourceCandidate,
     aggregate_scores,
@@ -9,6 +12,7 @@ from ai.rag.evaluation.metrics import (
     source_matches,
 )
 from ai.rag.schemas import Citation
+from scripts.generate_eval_fixtures import DOCUMENTS
 from scripts.run_rag_eval import _evaluate_thresholds, _parse_min_score
 
 
@@ -163,3 +167,41 @@ def test_eval_thresholds_pass_and_fail_by_metric_path() -> None:
 
 def test_parse_min_score_requires_metric_and_numeric_value() -> None:
     assert _parse_min_score("generation.faithfulness=1") == ("generation.faithfulness", 1.0)
+
+
+def test_eval_datasets_are_chinese_only() -> None:
+    root = Path(__file__).resolve().parents[1]
+    rag = json.loads((root / "data/eval/eval_dataset.json").read_text(encoding="utf-8"))
+    agent = json.loads((root / "data/eval/agent_eval_dataset.json").read_text(encoding="utf-8"))
+
+    sections = []
+    for document in DOCUMENTS:
+        for page in document.pages:
+            for index, line in enumerate(page):
+                if line.startswith("Marker: EVAL-ZH-"):
+                    end = page.index("", index + 1) if "" in page[index + 1 :] else len(page)
+                    sections.append(page[index + 1 : end])
+
+    assert all(
+        document["file_name"].startswith("sample_chinese_")
+        for document in rag["documents"]
+    )
+    assert all("chinese_query" in case["tags"] for case in rag["cases"])
+    assert all(
+        source["file_name"].startswith("sample_chinese_")
+        for case in rag["cases"]
+        for source in case["gold_sources"]
+    )
+    assert all(
+        document["path"].split("/")[-1].startswith("sample_chinese_")
+        for document in agent["documents"]
+    )
+    assert all(case["metadata"]["language"] == "zh-CN" for case in agent["cases"])
+    assert all(
+        source.startswith("sample_chinese_")
+        for case in agent["cases"]
+        for source in case["reference_outputs"]["expected_sources"]
+    )
+    assert len(sections) >= 21
+    assert min(map(len, sections)) >= 5
+    assert sum(len(line) for section in sections for line in section) >= 4_000

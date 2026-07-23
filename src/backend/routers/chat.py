@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterator
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
+from ai.agent.schemas import AgentTaskResult
+from ai.agent.tool_calling import (
+    ToolCallingAnswer,
+    ToolCallingChatService,
+    keyword_tool_for_question,
+)
 from ai.config.settings import settings
 from ai.rag.qa_service import DocumentQAService, PreparedQAAnswer
 from backend.dependencies import (
+    AgentRunner,
+    AgentRunnerDep,
     MemoryServiceDep,
     QAServiceDep,
     ToolCallingServiceDep,
@@ -139,22 +148,23 @@ def get_conversation_messages(
     response_model=AskResponse,
     summary="Ask a question about indexed documents",
 )
-async def ask(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> AskResponse:
-    """向已索引的法律文档提问（基于 RAG 检索增强生成），返回答案内容、引用来源及置信度。"""
+async def ask(
+    body: AskRequest,
+    tool_service: ToolCallingServiceDep,
+    agent_service: AgentRunnerDep,
+    user_id: UserIdDep,
+) -> AskResponse:
+    """关键词优先路由；未命中时进入原有 Agent 复杂度判断与执行流程。"""
     history = [{"role": m.role, "content": m.content} for m in body.chat_history]
-    answer = await qa_service.aask(
+    return await asyncio.to_thread(
+        _run_routed_answer,
+        tool_service,
+        agent_service,
         body.question,
         chat_history=history,
         user_id=user_id,
         conversation_id=body.conversation_id,
         task_id=body.task_id,
-    )
-    return AskResponse(
-        content=answer.content,
-        citations=[CitationOut.from_citation(c) for c in answer.citations],
-        confidence=answer.confidence,
-        guard_warnings=answer.guard_warnings,
-        evidence=answer.metadata.get("evidence"),
     )
 
 
@@ -186,24 +196,19 @@ def ask_with_tools(
         enable_web_search=body.enable_web_search,
         max_tool_iterations=body.max_tool_iterations,
     )
-    return ToolChatResponse(
-        content=answer.content,
-        citations=[CitationOut.from_citation(c) for c in answer.citations],
-        web_sources=[WebSourceOut.model_validate(s) for s in answer.web_sources],
-        tool_calls=[ToolCallOut.model_validate(t) for t in answer.tool_calls],
-        confidence=answer.confidence,
-        guard_warnings=answer.guard_warnings,
-        evidence=answer.metadata.get("evidence"),
-    )
+    return _tool_chat_response(answer)
 
 
 @router.post(
     "/ask/stream",
     summary="Ask a question and stream the answer as server-sent events",
 )
-def ask_stream(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -> StreamingResponse:
-    """流式问答接口：通过 Server-Sent Events 逐块推送答案。
-    流程：先发送引用元数据，再逐块发送 delta 文本，流结束后发送 guard 校验结果和完整答案。"""
+def ask_stream(
+    body: AskRequest,
+    qa_service: QAServiceDep,
+    user_id: UserIdDep,
+) -> StreamingResponse:
+    """流式 RAG 问答；复杂多步骤工作使用独立 Agent 任务接口。"""
     history = [{"role": m.role, "content": m.content} for m in body.chat_history]
     prepared = qa_service.prepare_answer(
         body.question,
@@ -216,6 +221,67 @@ def ask_stream(body: AskRequest, qa_service: QAServiceDep, user_id: UserIdDep) -
         _stream_answer_events(qa_service, prepared),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
+    )
+
+
+def _ask_response(answer: ToolCallingAnswer) -> AskResponse:
+    return AskResponse(
+        content=answer.content,
+        citations=[CitationOut.from_citation(c) for c in answer.citations],
+        confidence=answer.confidence,
+        guard_warnings=answer.guard_warnings,
+        evidence=answer.metadata.get("evidence"),
+    )
+
+
+def _agent_response(result: AgentTaskResult) -> AskResponse:
+    return AskResponse(
+        content=result.report,
+        citations=[CitationOut.from_citation(c) for c in result.citations],
+        confidence=result.confidence,
+        guard_warnings=result.guard_warnings,
+        evidence=result.evidence,
+    )
+
+
+def _tool_chat_response(answer: ToolCallingAnswer) -> ToolChatResponse:
+    return ToolChatResponse(
+        **_ask_response(answer).model_dump(),
+        web_sources=[WebSourceOut.model_validate(s) for s in answer.web_sources],
+        tool_calls=[ToolCallOut.model_validate(t) for t in answer.tool_calls],
+    )
+
+
+def _run_routed_answer(
+    tool_service: ToolCallingChatService,
+    agent_service: AgentRunner,
+    question: str,
+    *,
+    chat_history: list[dict[str, str]],
+    user_id: str,
+    conversation_id: str | None,
+    task_id: str | None,
+) -> AskResponse:
+    if keyword_tool_for_question(question):
+        return _ask_response(
+            tool_service.ask(
+                question,
+                chat_history=chat_history,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+            )
+        )
+    return _agent_response(
+        agent_service(
+            objective=question,
+            focus_areas=[],
+            user_role="ordinary",
+            max_steps=settings.tool_call_max_iterations,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+        )
     )
 
 

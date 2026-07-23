@@ -16,20 +16,8 @@ GENERIC_OBJECTIVE_PATTERNS = {
     "审核合同",
     "看看文件",
     "看下文件",
-    "reviewthis",
-    "reviewcontract",
-    "checkthis",
-    "checkcontract",
-    "analyzethis",
 }
 DEADLINE_KEYWORDS = (
-    "urgent",
-    "asap",
-    "deadline",
-    "due",
-    "expire",
-    "expires",
-    "expiring",
     "紧急",
     "尽快",
     "截止",
@@ -38,15 +26,6 @@ DEADLINE_KEYWORDS = (
     "马上",
 )
 CURRENT_LAW_KEYWORDS = (
-    "current law",
-    "latest law",
-    "up-to-date law",
-    "statute",
-    "regulation",
-    "compliance",
-    "legal requirement",
-    "legal authority",
-    "is this legal",
     "现行法律",
     "最新法律",
     "法规",
@@ -58,20 +37,6 @@ CURRENT_LAW_KEYWORDS = (
     "法定",
 )
 JURISDICTION_INDICATORS = (
-    "new york",
-    "california",
-    "delaware",
-    "united states",
-    "u.s.",
-    "usa",
-    "china",
-    "prc",
-    "hong kong",
-    "singapore",
-    "england",
-    "wales",
-    "eu",
-    "european union",
     "中国",
     "美国",
     "英国",
@@ -91,13 +56,6 @@ JURISDICTION_INDICATORS = (
     "浙江",
 )
 PARTY_SENSITIVE_KEYWORDS = (
-    "lawsuit",
-    "sued",
-    "court case",
-    "arbitration demand",
-    "claim against",
-    "eviction",
-    "employment termination",
     "被起诉",
     "起诉",
     "法院案件",
@@ -109,16 +67,6 @@ PARTY_SENSITIVE_KEYWORDS = (
     "合同纠纷",
 )
 PARTY_SIDE_INDICATORS = (
-    "plaintiff",
-    "defendant",
-    "buyer",
-    "seller",
-    "customer",
-    "vendor",
-    "employer",
-    "employee",
-    "landlord",
-    "tenant",
     "甲方",
     "乙方",
     "原告",
@@ -133,12 +81,11 @@ PARTY_SIDE_INDICATORS = (
     "租客",
 )
 DATE_OR_TIME_PATTERN = re.compile(
-    r"(\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b|"
-    r"\b\d{1,2}[-/.]\d{1,2}\b|"
+    r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|"
+    r"\d{1,2}[-/.]\d{1,2}|"
     r"\d{4}年\d{1,2}月\d{1,2}日|"
-    r"\d+\s*(business\s+days?|days?|hours?|weeks?|工作日|小时|天|日|周)|"
-    r"today|tomorrow|next\s+week|今天|明天|后天|本周|下周|月底|月末)",
-    re.IGNORECASE,
+    r"\d+\s*(工作日|小时|天|日|周)|"
+    r"今天|明天|后天|本周|下周|月底|月末)"
 )
 
 
@@ -177,7 +124,7 @@ def clarification_questions_for_task(
         lowered,
         JURISDICTION_INDICATORS,
     ):
-        questions.append("请补充适用法域或地域，例如国家、州/省、市，或合同中的 governing law。")
+        questions.append("请补充适用法域或地域，例如国家、州/省、市，或合同中的准据法条款。")
 
     if _mentions_any(lowered, PARTY_SENSITIVE_KEYWORDS) and not _mentions_any(
         lowered,

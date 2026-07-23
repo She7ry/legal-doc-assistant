@@ -4,7 +4,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from ai.agent.schemas import AgentTaskResult
+from ai.agent.schemas import AgentTaskPause, AgentTaskResult
 from backend import dependencies
 from backend.agent_tasks import AgentTaskStore
 from backend.main import app
@@ -32,12 +32,19 @@ class FastAgentService:
         )
 
 
-class ExplodingAgentService:
-    def run_task(self, **_kwargs) -> AgentTaskResult:
-        raise AssertionError("Agent service should not run when clarification is required.")
+class PausingAgentService:
+    def run_task(self, **kwargs) -> AgentTaskPause | AgentTaskResult:
+        if "Supplemental user input" not in kwargs["objective"]:
+            return AgentTaskPause(
+                task_id=kwargs["task_id"],
+                questions=["请说明具体审查目标。"],
+            )
+        return FastAgentService().run_task(**kwargs)
 
 
-def _wait_for_agent_task(client: TestClient, task_id: str, *, user_id: str = "api-test-user") -> dict:
+def _wait_for_agent_task(
+    client: TestClient, task_id: str, *, user_id: str = "api-test-user"
+) -> dict:
     deadline = time.monotonic() + 3
     last_data = None
     while time.monotonic() < deadline:
@@ -91,7 +98,9 @@ def test_agent_task_api_creates_gets_and_streams_events(tmp_path) -> None:
 def test_agent_task_api_marks_underspecified_tasks_as_needing_input(tmp_path) -> None:
     store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     app.dependency_overrides[dependencies.get_agent_task_store] = lambda: store
-    app.dependency_overrides[dependencies.get_agent_service] = lambda: ExplodingAgentService().run_task
+    app.dependency_overrides[dependencies.get_agent_service] = lambda: (
+        PausingAgentService().run_task
+    )
     client = TestClient(app)
 
     try:
@@ -106,7 +115,7 @@ def test_agent_task_api_marks_underspecified_tasks_as_needing_input(tmp_path) ->
             headers={"X-User-Id": "api-test-user"},
         )
         assert created.status_code == 202
-        data = created.json()
+        data = _wait_for_agent_task(client, created.json()["task_id"])
         assert data["status"] == "needs_input"
         assert data["stage"] == "needs_input"
         assert data["result"] is None
@@ -126,7 +135,9 @@ def test_agent_task_api_marks_underspecified_tasks_as_needing_input(tmp_path) ->
 def test_agent_task_api_resumes_task_after_supplemental_input(tmp_path) -> None:
     store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
     app.dependency_overrides[dependencies.get_agent_task_store] = lambda: store
-    app.dependency_overrides[dependencies.get_agent_service] = lambda: FastAgentService().run_task
+    app.dependency_overrides[dependencies.get_agent_service] = lambda: (
+        PausingAgentService().run_task
+    )
     client = TestClient(app)
 
     try:
@@ -142,16 +153,14 @@ def test_agent_task_api_resumes_task_after_supplemental_input(tmp_path) -> None:
         )
         assert created.status_code == 202
         task_id = created.json()["task_id"]
-        assert created.json()["status"] == "needs_input"
+        awaiting_input = _wait_for_agent_task(client, task_id)
+        assert awaiting_input["status"] == "needs_input"
 
         resumed = client.post(
             f"/api/v1/agent/tasks/{task_id}/resume",
             json={
                 "clarification_answers": [
-                    (
-                        "Review payment and termination risk. "
-                        "I represent the customer."
-                    )
+                    ("Review payment and termination risk. I represent the customer.")
                 ],
                 "focus_areas": ["payment", "termination"],
                 "user_role": "lawyer",

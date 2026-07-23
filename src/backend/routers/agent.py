@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
-from ai.agent import clarification_questions_for_task
+from ai.agent.schemas import AgentTaskPause
+from ai.observability import langsmith_agent_context
 from backend.agent_tasks import AgentTaskRecord, AgentTaskStatus, AgentTaskStore
 from backend.dependencies import (
     AgentRunner,
@@ -46,7 +47,8 @@ def create_agent_task(
         max_steps=body.max_steps,
         conversation_id=body.conversation_id,
     )
-    return _check_clarification_and_enqueue(record, agent_service, task_store, user_id)
+    enqueue_agent_task(record, agent_service, task_store)
+    return AgentTaskRecordResponse.model_validate(record)
 
 
 @router.post(
@@ -62,7 +64,7 @@ def resume_agent_task(
     task_store: AgentTaskStoreDep,
     user_id: UserIdDep,
 ) -> AgentTaskRecordResponse:
-    record = task_store.get(task_id, user_id)
+    record = task_store.get(task_id, user_id, include_events=False)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent task not found.")
     if record.status != AgentTaskStatus.NEEDS_INPUT:
@@ -92,7 +94,8 @@ def resume_agent_task(
         conversation_id=body.conversation_id or record.conversation_id,
         clarification_answers=clarification_answers,
     )
-    return _check_clarification_and_enqueue(resumed, agent_service, task_store, user_id)
+    enqueue_agent_task(resumed, agent_service, task_store)
+    return AgentTaskRecordResponse.model_validate(resumed)
 
 
 @router.get(
@@ -150,16 +153,24 @@ def _run_agent_task(
         task_store.update_progress(task_id, **event)
 
     try:
-        result = agent_service(
-            objective=record.objective,
-            focus_areas=record.focus_areas,
-            user_role=record.user_role,
-            max_steps=record.max_steps,
+        with langsmith_agent_context(
+            task_id=task_id,
             user_id=record.user_id,
             conversation_id=record.conversation_id,
-            task_id=task_id,
-            progress_callback=progress_callback,
-        )
+        ):
+            result = agent_service(
+                objective=record.objective,
+                focus_areas=record.focus_areas,
+                user_role=record.user_role,
+                max_steps=record.max_steps,
+                user_id=record.user_id,
+                conversation_id=record.conversation_id,
+                task_id=task_id,
+                progress_callback=progress_callback,
+            )
+        if isinstance(result, AgentTaskPause):
+            task_store.mark_needs_input(task_id, result.questions)
+            return
         response = AgentTaskResponse.model_validate(result)
         encoded_response = jsonable_encoder(response)
     except Exception:
@@ -175,8 +186,9 @@ def enqueue_agent_task(
     agent_service: AgentRunner,
     task_store: AgentTaskStore,
 ) -> bool:
+    run_id = record.events[-1].event_id if record.events else "restart"
     return submit_background_task(
-        f"agent:{record.task_id}",
+        f"agent:{record.task_id}:{run_id}",
         _run_agent_task,
         record,
         agent_service,
@@ -189,21 +201,6 @@ def enqueue_agent_task(
 # ------------------------------------------------------------------
 
 
-def _check_clarification_and_enqueue(
-    record: AgentTaskRecord,
-    agent_service: AgentRunner,
-    task_store: AgentTaskStore,
-    user_id: str,
-) -> AgentTaskRecordResponse:
-    questions = clarification_questions_for_task(record.objective, record.focus_areas)
-    if questions:
-        task_store.mark_needs_input(record.task_id, questions)
-        updated = task_store.get(record.task_id, user_id) or record
-        return AgentTaskRecordResponse.model_validate(updated)
-    enqueue_agent_task(record, agent_service, task_store)
-    return AgentTaskRecordResponse.model_validate(record)
-
-
 def _agent_task_event_stream(
     task_store: AgentTaskStore,
     task_id: str,
@@ -214,6 +211,11 @@ def _agent_task_event_stream(
     idle_ticks = 0
 
     while True:
+        record = task_store.get(task_id, user_id, include_events=False)
+        if record is None:
+            yield format_sse("error", {"detail": "Agent task not found."})
+            return
+
         events = task_store.events_after(task_id, user_id, last_event_id)
         if events is None:
             yield format_sse("error", {"detail": "Agent task not found."})
@@ -239,8 +241,7 @@ def _agent_task_event_stream(
                 event_id=event.event_id,
             )
 
-        record = task_store.get(task_id, user_id)
-        if record is None or record.status in {
+        if record.status in {
             AgentTaskStatus.NEEDS_INPUT,
             AgentTaskStatus.SUCCEEDED,
             AgentTaskStatus.FAILED,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
+
 from backend.agent_tasks import AgentTaskStatus, AgentTaskStore
 
 
@@ -173,3 +175,49 @@ def test_agent_task_store_claims_sqlite_task_once_and_does_not_restart_running(t
     assert loaded is not None
     assert loaded.status == AgentTaskStatus.RUNNING
     assert [event.event_type for event in loaded.events or []].count("running") == 1
+
+
+def test_agent_task_store_requeues_interrupted_work(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
+    task = store.create(
+        user_id="user-a",
+        objective="Review liability.",
+        focus_areas=["liability"],
+        user_role="ordinary",
+        max_steps=4,
+        conversation_id=None,
+    )
+    assert store.claim(task.task_id)
+
+    assert store.requeue_interrupted() == 1
+
+    recovered = store.get(task.task_id, "user-a")
+    assert recovered is not None
+    assert recovered.status == AgentTaskStatus.QUEUED
+    assert recovered.started_at is None
+    assert recovered.events
+    assert recovered.events[-1].payload == {"recovered": True}
+
+
+def test_agent_task_status_and_terminal_event_commit_together(tmp_path, monkeypatch) -> None:
+    store = AgentTaskStore(tmp_path / "agent_tasks.sqlite3")
+    task = store.create(
+        user_id="user-a",
+        objective="Review liability.",
+        focus_areas=["liability"],
+        user_role="ordinary",
+        max_steps=4,
+        conversation_id=None,
+    )
+    assert store.claim(task.task_id)
+
+    def fail_event(*_args, **_kwargs):
+        raise RuntimeError("event write failed")
+
+    monkeypatch.setattr(store, "_insert_event_with_connection", fail_event)
+    with pytest.raises(RuntimeError, match="event write failed"):
+        store.mark_succeeded(task.task_id, {"status": "completed"})
+
+    loaded = store.get(task.task_id, "user-a")
+    assert loaded is not None
+    assert loaded.status == AgentTaskStatus.RUNNING

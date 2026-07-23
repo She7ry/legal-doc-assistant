@@ -54,7 +54,7 @@
             class="answer-trust"
           >
             <el-tag v-if="message.confidence" :type="confidenceTagType(message.confidence)" effect="dark">
-              可信度 {{ message.confidence }}
+              可信度 {{ levelLabel(message.confidence) }}
             </el-tag>
             <el-alert
               v-if="message.guardWarnings.length"
@@ -65,7 +65,7 @@
             >
               <ul class="structured-list structured-list--compact">
                 <li v-for="warning in message.guardWarnings" :key="warning">
-                  {{ warning }}
+                  {{ guardWarningLabel(warning) }}
                 </li>
               </ul>
             </el-alert>
@@ -119,6 +119,7 @@ import {
   updateChatConversation,
 } from "../api/chat";
 import { formatApiError } from "../api/http";
+import { guardWarningLabel, levelLabel } from "../utils/legalDisplay";
 import type {
   ChatHistoryMessage,
   Citation,

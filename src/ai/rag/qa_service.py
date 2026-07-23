@@ -33,6 +33,7 @@ from ai.rag.grounding.evidence import build_evidence_profile
 from ai.rag.grounding.guard import AnswerGuardResult, validate_answer
 from ai.rag.retrieval.vector_store import DocumentVectorStore
 from ai.rag.schemas import Citation, QAAnswer
+from ai.utils.tokens import count_message_tokens, truncate_middle_text_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +56,6 @@ _VAGUE_QUERY_TERMS = (
     "上面",
     "前面",
     "刚才",
-    "this",
-    "that",
-    "it",
-    "above",
-    "previous",
 )
 
 
@@ -110,6 +106,8 @@ class DocumentQAService:
         self.answer_repair_prompt = PromptTemplate.from_template(load_prompt("answer_repair.txt"))
         self.chat_model = chat_model or build_chat_model()
         self.memory_service = memory_service
+        if self.memory_service is not None and self.memory_service.summary_model is None:
+            self.memory_service.summary_model = self.chat_model
 
     def ask(
         self,
@@ -314,6 +312,7 @@ class DocumentQAService:
         chat_history_text = self._format_chat_history(
             enrichment.chat_history,
             max_messages=settings.chat_history_window,
+            max_tokens=settings.chat_input_max_tokens // 4,
         )
         retrieval_query = self._rewrite_query(question, chat_history_text)
         documents = self.vector_store.search(retrieval_query)
@@ -338,6 +337,7 @@ class DocumentQAService:
         chat_history_text = self._format_chat_history(
             enrichment.chat_history,
             max_messages=settings.chat_history_window,
+            max_tokens=settings.chat_input_max_tokens // 4,
         )
         retrieval_query = await asyncio.to_thread(
             self._rewrite_query, question, chat_history_text,
@@ -395,9 +395,18 @@ class DocumentQAService:
     # ── 内部方法 ──────────────────────────────────────────────────────────
 
     def _build_messages(self, task_prompt: str) -> list[dict[str, str]]:
+        system_message = {"role": "system", "content": self.base_prompt}
+        empty_user = {"role": "user", "content": ""}
+        user_budget = max(
+            1,
+            settings.chat_input_max_tokens - count_message_tokens([system_message, empty_user]) - 4,
+        )
         return [
-            {"role": "system", "content": self.base_prompt},
-            {"role": "user", "content": task_prompt},
+            system_message,
+            {
+                "role": "user",
+                "content": truncate_middle_text_tokens(task_prompt, user_budget),
+            },
         ]
 
     def repair_content(
@@ -435,10 +444,7 @@ class DocumentQAService:
             return question
         if chat_history_text == "没有历史消息。":
             return question
-        normalized_question = question.casefold()
-        if len(question) > 50 and not any(term in normalized_question for term in _VAGUE_QUERY_TERMS):
-            return question
-        if not any(term in normalized_question for term in _VAGUE_QUERY_TERMS):
+        if not any(term in question for term in _VAGUE_QUERY_TERMS):
             return question
 
         prompt = QUERY_REWRITE_PROMPT.format(
@@ -502,8 +508,13 @@ class DocumentQAService:
             return
 
     @staticmethod
-    def _format_chat_history(messages: list[dict[str, object]], max_messages: int = 12) -> str:
-        return format_chat_history(messages, max_messages)
+    def _format_chat_history(
+        messages: list[dict[str, object]],
+        max_messages: int = 12,
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
+        return format_chat_history(messages, max_messages, max_tokens=max_tokens)
 
     @staticmethod
     def _merge_chat_history(

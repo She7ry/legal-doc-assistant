@@ -18,6 +18,7 @@ config/       环境变量与 Settings（模型、检索、Agent、记忆等开�
 rag/          文档入库、混合检索、引用校验与问答服务
 review/       条款审阅与冲突分析
 memory/       用户长期记忆、对话历史、语义检索
+skills/       后端专用 Agent Skill
 llm.py        LLM / Embedding 客户端（DeepSeek、OpenAI-compatible 等）
 qdrant.py     RAG 与 Memory 共用的 Qdrant 基础能力
 prompts/      LLM 系统提示词模板（.txt）

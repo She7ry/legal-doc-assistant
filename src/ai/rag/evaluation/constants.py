@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 DEFAULT_REFUSAL_TERMS: tuple[str, ...] = (
-    "not found",
-    "not provided",
-    "cannot determine",
-    "not enough information",
-    "relevant text was not found",
-    "did not find enough relevant text",
-    "do not contain",
-    "does not contain",
-    "do not specify",
-    "does not specify",
-    "do not mention",
-    "does not mention",
+    "未找到",
+    "未检索到",
+    "未提供",
+    "无法确定",
+    "无法判断",
+    "无法完整回答",
+    "没有足够信息",
+    "信息不足",
+    "文档未说明",
+    "文档中未说明",
 )

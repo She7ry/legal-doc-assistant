@@ -61,9 +61,18 @@ class AgentTaskResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AgentTaskPause:
+    """A durable LangGraph interrupt waiting for user input."""
+
+    task_id: str
+    questions: list[str]
+
+
 __all__ = [
     "AgentPlanOutput",
     "AgentPlanStepOutput",
     "AgentStepResult",
+    "AgentTaskPause",
     "AgentTaskResult",
 ]

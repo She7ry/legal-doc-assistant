@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Lock, Thread
 from time import sleep
 from types import SimpleNamespace
@@ -15,6 +15,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 from qdrant_client import QdrantClient, models
 
+from ai.memory import vector_store as memory_vector_store_module
+from ai.memory.history import merge_chat_history
 from ai.memory.schemas import MemoryCandidate, MemoryRecord, MemoryUpdate
 from ai.memory.service import MemoryService, extract_memory_write_intents
 from ai.memory.store import MemoryStore
@@ -131,8 +133,8 @@ def memory_record_factory(memory_id: str) -> MemoryRecord:
         value_json=None,
         source="explicit",
         confidence=0.95,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -145,6 +147,27 @@ def build_qdrant_memory_vector_store() -> MemoryVectorStore:
     vector_store._collection_lock = Lock()
     vector_store._validated_vector_size = None
     return vector_store
+
+
+def test_memory_vector_store_reuses_document_qdrant_directory(tmp_path, monkeypatch) -> None:
+    client = object()
+    paths = []
+    monkeypatch.setattr(
+        memory_vector_store_module,
+        "settings",
+        SimpleNamespace(memory_collection_name="user_memories", vector_store_dir=tmp_path),
+    )
+    monkeypatch.setattr(
+        memory_vector_store_module,
+        "shared_qdrant_client",
+        lambda path: paths.append(path) or client,
+    )
+    monkeypatch.setattr(memory_vector_store_module, "build_embedding_model", object)
+
+    vector_store = MemoryVectorStore(user_id="user-a")
+
+    assert vector_store.vector_store is client
+    assert paths == [tmp_path]
 
 
 def test_memory_store_creates_lean_schema(tmp_path) -> None:
@@ -512,7 +535,7 @@ def test_expired_memories_are_marked_stale_and_removed_from_vector(tmp_path) -> 
         type="fact",
         key="temporary_fact",
         content="Temporary fact.",
-        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
     )
 
     stale = service.cleanup_expired_memories("user-a")
@@ -530,7 +553,7 @@ def test_memory_update_can_clear_nullable_fields(tmp_path) -> None:
         key="matter_deadline",
         content="Deadline is Friday.",
         value_json={"date": "Friday"},
-        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        expires_at=datetime.now(UTC) + timedelta(days=1),
     )
 
     cleared = service.update_memory(
@@ -572,6 +595,25 @@ def test_load_conversation_history_uses_summary_plus_recent_messages(tmp_path) -
     ]
 
 
+def test_merge_chat_history_preserves_order_and_legitimate_repeats() -> None:
+    persisted = [{"role": "user", "content": f"Message {index}"} for index in range(5, 13)]
+    incoming = [{"role": "user", "content": f"Message {index}"} for index in range(1, 13)]
+    incoming.extend(
+        [
+            {"role": "user", "content": "Please repeat."},
+            {"role": "user", "content": "Please repeat."},
+        ]
+    )
+
+    merged = merge_chat_history(persisted, incoming, max_messages=20)
+
+    assert [message["content"] for message in merged] == [
+        *(f"Message {index}" for index in range(1, 13)),
+        "Please repeat.",
+        "Please repeat.",
+    ]
+
+
 def test_manual_conversation_summary_creates_session_memory(tmp_path) -> None:
     service = build_memory_service(tmp_path)
     conversation_id = service.ensure_context("user-a", "conversation-a")
@@ -597,7 +639,36 @@ def test_manual_conversation_summary_creates_session_memory(tmp_path) -> None:
     assert "10 business days" in memory.content
 
 
-def test_conversation_summary_is_automatically_indexed_every_ten_messages(tmp_path) -> None:
+def test_conversation_summary_batches_do_not_skip_unsummarized_messages(tmp_path) -> None:
+    service = build_memory_service(tmp_path)
+    conversation_id = service.ensure_context("user-a", "conversation-a")
+    for index in range(25):
+        service.record_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Question {index}",
+        )
+
+    first = service.summarize_conversation_to_memory(
+        user_id="user-a",
+        conversation_id=conversation_id,
+        limit=10,
+    )
+    second = service.summarize_conversation_to_memory(
+        user_id="user-a",
+        conversation_id=conversation_id,
+        limit=10,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.value_json["message_count"] == 10
+    assert second.value_json["message_count"] == 20
+    assert "Question 0" in first.content
+    assert "Question 10" in second.content
+
+
+def test_conversation_summary_is_automatically_updated_without_vector_duplication(tmp_path) -> None:
     vector_store = FakeMemoryVectorStore()
     service = MemoryService(
         store=MemoryStore(tmp_path / "memory.sqlite3"),
@@ -622,7 +693,57 @@ def test_conversation_summary_is_automatically_indexed_every_ten_messages(tmp_pa
         if memory.key == "conversation_summary_conversation-a"
     )
     assert summary.value_json["message_count"] == 10
-    assert summary.memory_id in vector_store.upserted
+    assert summary.value_json["summary_method"] == "extractive_fallback"
+    assert summary.memory_id not in vector_store.upserted
+    assert summary.memory_id not in vector_store.deleted
+
+
+def test_conversation_summary_rolls_previous_summary_into_new_messages(tmp_path) -> None:
+    model = RecordingChatModel(response="当事人、文档与用户目标：Acme 正在审阅续约条款。")
+    service = MemoryService(
+        store=MemoryStore(tmp_path / "memory.sqlite3"),
+        vector_store=None,
+        summary_model=model,
+    )
+    conversation_id = service.ensure_context("user-a", "conversation-a")
+    for index in range(5):
+        service.record_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Question {index}",
+        )
+        service.record_assistant_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Answer {index}",
+        )
+
+    model.response = "已确认事实与结论：Acme 的通知期为 30 天。"
+    for index in range(5, 10):
+        service.record_user_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Question {index}",
+        )
+        service.record_assistant_message(
+            user_id="user-a",
+            conversation_id=conversation_id,
+            content=f"Answer {index}",
+        )
+
+    summary = service.store.find_active_memory_by_key(
+        "user-a",
+        scope="session",
+        type="task_state",
+        key="conversation_summary_conversation-a",
+    )
+    assert summary is not None
+    assert summary.value_json["message_count"] == 20
+    assert summary.value_json["summary_method"] == "llm_rolling"
+    assert "通知期为 30 天" in summary.content
+    assert "Acme 正在审阅续约条款" in model.messages[1]["content"]
+    assert "Question 5" in model.messages[1]["content"]
+    assert "Question 0" not in model.messages[1]["content"]
 
 
 def test_vector_repair_deletes_inactive_and_upserts_active_memories(tmp_path) -> None:
@@ -832,6 +953,27 @@ def test_memory_search_initializes_payload_indexes_only_once() -> None:
     ]
     assert client.collection_checks == 1
     assert client.queries == 2
+
+
+def test_memory_search_skips_embedding_when_collection_is_missing() -> None:
+    class MissingCollectionClient:
+        def collection_exists(self, _collection_name: str) -> bool:
+            return False
+
+    class UnexpectedEmbeddingModel:
+        def embed_query(self, _text: str) -> list[float]:
+            raise AssertionError("empty memory indexes must not call the embedding provider")
+
+    vector_store = MemoryVectorStore.__new__(MemoryVectorStore)
+    vector_store.user_id = "user-a"
+    vector_store.collection_name = "memories"
+    vector_store.vector_store = MissingCollectionClient()
+    vector_store.embedding_model = UnexpectedEmbeddingModel()
+    vector_store._collection_lock = Lock()
+    vector_store._collection_exists = None
+    vector_store._validated_vector_size = None
+
+    assert vector_store.search("answer style", user_id="user-a", k=1) == []
 
 
 def test_memory_vector_delete_failure_is_reported(caplog) -> None:

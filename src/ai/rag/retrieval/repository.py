@@ -54,6 +54,7 @@ class QdrantDocumentRepository:
         self.collection_name = collection_name
         self.embedding_model = embedding_model
         self._collection_lock = Lock()
+        self._collection_exists: bool | None = None
         self._payload_indexes_initialized = False
         self._validated_vector_size: int | None = None
 
@@ -228,6 +229,8 @@ class QdrantDocumentRepository:
         limit: int,
         mode: str,
     ) -> list[Document]:
+        if not self._collection_exists_for_search():
+            return []
         fetch_k = max(limit, int(settings.retrieval_fetch_k), limit * 5)
         query_filter = active_filter()
         sparse_query = sparse_query_vector(query)
@@ -308,15 +311,30 @@ class QdrantDocumentRepository:
                 payload_indexes=(
                     {} if self._payload_indexes_initialized else _DOCUMENT_PAYLOAD_INDEXES
                 ),
+                collection_exists=self._collection_exists,
             )
+            self._collection_exists = True
             self._payload_indexes_initialized = True
             self._validated_vector_size = vector_size
+
+    def _collection_exists_for_search(self) -> bool:
+        with self._collection_lock:
+            if self._validated_vector_size is not None or self._payload_indexes_initialized:
+                return True
+            if self._collection_exists is None:
+                exists = self.client.collection_exists(self.collection_name)
+                if exists:
+                    self._collection_exists = True
+                return exists
+            return self._collection_exists
 
     def _ensure_payload_indexes_if_collection_exists(self) -> bool:
         with self._collection_lock:
             if self._payload_indexes_initialized:
                 return True
-            if not self.client.collection_exists(self.collection_name):
+            if self._collection_exists is None:
+                self._collection_exists = self.client.collection_exists(self.collection_name) or None
+            if not self._collection_exists:
                 return False
             ensure_payload_indexes(
                 self.client,

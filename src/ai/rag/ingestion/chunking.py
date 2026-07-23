@@ -16,27 +16,20 @@ from ai.config.settings import settings
 _LEGAL_SECTION_PATTERN = re.compile(
     r"^\s*("
     r"第[一二三四五六七八九十百千万\d]+[章节条款项]|"
-    r"\d+(?:\.\d+)*[\.)、]?|"
-    r"(?:Section|Article|Clause|Schedule|Exhibit|Appendix)\s+[\w\dIVXLC]+"
-    r")\s*[:：.-]?\s*(.*)$",
-    re.IGNORECASE,
+    r"[一二三四五六七八九十百千万]+、|"
+    r"[（(][一二三四五六七八九十百千万\d]+[）)]|"
+    r"\d+(?:\.\d+)*[\.)、]?"
+    r")\s*[:：.-]?\s*(.*)$"
 )
 
 INGESTION_CHUNK_SEPARATORS: tuple[str, ...] = (
     "\n第",
-    "\nSection ",
-    "\nArticle ",
-    "\nClause ",
-    "\nSchedule ",
-    "\nExhibit ",
     "\n\n",
     "\n",
-    "。 ",
+    "。",
+    "！",
+    "？",
     "；",
-    ". ",
-    "; ",
-    ", ",
-    " ",
     "",
 )
 

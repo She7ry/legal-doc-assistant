@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from threading import Lock
 
 from qdrant_client import models
@@ -38,7 +37,6 @@ class MemoryVectorStore:
     def __init__(
         self,
         collection_name: str | None = None,
-        persist_directory: Path | None = None,
         user_id: str = "local",
     ) -> None:
         self.user_id = user_id
@@ -46,11 +44,10 @@ class MemoryVectorStore:
             settings.memory_collection_name,
             self.user_id,
         )
-        self.vector_store = shared_qdrant_client(
-            Path(persist_directory or settings.memory_vector_store_dir)
-        )
+        self.vector_store = shared_qdrant_client(settings.vector_store_dir)
         self.embedding_model = build_embedding_model()
         self._collection_lock = Lock()
+        self._collection_exists: bool | None = None
         self._validated_vector_size: int | None = None
 
     def upsert_memory(self, memory: MemoryRecord) -> str:
@@ -125,6 +122,8 @@ class MemoryVectorStore:
     ) -> list[MemoryCandidate]:
         search_k = max(1, int(k or settings.memory_top_k))
         resolved_user_id = user_id or self.user_id
+        if not self._collection_exists_for_search():
+            return []
         embedding = [float(value) for value in self.embedding_model.embed_query(query)]
         self._ensure_collection(len(embedding))
         response = self.vector_store.query_points(
@@ -141,7 +140,7 @@ class MemoryVectorStore:
             metadata.pop(_MEMORY_RECORD_ID_PAYLOAD_KEY, None)
             embedded_text = str(metadata.pop(_MEMORY_DOCUMENT_PAYLOAD_KEY, ""))
             has_complete_metadata = "value_json" in metadata
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             created_at = metadata.get("created_at")
             updated_at = metadata.get("updated_at")
             expires_at = metadata.get("expires_at")
@@ -184,8 +183,21 @@ class MemoryVectorStore:
                 vector_size,
                 with_sparse=False,
                 payload_indexes=_MEMORY_PAYLOAD_INDEXES,
+                collection_exists=getattr(self, "_collection_exists", None),
             )
+            self._collection_exists = True
             self._validated_vector_size = vector_size
+
+    def _collection_exists_for_search(self) -> bool:
+        with self._collection_lock:
+            if self._validated_vector_size is not None:
+                return True
+            if getattr(self, "_collection_exists", None) is None:
+                exists = self.vector_store.collection_exists(self.collection_name)
+                if exists:
+                    self._collection_exists = True
+                return exists
+            return self._collection_exists
 
 
 def _memory_embedding_text(memory: MemoryRecord) -> str:

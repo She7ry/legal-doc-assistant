@@ -33,3 +33,24 @@ def test_compatible_endpoint_builds_chat_openai(monkeypatch) -> None:
     model = language_model.build_chat_model()
     assert isinstance(model, ChatOpenAI)
     assert model.openai_api_base == "https://example.test/v1"
+
+
+def test_deepseek_compatibility_omits_tool_choice_and_uses_json_mode(monkeypatch) -> None:
+    calls = {}
+
+    def bind_tools(self, tools, **kwargs):
+        calls["bind"] = kwargs
+        return self
+
+    def with_structured_output(self, schema, **kwargs):
+        calls["structured"] = kwargs
+        return self
+
+    monkeypatch.setattr(ChatDeepSeek, "bind_tools", bind_tools)
+    monkeypatch.setattr(ChatDeepSeek, "with_structured_output", with_structured_output)
+    model = ChatDeepSeek(model="test-model", api_key="test-key")
+
+    language_model.bind_chat_tools(model, [], tool_choice="search_documents")
+    language_model.structured_chat_output(model, dict)
+
+    assert calls == {"bind": {}, "structured": {"method": "json_mode"}}

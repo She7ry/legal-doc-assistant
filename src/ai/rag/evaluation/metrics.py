@@ -223,21 +223,15 @@ def _is_faithful_by_numbers(answer: str, context: str) -> bool:
 
 
 def _number_like_terms(text: str) -> list[str]:
-    return re.findall(
-        r"\b\d+(?:\.\d+)?(?:%|\s*(?:calendar\s+days?|business\s+days?|days?))\b"
-        r"|\b\d+(?:\.\d+)?%?",
-        text,
-    )
+    return re.findall(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?%?(?![A-Za-z0-9])", text)
 
 
 def _contains_all(text: str, terms: list[str]) -> bool:
-    normalized_text = text.casefold()
-    return all(str(term).casefold() in normalized_text for term in terms)
+    return all(str(term) in text for term in terms)
 
 
 def _contains_any(text: str, terms: list[str]) -> bool:
-    normalized_text = text.casefold()
-    return any(str(term).casefold() in normalized_text for term in terms)
+    return any(str(term) in text for term in terms)
 
 
 def _contains_refusal(text: str, case: dict[str, Any]) -> bool:

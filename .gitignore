@@ -42,6 +42,8 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/vector_store/*
 !data/vector_store/.gitkeep
+# Legacy local memory index; memories now share data/vector_store.
+data/memory_vector_store/*
 data/docusign_mcp_oauth*.json*
 data/ingest_jobs.sqlite3*
 data/agent_tasks.sqlite3*

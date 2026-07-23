@@ -12,15 +12,38 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_deepseek import ChatDeepSeek
 
+import ai.rag.qa_service as qa_service_module
 from ai import llm as language_model
 from ai.rag.qa_service import DocumentQAService
 from ai.rag.schemas import Citation
+from ai.utils.tokens import count_message_tokens
 from backend.routers.chat import _stream_answer_events
 
 
 class EmptyVectorStore:
     def search(self, query: str, k: int | None = None) -> list:
         return []
+
+
+def test_qa_messages_preserve_prompt_edges_within_token_budget(monkeypatch) -> None:
+    monkeypatch.setattr(
+        qa_service_module,
+        "settings",
+        qa_service_module.settings.with_overrides(
+            chat_context_max_tokens=2000,
+            chat_max_output_tokens=500,
+        ),
+    )
+    service = DocumentQAService(
+        vector_store=EmptyVectorStore(),
+        chat_model=FakeListChatModel(responses=["ok"]),
+    )
+
+    messages = service._build_messages("START\n" + "x" * 10_000 + "\nEND")
+
+    assert count_message_tokens(messages) <= 1500
+    assert messages[1]["content"].startswith("START")
+    assert messages[1]["content"].endswith("END")
 
 
 class StaticVectorStore:
@@ -85,9 +108,9 @@ def test_ask_uses_general_chat_when_no_documents_are_found() -> None:
 def test_aask_offloads_sync_rewrite_and_finalize() -> None:
     model = SlowFakeListChatModel(
         responses=[
-            "clause enforceability",
-            "The clause is invalid [S1].",
-            "The clause may be unenforceable and requires legal review [S1].",
+            "条款效力",
+            "该条款无效 [S1]。",
+            "该条款可能无法执行，需由律师审阅 [S1]。",
         ],
         heartbeat_ticks=[0],
         invocation_threads=[],
@@ -170,7 +193,7 @@ def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
     vector_store = StaticVectorStore(
         [
             Document(
-                page_content="Termination requires 30 days written notice.",
+                page_content="终止合同需要提前30日书面通知。",
                 metadata={"file_name": "contract.pdf", "page": 0, "chunk_id": 1},
             )
         ]
@@ -179,8 +202,8 @@ def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
         vector_store=vector_store,
         chat_model=FakeListChatModel(
             responses=[
-                "termination notice period",
-                "Termination requires 30 days written notice [S1].",
+                "终止通知期限",
+                "终止合同需要提前30日书面通知 [S1]。",
             ]
         ),
     )
@@ -188,13 +211,13 @@ def test_query_rewrite_uses_chat_history_for_vague_follow_up() -> None:
     answer = service.ask(
         "这个期限是多少？",
         chat_history=[
-            {"role": "user", "content": "请看 termination 条款。"},
+            {"role": "user", "content": "请看终止条款。"},
             {"role": "assistant", "content": "我会查看终止条款。"},
         ],
     )
 
-    assert vector_store.queries[0] == "termination notice period"
-    assert answer.content == "Termination requires 30 days written notice [S1]."
+    assert vector_store.queries[0] == "终止通知期限"
+    assert answer.content == "终止合同需要提前30日书面通知 [S1]。"
 
 
 def test_complex_question_uses_one_retrieval_query_and_checks_citation_support() -> None:
@@ -202,7 +225,7 @@ def test_complex_question_uses_one_retrieval_query_and_checks_citation_support()
         [
             Document(
                 page_content=(
-                    "Payment is due within 30 days. Termination requires 10 days written notice."
+                    "付款期限为30日，终止合同需要提前10日书面通知。"
                 ),
                 metadata={"file_name": "contract.pdf", "page": 0, "chunk_id": 1},
             )
@@ -211,15 +234,13 @@ def test_complex_question_uses_one_retrieval_query_and_checks_citation_support()
     service = DocumentQAService(
         vector_store=vector_store,
         chat_model=FakeListChatModel(
-            responses=["Payment is due within 30 days [S1]. Termination requires 10 days notice [S1]."]
+            responses=["付款期限为30日 [S1]。终止合同需要提前10日通知 [S1]。"]
         ),
     )
 
-    answer = service.ask("Compare payment terms; identify the termination notice period.")
+    answer = service.ask("比较付款期限，并说明终止通知期限。")
 
-    assert vector_store.queries == [
-        "Compare payment terms; identify the termination notice period."
-    ]
+    assert vector_store.queries == ["比较付款期限，并说明终止通知期限。"]
     assert all(check["status"] == "supported" for check in answer.metadata["citation_support"])
 
 
@@ -233,7 +254,7 @@ def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
             Citation(
                 source_id="S1",
                 file_name="contract.pdf",
-                preview="The notice period is 30 days.",
+                preview="通知期限为30日。",
             )
         ],
         memories_used=prepared.memories_used,
@@ -243,7 +264,7 @@ def test_lightweight_repair_removes_invalid_citation_without_llm_call() -> None:
         has_retrieved_documents=True,
     )
 
-    answer = service.finalize_prepared_answer(prepared, "The notice period is 30 days [S9].")
+    answer = service.finalize_prepared_answer(prepared, "通知期限为30日 [S9]。")
 
     assert "[S9]" not in answer.content
     assert "[S1]" in answer.content
@@ -253,7 +274,7 @@ def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() 
     vector_store = StaticVectorStore(
         [
             Document(
-                page_content="The customer may terminate this agreement with 30 days written notice.",
+                page_content="客户可以提前30日书面通知终止本协议。",
                 metadata={"file_name": "contract.pdf", "page": 0, "chunk_id": 4},
             )
         ]
@@ -288,9 +309,9 @@ def test_review_clause_returns_structured_metadata_and_expands_taxonomy_query() 
         ),
     )
 
-    answer = service.review_clause("termination", top_k=1)
+    answer = service.review_clause("终止条款", top_k=1)
 
-    assert "early cancellation" in vector_store.queries[0]
+    assert "提前终止" in vector_store.queries[0]
     assert answer.metadata["risk_level"] == "Medium"
     assert answer.metadata["risk_reasons"] == [
         {

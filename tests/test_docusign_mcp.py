@@ -26,6 +26,7 @@ from ai.mcp.docusign import (
     _user_token_path,
 )
 from ai.rag.qa_service import DocumentQAService
+from ai.skills.docusign_agreements import DOCUSIGN_AGREEMENT_REVIEW_SKILL
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 fake_docusign = FastMCP("Fake Docusign")
@@ -126,12 +127,10 @@ def test_docusign_skill_body_enters_system_prompt_when_enabled(monkeypatch, tmp_
     service = ToolCallingChatService(
         DocumentQAService(vector_store=EmptyVectorStore(), chat_model=NativeFallbackModel())
     )
-    body = tool_service_module.DOCUSIGN_SKILL_PATH.read_text(encoding="utf-8").split("---", 2)[2]
-
     system_prompt = service._initial_messages("查询协议。", [])[0]["content"]
 
-    assert body.strip() in system_prompt
-    assert "name: review-docusign-agreements" not in system_prompt
+    assert DOCUSIGN_AGREEMENT_REVIEW_SKILL in system_prompt
+    assert '<trusted_backend_skill name="review-docusign-agreements">' in system_prompt
 
 
 def test_docusign_skill_is_not_loaded_when_mcp_is_disabled(monkeypatch) -> None:
@@ -144,43 +143,9 @@ def test_docusign_skill_is_not_loaded_when_mcp_is_disabled(monkeypatch) -> None:
     system_prompt = service._initial_messages("查询协议。", [])[0]["content"]
 
     assert "review-docusign-agreements" not in system_prompt
-
-
-def test_docusign_skill_load_failure_warns_and_continues(
-    monkeypatch,
-    tmp_path: Path,
-    caplog,
-) -> None:
-    _enable_docusign(monkeypatch, tmp_path)
-    monkeypatch.setattr(tool_service_module, "DOCUSIGN_SKILL_PATH", tmp_path / "missing.md")
-    service = ToolCallingChatService(
-        DocumentQAService(vector_store=EmptyVectorStore(), chat_model=NativeFallbackModel())
-    )
-
-    system_prompt = service._initial_messages("查询协议。", [])[0]["content"]
-
-    assert "trusted_project_skill" not in system_prompt
-    assert "Docusign skill could not be loaded" in caplog.text
-
-
-def test_docusign_skill_metadata_matches_runtime_dependency() -> None:
-    skill_dir = tool_service_module.DOCUSIGN_SKILL_PATH.parent
-    skill_text = tool_service_module.DOCUSIGN_SKILL_PATH.read_text(encoding="utf-8")
-    frontmatter = skill_text.split("---", 2)[1].strip().splitlines()
-    metadata = (skill_dir / "agents" / "openai.yaml").read_text(encoding="utf-8")
-    short_description = next(
-        line.split(":", 1)[1].strip().strip('"')
-        for line in metadata.splitlines()
-        if line.strip().startswith("short_description:")
-    )
-
-    assert [line.split(":", 1)[0] for line in frontmatter] == ["name", "description"]
-    assert 25 <= len(short_description) <= 64
-    assert "$review-docusign-agreements" in metadata
-    assert 'type: "mcp"' in metadata
-    assert 'value: "docusign"' in metadata
-    assert 'transport: "streamable_http"' in metadata
-    assert 'url: "https://mcp-d.docusign.com/mcp"' in metadata
+    assert "getUserInfo" not in system_prompt
+    assert "getAllAgreements" not in system_prompt
+    assert "getAgreementDetails" not in system_prompt
 
 
 def test_tool_calling_service_uses_only_read_only_docusign_tools(monkeypatch, tmp_path: Path) -> None:

@@ -24,61 +24,50 @@ from ai.rag.schemas import Citation
 CITATION_PATTERN = re.compile(r"\[(?:S|D|C|P|W)\d+\]")
 # 需软化的强法律结论表述，避免模型给出确定性胜诉/无效等承诺。
 _STRONG_LEGAL_CONCLUSION_PATTERNS = (
-    r"\bguarantee(?:d|s)?\b",
-    r"\bwill definitely\b",
-    r"\bwill certainly\b",
-    r"\bmust win\b",
-    r"\bwill win\b",
-    r"\bis invalid\b",
-    r"\b必然胜诉\b",
-    r"\b一定能赢\b",
-    r"\b一定会赢\b",
-    r"\b该条款无效\b",
-    r"\b条款无效\b",
-    r"\b必然\b",
-    r"\b一定会\b",
-    r"\b必定\b",
-    r"\b保证胜诉\b",
+    r"必然胜诉",
+    r"一定能赢",
+    r"一定会赢",
+    r"该条款无效",
+    r"条款无效",
+    r"必然",
+    r"一定会",
+    r"必定",
+    r"保证胜诉",
 )
 # 法条、判例、法规缩写等权威引用，附近必须有 [Sx] 标注来源。
 _UNSOURCED_AUTHORITY_PATTERNS = (
-    r"\b(?:U\.?S\.?C\.?|C\.?F\.?R\.?)\s*\S+",
-    r"\b\d+\s+U\.?S\.?C\.?\s*\S+",
-    r"\bv\.\s+[A-Z][A-Za-z'.-]+",
-    r"\b(?:GDPR|CCPA|HIPAA|SOX)\b",
-    r"\b(?:民法典|刑法|劳动法|合同法|公司法)\b",
-    r"\b第[一二三四五六七八九十百千\d]+条\b",
+    r"(?:民法典|刑法|劳动法|合同法|公司法)",
+    r"第[一二三四五六七八九十百千\d]+条",
 )
 # 具体事实（日期、金额、期限等），附近必须有引用或能在检索片段中找到。
 _UNSOURCED_FACT_PATTERNS = (
-    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-    r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
-    r"\$\s?\d[\d,]*(?:\.\d+)?",
-    r"\b\d+(?:\.\d+)?%\b",
-    r"\b\d+\s+(?:days?|business days?|calendar days?|months?|years?)\b",
-    r"\b\d{4}年\d{1,2}月\d{1,2}日\b",
+    r"\d+(?:\.\d+)?%",
+    r"\d{4}年\d{1,2}月(?:\d{1,2}日)?",
+    r"(?:人民币|[￥¥])\s*\d[\d,]*(?:\.\d+)?(?:万|亿)?元?",
+    r"\d[\d,]*(?:\.\d+)?(?:万|亿)?元",
+    r"\d+\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)",
 )
 STRONG_LEGAL_CONCLUSION_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE) for pattern in _STRONG_LEGAL_CONCLUSION_PATTERNS
+    re.compile(pattern) for pattern in _STRONG_LEGAL_CONCLUSION_PATTERNS
 )
 UNSOURCED_AUTHORITY_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE) for pattern in _UNSOURCED_AUTHORITY_PATTERNS
+    re.compile(pattern) for pattern in _UNSOURCED_AUTHORITY_PATTERNS
 )
 UNSOURCED_FACT_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE) for pattern in _UNSOURCED_FACT_PATTERNS
+    re.compile(pattern) for pattern in _UNSOURCED_FACT_PATTERNS
 )
 # 无检索文档时，答案应包含这些措辞以表明证据不足，而非凭空作答。
 REFUSAL_TERMS = (
-    "not found",
-    "not provided",
-    "cannot determine",
-    "not enough information",
-    "relevant text was not found",
-    "did not find enough relevant text",
-    "do not contain",
-    "does not contain",
-    "未发现明显缺失信息",
+    "未找到",
+    "未检索到",
+    "未提供",
+    "无法确定",
+    "无法判断",
+    "无法完整回答",
+    "没有足够信息",
     "信息不足",
+    "文档未说明",
+    "文档中未说明",
 )
 
 
@@ -220,10 +209,9 @@ def _non_empty_paragraphs(text: str) -> list[str]:
 
 def _looks_like_material_paragraph(paragraph: str) -> bool:
     """判断段落是否为需要强制引用的实质性论述（非元信息、足够长）。"""
-    lowered = paragraph.casefold()
-    if lowered.startswith(("answer:", "assistant:", "note:")):
+    if paragraph.startswith(("回答：", "助手：", "备注：", "置信度：")):
         return False
-    return len(paragraph) >= 40
+    return len(paragraph) >= 12
 
 
 def _fact_supported_nearby(
@@ -237,12 +225,14 @@ def _fact_supported_nearby(
     if index < 0:
         return True
 
-    window = text[max(0, index - 120) : index + len(fact) + 120]
-    if CITATION_PATTERN.search(window):
+    line_start = text.rfind("\n", 0, index) + 1
+    line_end = text.find("\n", index)
+    line = text[line_start : line_end if line_end >= 0 else len(text)]
+    if CITATION_PATTERN.search(line):
         return True
 
     context = "\n".join(citation.preview for citation in citations)
-    return fact.casefold() in context.casefold()
+    return fact in context
 
 
 def _authority_supported_nearby(text: str, start: int, cited_ids: set[str]) -> bool:
@@ -251,5 +241,4 @@ def _authority_supported_nearby(text: str, start: int, cited_ids: set[str]) -> b
 
 
 def _contains_refusal(text: str) -> bool:
-    lowered = text.casefold()
-    return any(term.casefold() in lowered for term in REFUSAL_TERMS)
+    return any(term in text for term in REFUSAL_TERMS)

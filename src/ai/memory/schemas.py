@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final, Literal, get_args
 
 MemoryScope = Literal["user", "session", "task"]
@@ -90,7 +90,7 @@ class MemoryRecord:
     def is_expired(self, now: datetime | None = None) -> bool:
         if self.expires_at is None:
             return False
-        return self.expires_at <= (now or datetime.now(timezone.utc))
+        return self.expires_at <= (now or datetime.now(UTC))
 
 
 @dataclass(frozen=True)

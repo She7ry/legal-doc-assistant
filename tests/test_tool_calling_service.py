@@ -10,7 +10,7 @@ from pydantic import Field
 
 import ai.agent.tool_calling as tool_calling_module
 from ai.agent import context as react_context_module
-from ai.agent.tool_calling import ToolCallingChatService
+from ai.agent.tool_calling import ToolCallingChatService, keyword_tool_for_question
 from ai.agent.tools.web_search import WebSearchResult
 from ai.memory.schemas import MemoryCandidate
 from ai.memory.service import MemoryService
@@ -66,6 +66,7 @@ class DocumentToolModel(BaseChatModel):
     calls: int = 0
     messages: list[list] = Field(default_factory=list)
     bound_tool_names: list[str] = Field(default_factory=list)
+    bound_tool_choices: list[str] = Field(default_factory=list)
     tool_name: str = "search_documents"
     tool_args: dict = Field(default_factory=lambda: {"query": "payment terms", "top_k": 2})
     final_content: str = "Payment must be made within 30 days [D1]."
@@ -75,8 +76,8 @@ class DocumentToolModel(BaseChatModel):
         return "tool-test"
 
     def bind_tools(self, tools, **kwargs):
-        del kwargs
         self.bound_tool_names = [tool.name for tool in tools]
+        self.bound_tool_choices.append(str(kwargs.get("tool_choice")))
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
@@ -169,6 +170,33 @@ class FakeWebSearchClient:
         ]
 
 
+def test_keyword_tool_routing_precedes_llm_semantic_routing() -> None:
+    assert keyword_tool_for_question("对比合同和政策中的付款期限") == "check_conflict"
+    assert keyword_tool_for_question("请审查终止条款风险") == "review_clause"
+    assert keyword_tool_for_question("合同的付款期限是什么？") == "search_documents"
+    assert keyword_tool_for_question("你好，今天怎么样？") is None
+
+
+def test_keyword_hit_forces_first_tool_and_miss_keeps_auto_choice() -> None:
+    keyword_model = DocumentToolModel()
+    keyword_answer = ToolCallingChatService(
+        DocumentQAService(vector_store=SingleDocumentVectorStore(), chat_model=keyword_model)
+    ).ask("合同的付款期限是什么？")
+
+    semantic_model = DocumentToolModel()
+    semantic_answer = ToolCallingChatService(
+        DocumentQAService(vector_store=SingleDocumentVectorStore(), chat_model=semantic_model)
+    ).ask("How can you help me?")
+
+    assert keyword_model.bound_tool_choices[:2] == ["auto", "search_documents"]
+    assert keyword_answer.metadata["routing"] == {
+        "source": "keyword",
+        "tool": "search_documents",
+    }
+    assert semantic_model.bound_tool_choices == ["auto"]
+    assert semantic_answer.metadata["routing"]["source"] == "llm"
+
+
 def test_tool_calling_service_executes_search_documents_tool() -> None:
     vector_store = SingleDocumentVectorStore()
     model = DocumentToolModel()
@@ -206,7 +234,10 @@ def test_react_context_is_bounded_and_full_trace_is_preserved(monkeypatch) -> No
     monkeypatch.setattr(
         tool_calling_module,
         "settings",
-        tool_calling_module.settings.with_overrides(tool_call_context_max_chars=8000),
+        tool_calling_module.settings.with_overrides(
+            chat_context_max_tokens=6000,
+            chat_max_output_tokens=1000,
+        ),
     )
     model = RepeatedDocumentToolModel()
     service = ToolCallingChatService(
@@ -221,7 +252,7 @@ def test_react_context_is_bounded_and_full_trace_is_preserved(monkeypatch) -> No
         for message in final_messages
         if isinstance(message, HumanMessage) and message.name == "react_checkpoint"
     )
-    assert react_context_module._messages_chars(final_messages) <= 8000
+    assert react_context_module._messages_tokens(final_messages) <= 5000
     assert "D1" in str(checkpoint.content)
     assert sum(isinstance(message, ToolMessage) for message in final_messages) == 1
     assert len(answer.tool_calls) == 4
@@ -232,7 +263,10 @@ def test_initial_history_is_tail_packed_to_context_budget(monkeypatch) -> None:
     monkeypatch.setattr(
         tool_calling_module,
         "settings",
-        tool_calling_module.settings.with_overrides(tool_call_context_max_chars=6000),
+        tool_calling_module.settings.with_overrides(
+            chat_context_max_tokens=4000,
+            chat_max_output_tokens=1000,
+        ),
     )
     service = ToolCallingChatService(
         DocumentQAService(vector_store=EmptyVectorStore(), chat_model=DocumentToolModel())
@@ -246,7 +280,7 @@ def test_initial_history_is_tail_packed_to_context_budget(monkeypatch) -> None:
         ],
     )
 
-    assert sum(react_context_module._dict_message_chars(message) for message in messages) <= 3000
+    assert sum(react_context_module._dict_message_tokens(message) for message in messages) <= 1500
     assert any("RECENT" in str(message["content"]) for message in messages)
     assert all("OLD" not in str(message["content"]) for message in messages)
 

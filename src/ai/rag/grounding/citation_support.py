@@ -1,4 +1,4 @@
-"""Claim-level semantic checks that complement citation format validation."""
+"""用于补充引用格式校验的中文主张级语义检查。"""
 
 from __future__ import annotations
 
@@ -9,14 +9,11 @@ from ai.rag.schemas import Citation
 
 CITATION_PATTERN = re.compile(r"\[([SCDPW]\d+)\]", re.IGNORECASE)
 _NUMBER = re.compile(
-    r"\$?\d[\d,]*(?:\.\d+)?%?|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|"
-    r"\d{4}年\d{1,2}月\d{1,2}日"
+    r"\d[\d,]*(?:\.\d+)?%?|\d{4}年\d{1,2}月(?:\d{1,2}日)?|"
+    r"(?:人民币|[￥¥])\s*\d[\d,]*(?:\.\d+)?(?:万|亿)?元?|"
+    r"\d[\d,]*(?:\.\d+)?(?:万|亿)?元"
 )
-_TOKEN = re.compile(r"[a-z][a-z0-9'-]{2,}|[\u4e00-\u9fff]+", re.IGNORECASE)
-_STOP = {
-    "and", "are", "for", "from", "has", "have", "into", "not", "that", "the", "their",
-    "this", "was", "were", "with", "within", "source", "section",
-}
+_TOKEN = re.compile(r"[\u4e00-\u9fff]+")
 
 
 @dataclass(frozen=True)
@@ -72,7 +69,7 @@ def _material_claims(text: str) -> list[str]:
         stripped = line.strip().lstrip("-*0123456789. ")
         if not stripped or stripped.startswith("#"):
             continue
-        claims.extend(part.strip() for part in re.split(r"(?<=[.!?。！？])\s+", stripped) if part.strip())
+        claims.extend(part.strip() for part in re.split(r"(?<=[。！？])\s*", stripped) if part.strip())
     return claims
 
 
@@ -114,10 +111,8 @@ def lexical_coverage(claim: str, source: str) -> float:
 
 def semantic_tokens(text: str) -> set[str]:
     tokens: set[str] = set()
-    for token in _TOKEN.findall(text.casefold()):
-        if token in _STOP:
-            continue
-        if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
+    for token in _TOKEN.findall(text):
+        if len(token) > 2:
             tokens.update(token[index : index + 2] for index in range(len(token) - 1))
         else:
             tokens.add(token)
@@ -125,9 +120,9 @@ def semantic_tokens(text: str) -> set[str]:
 
 
 def _normalize_number(value: str) -> str:
-    return value.replace(",", "").replace(" ", "").casefold()
+    return value.replace(",", "").replace(" ", "")
 
 
 def _is_locator_number(text: str, start: int) -> bool:
-    prefix = text[max(0, start - 12) : start].casefold()
-    return bool(re.search(r"(?:section|article|clause|§|第)\s*$", prefix))
+    prefix = text[max(0, start - 12) : start]
+    return bool(re.search(r"第\s*$", prefix))

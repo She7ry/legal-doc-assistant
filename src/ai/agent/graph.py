@@ -6,6 +6,7 @@ import logging
 from dataclasses import asdict
 from typing import Any, TypedDict
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from ai.agent._helpers import _remap_metadata, _remap_source_refs
@@ -51,6 +52,7 @@ def run_planned_react_task(
     conversation_id: str | None,
     task_id: str,
     progress_callback,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> AgentTaskResult:
     if progress_callback:
         progress_callback(
@@ -206,11 +208,7 @@ def run_planned_react_task(
                 warning
                 for warning in (
                     *state["synthesis_warnings"],
-                    *(
-                        warning
-                        for step in state["step_results"]
-                        for warning in step.guard_warnings
-                    ),
+                    *(warning for step in state["step_results"] for warning in step.guard_warnings),
                     *state["guard_result"].issues,
                 )
                 if warning
@@ -248,6 +246,7 @@ def run_planned_react_task(
             metadata={
                 "user_role": user_role,
                 "runtime": "react_langgraph_bounded_v1",
+                "checkpointing": checkpointer is not None,
                 "planning_mode": state["planning_mode"],
                 "planned_step_count": len(state["planned_steps"]),
                 "user_id": user_id,
@@ -283,19 +282,26 @@ def run_planned_react_task(
     )
     graph.add_edge("repair", "finalize")
     graph.add_edge("finalize", END)
-    final_state = graph.compile().invoke(
-        {
-            "planned_steps": planned_steps,
-            "planning_mode": planning_mode,
-            "next_step": 0,
-            "attempt": 0,
-            "retry_step": False,
-            "step_results": [],
-            "citations": [],
-            "citations_by_key": {},
-            "synthesis_warnings": [],
-        }
-    )
+    compiled = graph.compile(checkpointer=checkpointer)
+    initial_state = {
+        "planned_steps": planned_steps,
+        "planning_mode": planning_mode,
+        "next_step": 0,
+        "attempt": 0,
+        "retry_step": False,
+        "step_results": [],
+        "citations": [],
+        "citations_by_key": {},
+        "synthesis_warnings": [],
+    }
+    if checkpointer is None:
+        final_state = compiled.invoke(initial_state)
+    else:
+        config = {"configurable": {"thread_id": f"{task_id}:planned"}}
+        snapshot = compiled.get_state(config)
+        if snapshot.values.get("result") is not None:
+            return snapshot.values["result"]
+        final_state = compiled.invoke(None if snapshot.next else initial_state, config=config)
     return final_state["result"]
 
 

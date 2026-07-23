@@ -11,11 +11,12 @@ import json
 import logging
 from dataclasses import dataclass, field, replace
 from threading import Lock
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.utils import convert_to_messages
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.graph import END, START, StateGraph
 from mcp import ClientSession
 from mcp.types import CallToolResult, Tool
 from pydantic import BaseModel, Field, field_validator
@@ -25,7 +26,7 @@ from ai.agent.context import (
     ToolCallTrace,
     _compact_tool_result,
     _compress_react_context,
-    _dict_message_chars,
+    _dict_message_tokens,
     _fit_history_messages,
 )
 from ai.agent.tools.document_search import (
@@ -40,7 +41,8 @@ from ai.agent.tools.web_search import (
     web_source,
     web_source_citations,
 )
-from ai.config.settings import PROJECT_ROOT, settings
+from ai.config.settings import settings
+from ai.llm import bind_chat_tools
 from ai.mcp.client import (
     discover_tools,
     langchain_tool_schema,
@@ -55,9 +57,45 @@ from ai.rag.grounding.guard import validate_answer
 from ai.rag.qa_service import DocumentQAService
 from ai.rag.retrieval.document_identity import document_identity
 from ai.rag.schemas import Citation
+from ai.review.taxonomy import CLAUSE_PROFILES
+from ai.skills.docusign_agreements import DOCUSIGN_AGREEMENT_REVIEW_SKILL
 
 logger = logging.getLogger(__name__)
-DOCUSIGN_SKILL_PATH = PROJECT_ROOT / "skills" / "review-docusign-agreements" / "SKILL.md"
+
+_CONFLICT_KEYWORDS = (
+    "冲突",
+    "矛盾",
+    "不一致",
+    "对比",
+    "比较",
+)
+_REVIEW_KEYWORDS = ("审查", "审核", "评估", "风险")
+_DOCUMENT_KEYWORDS = (
+    "合同",
+    "协议",
+    "文档",
+    "条款",
+    "政策",
+    "附件",
+    "已上传",
+    "索引",
+    *(
+        term
+        for profile in CLAUSE_PROFILES
+        for term in (profile.label, *profile.aliases, *profile.query_terms)
+    ),
+)
+
+
+def keyword_tool_for_question(question: str) -> str | None:
+    """关键词先行；没有明确命中时交给模型自行选择工具。"""
+    if any(keyword in question for keyword in _CONFLICT_KEYWORDS):
+        return "check_conflict"
+    if any(keyword in question for keyword in _REVIEW_KEYWORDS):
+        return "review_clause"
+    if any(keyword in question for keyword in _DOCUMENT_KEYWORDS):
+        return "search_documents"
+    return None
 
 
 class ReviewClauseInput(BaseModel):
@@ -91,31 +129,13 @@ class CheckConflictInput(BaseModel):
         return value
 
 
-def _load_docusign_skill_body() -> str:
-    try:
-        raw = DOCUSIGN_SKILL_PATH.read_text(encoding="utf-8")
-        if not raw.startswith("---"):
-            raise ValueError("missing YAML frontmatter")
-        _, _, body = raw.split("---", 2)
-        if not (body := body.strip()):
-            raise ValueError("empty skill body")
-        return body
-    except (OSError, UnicodeError, ValueError):
-        logger.warning(
-            "Docusign skill could not be loaded; continuing without it.",
-            extra={"skill_path": str(DOCUSIGN_SKILL_PATH)},
-            exc_info=True,
-        )
-        return ""
-
-
 def build_tool_system_prompt() -> str:
     """组装 tool-calling 模式的可信系统 prompt。"""
     prompt = f"{load_base_legal_prompt()}\n\n{load_prompt('tool_calling_system.txt')}"
-    if settings.docusign_mcp_enabled and (skill_body := _load_docusign_skill_body()):
+    if settings.docusign_mcp_enabled:
         prompt = (
-            f'{prompt}\n\n<trusted_project_skill name="review-docusign-agreements">\n'
-            f"{skill_body}\n</trusted_project_skill>"
+            f'{prompt}\n\n<trusted_backend_skill name="review-docusign-agreements">\n'
+            f"{DOCUSIGN_AGREEMENT_REVIEW_SKILL}\n</trusted_backend_skill>"
         )
     return prompt
 
@@ -152,6 +172,12 @@ class _ToolExecutionState:
     lock: Lock = field(default_factory=Lock)
 
 
+class _ReactLoopState(TypedDict, total=False):
+    messages: list[Any]
+    iteration: int
+    content: str
+
+
 class ToolCallingChatService:
     """支持多轮工具调用的对话服务（ReAct 模式）。
 
@@ -186,6 +212,7 @@ class ToolCallingChatService:
     ) -> ToolCallingAnswer:
         """运行有上限的工具调用循环：模型选 tool → 执行 → 合成答案。"""
         exec_state = _ToolExecutionState()
+        preferred_tool = keyword_tool_for_question(question)
         memory_context = self._prepare_memory_context(
             question,
             chat_history=chat_history or [],
@@ -206,7 +233,9 @@ class ToolCallingChatService:
         )
 
         if not settings.docusign_mcp_enabled:
-            content = self._run_tool_loop(messages, tools, iterations, exec_state)
+            content = self._run_tool_loop(
+                messages, tools, iterations, exec_state, preferred_tool=preferred_tool
+            )
         else:
             try:
                 # ponytail: request-scoped sessions avoid shared event-loop/thread lifecycle;
@@ -217,6 +246,7 @@ class ToolCallingChatService:
                         tools,
                         iterations,
                         exec_state,
+                        preferred_tool=preferred_tool,
                     )
                 )
             except Exception:
@@ -226,8 +256,12 @@ class ToolCallingChatService:
                 )
                 exec_state = _ToolExecutionState()
                 tools = self._build_tools(exec_state, enable_web_search=enable_web_search)
-                content = self._run_tool_loop(messages, tools, iterations, exec_state)
-        return self._finalize_answer(content, exec_state, memory_context, question)
+                content = self._run_tool_loop(
+                    messages, tools, iterations, exec_state, preferred_tool=preferred_tool
+                )
+        return self._finalize_answer(
+            content, exec_state, memory_context, question, preferred_tool=preferred_tool
+        )
 
     def _run_tool_loop(
         self,
@@ -235,23 +269,41 @@ class ToolCallingChatService:
         tools: list[BaseTool],
         max_iterations: int,
         state: _ToolExecutionState,
+        *,
+        preferred_tool: str | None = None,
     ) -> str:
         conversation = convert_to_messages(messages)
         initial_message_count = len(conversation)
-        model_with_tools = self.chat_model.bind_tools(tools, tool_choice="auto")
+        model_with_tools = bind_chat_tools(self.chat_model, tools, tool_choice="auto")
+        first_model = (
+            bind_chat_tools(self.chat_model, tools, tool_choice=preferred_tool)
+            if preferred_tool
+            else model_with_tools
+        )
         tools_by_name = {item.name: item for item in tools}
 
-        for _ in range(max_iterations):
-            conversation = _compress_react_context(
-                conversation,
+        def call_model(graph_state: _ReactLoopState) -> _ReactLoopState:
+            compacted = _compress_react_context(
+                graph_state["messages"],
                 initial_message_count=initial_message_count,
                 traces=state.tool_calls,
-                max_chars=settings.tool_call_context_max_chars,
+                max_tokens=settings.chat_input_max_tokens,
+                tools=tools,
             )
-            response = model_with_tools.invoke(conversation)
-            conversation.append(response)
-            if not response.tool_calls:
-                return str(response.content or "")
+            iteration = graph_state["iteration"]
+            response = (first_model if iteration == 0 else model_with_tools).invoke(compacted)
+            return {
+                "messages": [*compacted, response],
+                "iteration": iteration + 1,
+                "content": "" if response.tool_calls else str(response.content or ""),
+            }
+
+        def route_after_model(graph_state: _ReactLoopState) -> str:
+            return "tools" if graph_state["messages"][-1].tool_calls else "done"
+
+        def call_tools(graph_state: _ReactLoopState) -> _ReactLoopState:
+            conversation = list(graph_state["messages"])
+            response = conversation[-1]
             for call in response.tool_calls:
                 selected = tools_by_name.get(call["name"])
                 if selected is None:
@@ -261,15 +313,34 @@ class ToolCallingChatService:
                     conversation.append(selected.invoke({**call, "type": "tool_call"}))
                 except Exception:
                     conversation.append(_failed_tool_message(call))
+            return {"messages": conversation}
 
-        conversation = _compress_react_context(
-            conversation,
-            initial_message_count=initial_message_count,
-            traces=state.tool_calls,
-            max_chars=settings.tool_call_context_max_chars,
+        def route_after_tools(graph_state: _ReactLoopState) -> str:
+            return "final_model" if graph_state["iteration"] >= max_iterations else "model"
+
+        def call_final_model(graph_state: _ReactLoopState) -> _ReactLoopState:
+            compacted = _compress_react_context(
+                graph_state["messages"],
+                initial_message_count=initial_message_count,
+                traces=state.tool_calls,
+                max_tokens=settings.chat_input_max_tokens,
+                tools=tools,
+            )
+            response = self.chat_model.invoke(compacted)
+            return {"messages": [*compacted, response], "content": str(response.content or "")}
+
+        graph = StateGraph(_ReactLoopState)
+        graph.add_node("model", call_model)
+        graph.add_node("tools", call_tools)
+        graph.add_node("final_model", call_final_model)
+        graph.add_edge(START, "model")
+        graph.add_conditional_edges("model", route_after_model, {"tools": "tools", "done": END})
+        graph.add_conditional_edges(
+            "tools", route_after_tools, {"model": "model", "final_model": "final_model"}
         )
-        response = self.chat_model.invoke(conversation)
-        return str(response.content or "")
+        graph.add_edge("final_model", END)
+        final_state = graph.compile().invoke({"messages": conversation, "iteration": 0})
+        return final_state["content"]
 
     async def _run_docusign_tool_loop(
         self,
@@ -277,6 +348,8 @@ class ToolCallingChatService:
         native_tools: list[BaseTool],
         max_iterations: int,
         state: _ToolExecutionState,
+        *,
+        preferred_tool: str | None = None,
     ) -> str:
         async with open_docusign_session(
             settings.docusign_client_id,
@@ -301,6 +374,7 @@ class ToolCallingChatService:
                 native_tools,
                 max_iterations,
                 state,
+                preferred_tool=preferred_tool,
             )
 
     async def _run_mcp_tool_loop(
@@ -311,6 +385,8 @@ class ToolCallingChatService:
         native_tools: list[BaseTool],
         max_iterations: int,
         state: _ToolExecutionState,
+        *,
+        preferred_tool: str | None = None,
     ) -> str:
         conversation = convert_to_messages(messages)
         initial_message_count = len(conversation)
@@ -318,22 +394,46 @@ class ToolCallingChatService:
         mcp_by_name = {item.name: item for item in mcp_tools}
         if native_by_name.keys() & mcp_by_name.keys():
             raise RuntimeError("MCP tool name conflicts with a native tool.")
-        model_with_tools = self.chat_model.bind_tools(
-            [*native_tools, *(langchain_tool_schema(item) for item in mcp_tools)],
+        available_tools = [*native_tools, *(langchain_tool_schema(item) for item in mcp_tools)]
+        model_with_tools = bind_chat_tools(
+            self.chat_model,
+            available_tools,
             tool_choice="auto",
         )
+        first_model = (
+            bind_chat_tools(
+                self.chat_model,
+                available_tools,
+                tool_choice=preferred_tool,
+            )
+            if preferred_tool
+            else model_with_tools
+        )
 
-        for _ in range(max_iterations):
-            conversation = _compress_react_context(
-                conversation,
+        async def call_model(graph_state: _ReactLoopState) -> _ReactLoopState:
+            compacted = _compress_react_context(
+                graph_state["messages"],
                 initial_message_count=initial_message_count,
                 traces=state.tool_calls,
-                max_chars=settings.tool_call_context_max_chars,
+                max_tokens=settings.chat_input_max_tokens,
+                tools=available_tools,
             )
-            response = await model_with_tools.ainvoke(conversation)
-            conversation.append(response)
-            if not response.tool_calls:
-                return str(response.content or "")
+            iteration = graph_state["iteration"]
+            response = await (first_model if iteration == 0 else model_with_tools).ainvoke(
+                compacted
+            )
+            return {
+                "messages": [*compacted, response],
+                "iteration": iteration + 1,
+                "content": "" if response.tool_calls else str(response.content or ""),
+            }
+
+        def route_after_model(graph_state: _ReactLoopState) -> str:
+            return "tools" if graph_state["messages"][-1].tool_calls else "done"
+
+        async def call_tools(graph_state: _ReactLoopState) -> _ReactLoopState:
+            conversation = list(graph_state["messages"])
+            response = conversation[-1]
             for call in response.tool_calls:
                 name = call["name"]
                 if selected := native_by_name.get(name):
@@ -371,15 +471,34 @@ class ToolCallingChatService:
                         status=status,
                     )
                 )
+            return {"messages": conversation}
 
-        conversation = _compress_react_context(
-            conversation,
-            initial_message_count=initial_message_count,
-            traces=state.tool_calls,
-            max_chars=settings.tool_call_context_max_chars,
+        def route_after_tools(graph_state: _ReactLoopState) -> str:
+            return "final_model" if graph_state["iteration"] >= max_iterations else "model"
+
+        async def call_final_model(graph_state: _ReactLoopState) -> _ReactLoopState:
+            compacted = _compress_react_context(
+                graph_state["messages"],
+                initial_message_count=initial_message_count,
+                traces=state.tool_calls,
+                max_tokens=settings.chat_input_max_tokens,
+                tools=available_tools,
+            )
+            response = await self.chat_model.ainvoke(compacted)
+            return {"messages": [*compacted, response], "content": str(response.content or "")}
+
+        graph = StateGraph(_ReactLoopState)
+        graph.add_node("model", call_model)
+        graph.add_node("tools", call_tools)
+        graph.add_node("final_model", call_final_model)
+        graph.add_edge(START, "model")
+        graph.add_conditional_edges("model", route_after_model, {"tools": "tools", "done": END})
+        graph.add_conditional_edges(
+            "tools", route_after_tools, {"model": "model", "final_model": "final_model"}
         )
-        response = await self.chat_model.ainvoke(conversation)
-        return str(response.content or "")
+        graph.add_edge("final_model", END)
+        final_state = await graph.compile().ainvoke({"messages": conversation, "iteration": 0})
+        return final_state["content"]
 
     @staticmethod
     def _docusign_result(
@@ -418,6 +537,8 @@ class ToolCallingChatService:
         state: _ToolExecutionState,
         memory_context: MemoryPromptContext,
         question: str,
+        *,
+        preferred_tool: str | None = None,
     ) -> ToolCallingAnswer:
         guard_citations = state.citations + web_source_citations(state.web_sources)
         guard_result = validate_answer(
@@ -448,7 +569,13 @@ class ToolCallingChatService:
             confidence=guard_result.confidence,
             guard_warnings=guard_result.issues,
             metadata={
-                "evidence": build_evidence_profile(content, guard_citations, guard_result.issues)
+                "runtime": "react_langgraph_v1",
+                "evidence": build_evidence_profile(content, guard_citations, guard_result.issues),
+                "routing": {
+                    "source": "keyword" if preferred_tool else "llm",
+                    "tool": preferred_tool
+                    or (state.tool_calls[0].name if state.tool_calls else None),
+                },
             },
         )
 
@@ -500,18 +627,18 @@ class ToolCallingChatService:
                 continue
             if role in {"user", "assistant"}:
                 chat_messages.append({"role": role, "content": content})
-        initial_budget = max(0, settings.tool_call_context_max_chars // 2)
+        initial_budget = max(0, settings.chat_input_max_tokens // 2)
         history_budget = max(
             0,
             initial_budget
-            - _dict_message_chars(system_message)
-            - sum(_dict_message_chars(message) for message in memory_context)
-            - _dict_message_chars(question_message),
+            - _dict_message_tokens(system_message)
+            - sum(_dict_message_tokens(message) for message in memory_context)
+            - _dict_message_tokens(question_message),
         )
         history = _fit_history_messages(
             summary_context,
             chat_messages[-history_window:] if history_window else [],
-            max_chars=history_budget,
+            max_tokens=history_budget,
         )
         return [system_message, *memory_context, *history, question_message]
 

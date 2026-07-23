@@ -92,6 +92,20 @@ def test_ingest_job_store_claims_sqlite_job_once_and_does_not_restart_running(tm
     assert loaded.status == IngestJobStatus.RUNNING
 
 
+def test_ingest_job_store_requeues_interrupted_work(tmp_path) -> None:
+    store = IngestJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create("user-a", "contract.txt", tmp_path / "contract.txt")
+    assert store.claim(job.job_id)
+
+    assert store.requeue_interrupted() == 1
+
+    recovered = store.get(job.job_id, "user-a")
+    assert recovered is not None
+    assert recovered.status == IngestJobStatus.QUEUED
+    assert recovered.started_at is None
+    assert [record.job_id for record in store.list_restartable()] == [job.job_id]
+
+
 def test_background_executor_rebuilds_across_lifespans(monkeypatch) -> None:
     from ai import llm as language_model
     from backend import main as api_main

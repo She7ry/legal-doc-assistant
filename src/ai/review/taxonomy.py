@@ -13,7 +13,7 @@ from dataclasses import dataclass
 class ClauseProfile:
     """一种合同条款类型的审查「配置包」。
 
-    用途：用户说「审查 indemnity 条款」时，通过 aliases/query_terms 扩展检索 query，
+    用途：用户指定条款类型时，通过 aliases/query_terms 扩展检索 query，
     并把 high/medium/low_risk_rules 注入 LLM prompt，让模型按统一标准打风险分。
     """
 
@@ -25,7 +25,8 @@ class ClauseProfile:
     medium_risk_rules: tuple[str, ...]
     low_risk_rules: tuple[str, ...]
     def expanded_query(self, requested_clause_type: str) -> str:
-        terms = [requested_clause_type, self.label, *self.aliases, *self.query_terms]
+        del requested_clause_type
+        terms = [self.label, *self.aliases, *self.query_terms]
         return " ".join(_dedupe_terms(terms))
 
     def risk_rules_prompt(self) -> str:
@@ -55,8 +56,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="termination",
         label="终止",
-        aliases=("termination clause", "terminate", "early cancellation", "notice period", "终止条款", "解除", "提前终止", "通知期限"),
-        query_terms=("end agreement", "terminate for convenience", "material breach", "终止合同", "解除合同", "重大违约", "提前解除"),
+        aliases=("终止条款", "解除", "提前终止", "通知期限"),
+        query_terms=("终止合同", "解除合同", "重大违约", "提前解除"),
         high_risk_rules=(
             "只有一方享有任意终止权。",
             "发生重大违约后没有明确的终止权。",
@@ -74,8 +75,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="payment",
         label="付款",
-        aliases=("payment terms", "fees", "invoice", "billing", "付款条款", "费用", "发票", "账单"),
-        query_terms=("due date", "payment obligation", "invoice dispute", "付款期限", "付款义务", "付款条件", "发票争议"),
+        aliases=("付款条款", "费用", "发票", "账单"),
+        query_terms=("付款期限", "付款义务", "付款条件", "发票争议"),
         high_risk_rules=(
             "付款义务被加速到期，或付款期限过短。",
             "用户可能需要支付存在争议、金额未知或没有上限的款项。",
@@ -89,8 +90,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="late_fee",
         label="逾期费用",
-        aliases=("late fee", "late payment", "interest", "penalty", "逾期付款", "滞纳金", "违约金", "罚息"),
-        query_terms=("overdue payment", "finance charge", "default interest", "逾期费用", "逾期利息", "付款宽限期"),
+        aliases=("逾期付款", "滞纳金", "违约金", "罚息"),
+        query_terms=("逾期费用", "逾期利息", "付款宽限期"),
         high_risk_rules=(
             "逾期费用、违约利息或罚款没有上限或明显过高。",
             "逾期付款会触发暂停履行、终止或加速到期，且没有补救权。",
@@ -101,8 +102,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="auto_renewal",
         label="自动续约",
-        aliases=("auto renewal", "automatic renewal", "renewal", "evergreen", "自动续约", "续期", "自动延期"),
-        query_terms=("renewal term", "cancellation window", "non-renewal notice", "续约期限", "取消窗口", "不续约通知"),
+        aliases=("自动续约", "续期", "自动延期"),
+        query_terms=("续约期限", "取消窗口", "不续约通知"),
         high_risk_rules=(
             "协议自动续约，但没有明确的取消途径。",
             "取消窗口容易错过，或要求过长的提前通知期。",
@@ -113,8 +114,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="liability_limitation",
         label="责任限制",
-        aliases=("limitation of liability", "liability cap", "damages cap", "责任限制", "责任上限", "赔偿上限"),
-        query_terms=("excluded damages", "consequential damages", "cap on liability", "间接损失", "责任封顶", "除外责任"),
+        aliases=("责任限制", "责任上限", "赔偿上限"),
+        query_terms=("间接损失", "责任封顶", "除外责任"),
         high_risk_rules=(
             "责任上限可能妨碍用户就重大违约获得充分救济。",
             "缺少欺诈、保密或数据安全等重要除外情形。",
@@ -125,8 +126,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="indemnification",
         label="赔偿",
-        aliases=("indemnity", "indemnification", "hold harmless", "defend", "赔偿", "补偿", "抗辩", "使免受损害"),
-        query_terms=("third-party claim", "defense obligation", "losses", "第三方索赔", "抗辩义务", "损失赔偿"),
+        aliases=("赔偿", "补偿", "抗辩", "使免受损害"),
+        query_terms=("第三方索赔", "抗辩义务", "损失赔偿"),
         high_risk_rules=(
             "赔偿义务单向、范围过宽，或涵盖对方自身的不当行为。",
             "抗辩或和解控制权可能造成重大风险敞口。",
@@ -137,8 +138,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="confidentiality",
         label="保密",
-        aliases=("confidentiality", "confidential information", "non-disclosure", "nda", "保密", "保密信息", "不披露"),
-        query_terms=("disclosure", "return or destroy", "survival", "披露", "返还或销毁", "保密期限", "例外"),
+        aliases=("保密", "保密信息", "不披露"),
+        query_terms=("披露", "返还或销毁", "保密期限", "例外"),
         high_risk_rules=(
             "保密义务单向、期限无限，或缺少关键例外。",
             "披露限制可能与法定义务、审计或业务需要冲突。",
@@ -149,8 +150,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="non_compete",
         label="竞业限制",
-        aliases=("non-compete", "non compete", "non-solicit", "restrictive covenant", "竞业限制", "竞业禁止", "禁止招揽", "限制性约定"),
-        query_terms=("competition restriction", "solicitation", "territory", "竞争限制", "招揽客户", "地域范围", "限制期限"),
+        aliases=("竞业限制", "竞业禁止", "禁止招揽", "限制性约定"),
+        query_terms=("竞争限制", "招揽客户", "地域范围", "限制期限"),
         high_risk_rules=(
             "限制广泛影响工作、客户、地域或未来业务。",
             "期限、地域或受限活动范围可能过宽或不明确。",
@@ -161,8 +162,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="ip_ownership",
         label="知识产权归属",
-        aliases=("ip ownership", "intellectual property", "work product", "license", "知识产权归属", "知识产权", "成果归属", "许可"),
-        query_terms=("background IP", "foreground IP", "assignment", "deliverables", "背景知识产权", "前景知识产权", "权利转让", "交付成果"),
+        aliases=("知识产权归属", "知识产权", "成果归属", "许可"),
+        query_terms=("背景知识产权", "前景知识产权", "权利转让", "交付成果"),
         high_risk_rules=(
             "权利转让范围过宽，或可能涵盖既有知识产权。",
             "许可权缺失、永久有效或范围超出合理预期。",
@@ -173,8 +174,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="data_privacy",
         label="数据隐私",
-        aliases=("data privacy", "personal data", "data protection", "security", "数据隐私", "个人信息", "数据保护", "信息安全"),
-        query_terms=("processing", "breach notice", "subprocessor", "data transfer", "数据处理", "泄露通知", "分包处理者", "跨境传输"),
+        aliases=("数据隐私", "个人信息", "数据保护", "信息安全"),
+        query_terms=("数据处理", "泄露通知", "分包处理者", "跨境传输"),
         high_risk_rules=(
             "数据使用、传输、安全或泄露通知义务范围过宽或不完整。",
             "缺少分包处理、删除、审计或合规义务。",
@@ -185,8 +186,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="governing_law",
         label="准据法",
-        aliases=("governing law", "choice of law", "applicable law", "适用法律", "管辖法律", "法律适用"),
-        query_terms=("jurisdiction", "venue", "forum", "司法管辖", "法院", "争议管辖", "管辖地"),
+        aliases=("适用法律", "管辖法律", "法律适用"),
+        query_terms=("司法管辖", "法院", "争议管辖", "管辖地"),
         high_risk_rules=(
             "约定的法律或争议解决地可能使用户明显不利，或与实际运营冲突。",
         ),
@@ -196,8 +197,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="dispute_resolution",
         label="争议解决",
-        aliases=("dispute resolution", "arbitration", "litigation", "venue", "争议解决", "仲裁", "诉讼", "管辖地"),
-        query_terms=("mediation", "class waiver", "injunctive relief", "调解", "集体诉讼弃权", "禁令救济", "争议程序"),
+        aliases=("争议解决", "仲裁", "诉讼", "管辖地"),
+        query_terms=("调解", "集体诉讼弃权", "禁令救济", "争议程序"),
         high_risk_rules=(
             "强制仲裁、管辖地、权利放弃或费用转移可能限制实际救济。",
         ),
@@ -207,8 +208,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="assignment",
         label="转让",
-        aliases=("assignment", "transfer", "change of control", "转让", "合同转让", "控制权变更"),
-        query_terms=("delegate", "successor", "affiliate", "转委托", "继受方", "关联方", "权利义务转让"),
+        aliases=("转让", "合同转让", "控制权变更"),
+        query_terms=("转委托", "继受方", "关联方", "权利义务转让"),
         high_risk_rules=(
             "对方可自由转让而用户不能，或用户缺少同意权。",
             "对于敏感合作关系，条款缺少控制权变更安排。",
@@ -219,8 +220,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="audit_rights",
         label="审计权",
-        aliases=("audit rights", "inspection", "records", "compliance audit", "审计权", "检查权", "记录", "合规审计"),
-        query_terms=("access to records", "audit notice", "remediation", "查阅记录", "审计通知", "整改", "审计频率"),
+        aliases=("审计权", "检查权", "记录", "合规审计"),
+        query_terms=("查阅记录", "审计通知", "整改", "审计频率"),
         high_risk_rules=(
             "审计访问范围过宽、频率过高、成本过重，或缺少保密限制。",
         ),
@@ -230,8 +231,8 @@ CLAUSE_PROFILES: tuple[ClauseProfile, ...] = (
     ClauseProfile(
         key="notice",
         label="通知",
-        aliases=("notice", "notices", "written notice", "email notice", "通知", "书面通知", "电子邮件通知"),
-        query_terms=("delivery", "deemed received", "address for notices", "送达", "视为收到", "通知地址", "通知方式"),
+        aliases=("通知", "书面通知", "电子邮件通知"),
+        query_terms=("送达", "视为收到", "通知地址", "通知方式"),
         high_risk_rules=(
             "通知方式或视为送达规则可能导致错过期限或构成违约。",
         ),

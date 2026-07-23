@@ -11,7 +11,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock, local
 from uuid import uuid4
@@ -151,7 +151,7 @@ class MemoryStore:
 
         updated_title = _normalize_title(title) if title is not None else current.title
         updated_status = status if status is not None else current.status
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as connection, self._lock:
             connection.execute(
                 """
@@ -180,7 +180,7 @@ class MemoryStore:
             user_id=user_id,
             role=role,
             content=content,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         with self._connect() as connection, self._lock:
             self._ensure_user_row(connection, user_id)
@@ -232,6 +232,29 @@ class MemoryStore:
             ).fetchall()
         return [_row_to_message(row) for row in rows]
 
+    def list_messages_from_offset(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> list[MessageRecord]:
+        if limit <= 0:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT messages.*, rowid AS _message_rowid FROM messages
+                WHERE user_id = ?
+                  AND conversation_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, conversation_id, limit, max(0, offset)),
+            ).fetchall()
+        return [_row_to_message(row) for row in rows]
+
     def count_messages(
         self,
         user_id: str,
@@ -253,7 +276,7 @@ class MemoryStore:
         connection: sqlite3.Connection,
         user_id: str,
     ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         connection.execute(
             """
             INSERT INTO users (user_id, created_at, updated_at)
@@ -271,7 +294,7 @@ class MemoryStore:
         conversation_id: str,
         title: str | None = None,
     ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         title = _normalize_title(title)
         existing = connection.execute(
             """
@@ -448,6 +471,8 @@ class MemoryStore:
         *,
         status: str | None = "active",
         include_expired: bool = False,
+        scope: str | None = None,
+        type: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[MemoryRecord]:
@@ -456,9 +481,15 @@ class MemoryStore:
         if status is not None:
             clauses.append("status = ?")
             values.append(status)
+        if scope is not None:
+            clauses.append("scope = ?")
+            values.append(scope)
+        if type is not None:
+            clauses.append("type = ?")
+            values.append(type)
         if not include_expired:
             clauses.append("(expires_at IS NULL OR expires_at > ?)")
-            values.append(datetime.now(timezone.utc).isoformat())
+            values.append(datetime.now(UTC).isoformat())
 
         pagination = ""
         if limit is not None:
@@ -491,7 +522,7 @@ class MemoryStore:
             values.append(status)
         if not include_expired:
             clauses.append("(expires_at IS NULL OR expires_at > ?)")
-            values.append(datetime.now(timezone.utc).isoformat())
+            values.append(datetime.now(UTC).isoformat())
 
         with self._connect() as connection:
             row = connection.execute(
@@ -558,7 +589,7 @@ class MemoryStore:
                 if update.confidence is not None
                 else current.confidence,
                 created_at=current.created_at,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
                 expires_at=current.expires_at if is_unset(update.expires_at) else update.expires_at,
                 visibility=update.visibility if update.visibility is not None else current.visibility,
                 supersedes_id=current.supersedes_id,
@@ -605,7 +636,7 @@ class MemoryStore:
         updated = replace(
             current,
             status=status,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )  # type: ignore[arg-type]
         _validate_memory(updated)
         with self._connect() as connection, self._lock:
@@ -628,7 +659,7 @@ class MemoryStore:
         self,
         user_id: str,
     ) -> list[MemoryRecord]:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as connection, self._lock:
             rows = connection.execute(
                 """
@@ -662,7 +693,7 @@ class MemoryStore:
         user_id: str,
         task_id: str,
     ) -> list[MemoryRecord]:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._connect() as connection, self._lock:
             rows = connection.execute(
                 """
@@ -704,7 +735,7 @@ class MemoryStore:
                   AND (expires_at IS NULL OR expires_at > ?)
                 ORDER BY updated_at DESC
                 """,
-                (user_id, datetime.now(timezone.utc).isoformat()),
+                (user_id, datetime.now(UTC).isoformat()),
             ).fetchall()
         return [_row_to_memory(row) for row in rows]
 
@@ -722,7 +753,7 @@ class MemoryStore:
                     OR (expires_at IS NOT NULL AND expires_at <= ?)
                   )
                 """,
-                (user_id, datetime.now(timezone.utc).isoformat()),
+                (user_id, datetime.now(UTC).isoformat()),
             ).fetchall()
         return [str(row["memory_id"]) for row in rows]
 
@@ -802,7 +833,7 @@ class MemoryStore:
                     ON messages (conversation_id, created_at);
                 """
             )
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             connection.execute(
                 """
                 WITH ranked AS (
@@ -879,7 +910,7 @@ def _new_memory(
     task_id: str | None = None,
     memory_id: str | None = None,
 ) -> MemoryRecord:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     memory = MemoryRecord(
         memory_id=memory_id or uuid4().hex,
         user_id=user_id,

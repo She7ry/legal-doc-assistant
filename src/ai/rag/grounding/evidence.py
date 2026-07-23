@@ -18,14 +18,11 @@ from ai.rag.grounding.citation_support import (
 from ai.rag.schemas import Citation
 
 FACT_PATTERN = re.compile(
-    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|"
-    r"\b\d{4}年\d{1,2}月\d{1,2}日\b|"
-    r"\$\s?\d[\d,]*(?:\.\d+)?|"
-    r"\b(?:USD|EUR|RMB|CNY)\s?\d[\d,]*(?:\.\d+)?\b|"
-    r"\b\d+(?:\.\d+)?%\b|"
-    r"\b\d+\s+(?:days?|business days?|calendar days?|months?|years?)\b|"
-    r"\d+\s*(?:个工作日|工作日|日|天|个月|月|年)",
-    re.IGNORECASE,
+    r"\d{4}年\d{1,2}月(?:\d{1,2}日)?|"
+    r"(?:人民币|[￥¥])\s*\d[\d,]*(?:\.\d+)?(?:万|亿)?元?|"
+    r"\d[\d,]*(?:\.\d+)?(?:万|亿)?元|"
+    r"\d+(?:\.\d+)?%|"
+    r"\d+\s*(?:个工作日|工作日|自然日|日|天|个月|月|年)"
 )
 # 主张与引用片段的 token 重叠率阈值：≥0.45 为直接支持，≥0.20 为部分支持。
 DIRECT_SUPPORT_THRESHOLD = 0.45
@@ -109,10 +106,9 @@ def _candidate_claims(answer: str) -> list[str]:
 
 
 def _looks_material(text: str) -> bool:
-    lowered = text.casefold()
-    if len(text) < 28:
+    if len(text) < 12:
         return False
-    return not lowered.startswith(("confidence:", "answer:", "assistant:", "note:"))
+    return not text.startswith(("置信度：", "回答：", "助手：", "备注："))
 
 
 def _support_level(
@@ -162,19 +158,19 @@ def _fact_terms(text: str) -> list[str]:
 
 
 def _normalize_fact_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").casefold()
+    return re.sub(r"\s+", " ", text or "")
 
 
 def _uncertainty_for_claim(support_level: str, unsupported_facts: Sequence[str]) -> str:
     if support_level == "direct":
-        return "Supported by the cited excerpt, subject to full-document context."
+        return "引用摘录直接支持该主张，但仍需结合完整文档理解。"
     if support_level == "partial":
         if unsupported_facts:
-            return "The cited excerpt does not contain these specific facts: " + ", ".join(
+            return "引用摘录不包含这些具体事实：" + "、".join(
                 unsupported_facts
             )
-        return "The citation is available, but the claim only partially matches the cited excerpt."
-    return "No source citation was attached to this material claim."
+        return "已有引用，但主张与引用摘录仅部分匹配。"
+    return "该实质性主张未附来源引用。"
 
 
 def _missing_evidence(guard_issues: Sequence[str], unsupported_claims: Sequence[str]) -> list[str]:

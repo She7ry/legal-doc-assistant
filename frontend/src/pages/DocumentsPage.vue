@@ -77,7 +77,7 @@
             </div>
             <div class="document-preview__tags">
               <el-tag effect="plain">v{{ preview.document.document_version }}</el-tag>
-              <el-tag effect="plain">{{ preview.total_chunks }} chunks</el-tag>
+              <el-tag effect="plain">{{ preview.total_chunks }} 个片段</el-tag>
               <el-tag v-if="preview.document.page_count !== null" effect="plain">
                 {{ preview.document.page_count }} 页
               </el-tag>
@@ -87,7 +87,7 @@
           <el-alert
             v-if="highlightedChunkId !== null"
             type="info"
-            :title="`已定位到 chunk ${highlightedChunkId}`"
+            :title="`已定位到片段 ${highlightedChunkId}`"
             :closable="false"
             show-icon
           />
@@ -102,9 +102,9 @@
             >
               <div class="document-preview-chunk__meta">
                 <el-tag size="small" type="primary" effect="dark">
-                  {{ chunk.chunk_id !== null ? `Chunk ${chunk.chunk_id}` : `Part ${index + 1}` }}
+                  {{ chunk.chunk_id !== null ? `片段 ${chunk.chunk_id}` : `部分 ${index + 1}` }}
                 </el-tag>
-                <span v-if="chunk.page_label">{{ chunk.page_label }}</span>
+                <span v-if="chunk.page_label">{{ locationLabel(chunk.page_label) }}</span>
                 <span v-if="chunk.section_heading">{{ chunk.section_heading }}</span>
               </div>
               <p>{{ chunk.text }}</p>
@@ -131,6 +131,7 @@ import { Refresh, View } from "@element-plus/icons-vue";
 
 import { getDocumentText, listDocuments } from "../api/documents";
 import { formatApiError } from "../api/http";
+import { locationLabel } from "../utils/legalDisplay";
 import type {
   DocumentInfo,
   DocumentTextChunk,

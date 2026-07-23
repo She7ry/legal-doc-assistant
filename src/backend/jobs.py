@@ -4,7 +4,7 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
@@ -18,7 +18,7 @@ from backend.store_helpers import (
 )
 
 
-class IngestJobStatus(str, Enum):
+class IngestJobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -83,6 +83,22 @@ class IngestJobStore:
                     (IngestJobStatus.QUEUED.value, max(1, min(limit, 500))),
                 ).fetchall()
             return [_row_to_record(row) for row in rows]
+
+    def requeue_interrupted(self) -> int:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ingest_jobs
+                SET status = ?, stage = ?, progress = 5, started_at = NULL
+                WHERE status = ?
+                """,
+                (
+                    IngestJobStatus.QUEUED.value,
+                    "uploaded",
+                    IngestJobStatus.RUNNING.value,
+                ),
+            )
+            return cursor.rowcount
 
     def claim(self, job_id: str, stage: str = "parsing", progress: int = 15) -> bool:
         progress = clamp_progress(progress)

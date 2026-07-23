@@ -9,7 +9,7 @@
       <article v-for="citation in citations" :key="citation.source_id" class="citation-item">
         <div class="citation-item__title">
           <el-tag size="small" type="primary" effect="dark">{{ citation.source_id }}</el-tag>
-          <el-tag size="small" effect="plain">{{ citation.source_type || "document" }}</el-tag>
+          <el-tag size="small" effect="plain">{{ sourceTypeLabel(citation.source_type) }}</el-tag>
           <strong>{{ citation.file_name }}</strong>
           <span v-if="canOpenCitation(citation)" class="citation-item__actions">
             <el-tooltip content="查看原文" placement="top">
@@ -24,13 +24,13 @@
           </span>
         </div>
         <div class="citation-item__meta">
-          <span v-if="citation.page_label">{{ citation.page_label }}</span>
-          <span v-else-if="citation.location_label">{{ citation.location_label }}</span>
-          <span v-if="citation.chunk_id !== null">Chunk {{ citation.chunk_id }}</span>
+          <span v-if="citation.page_label">{{ locationLabel(citation.page_label) }}</span>
+          <span v-else-if="citation.location_label">{{ locationLabel(citation.location_label) }}</span>
+          <span v-if="citation.chunk_id !== null">片段 {{ citation.chunk_id }}</span>
           <span v-if="citation.section_heading">{{ citation.section_heading }}</span>
           <span v-if="citation.document_version">v{{ citation.document_version }}</span>
           <span v-if="citation.retrieval_relevance !== null && citation.retrieval_relevance !== undefined">
-            Relevance {{ citation.retrieval_relevance.toFixed(2) }}
+            相关度 {{ citation.retrieval_relevance.toFixed(2) }}
           </span>
         </div>
         <blockquote>{{ citation.exact_quote || citation.preview }}</blockquote>
@@ -44,6 +44,7 @@ import { View } from "@element-plus/icons-vue";
 import { useRouter } from "vue-router";
 
 import type { Citation } from "../api/types";
+import { locationLabel, sourceTypeLabel } from "../utils/legalDisplay";
 
 defineProps<{
   citations: Citation[];

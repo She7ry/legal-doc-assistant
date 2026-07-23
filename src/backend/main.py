@@ -84,6 +84,8 @@ app.include_router(api_router)
 
 
 def _recover_background_work() -> None:
+    _job_store.requeue_interrupted()
+    _agent_task_store.requeue_interrupted()
     for record in _job_store.list_restartable():
         documents.enqueue_ingest_job(record, _vector_store(record.user_id), _job_store)
     for record in _agent_task_store.list_restartable():

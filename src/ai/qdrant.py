@@ -59,10 +59,16 @@ def ensure_dense_collection(
     *,
     with_sparse: bool,
     payload_indexes: dict[str, models.PayloadSchemaType],
+    collection_exists: bool | None = None,
 ) -> None:
     """Create a collection lazily after the embedding dimension is known."""
     with _collections_lock:
-        if client.collection_exists(collection_name):
+        exists = (
+            collection_exists
+            if collection_exists is not None
+            else client.collection_exists(collection_name)
+        )
+        if exists:
             _validate_vector_size(client, collection_name, vector_size)
         else:
             sparse_config = None

@@ -63,7 +63,7 @@ def _append_default_citations_to_material_paragraphs(content: str, source_ref: s
         if stripped.startswith("#") or re.search(r"\[[SCDPW]\d+\]", block, flags=re.IGNORECASE):
             repaired_blocks.append(block)
             continue
-        if len(stripped) >= 40:
+        if len(stripped) >= 12:
             repaired_blocks.append(f"{block.rstrip()} {source_ref}")
         else:
             repaired_blocks.append(block)
@@ -71,14 +71,14 @@ def _append_default_citations_to_material_paragraphs(content: str, source_ref: s
 
 
 def _append_default_citations_to_fact_sentences(content: str, source_ref: str) -> str:
-    sentences = re.split(r"([.!?。！？]\s*)", content)
+    sentences = re.split(r"([。！？]\s*)", content)
     repaired = []
     for index in range(0, len(sentences), 2):
         sentence = sentences[index]
         punctuation = sentences[index + 1] if index + 1 < len(sentences) else ""
         if (
             re.search(
-                r"\b\d+(?:\.\d+)?%|\b\d+\s+(?:days?|business days?|months?|years?)\b|\$\s?\d",
+                r"\d+(?:\.\d+)?%|(?:人民币|[￥¥])\s*\d|\d[\d,]*(?:\.\d+)?(?:万|亿)?元|\d+\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)",
                 sentence,
             )
             and not re.search(r"\[[SCDPW]\d+\]", sentence, flags=re.IGNORECASE)

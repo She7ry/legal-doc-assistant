@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -43,7 +43,7 @@ class AuthStore:
         user = UserRecord(
             user_id=uuid4().hex,
             username=username,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         try:
             with self._connection() as connection:
@@ -82,7 +82,7 @@ class AuthStore:
 
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + self.session_ttl
         with self._connection() as connection:
             connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),))
@@ -110,7 +110,7 @@ class AuthStore:
             ).fetchone()
             if row is None:
                 return None
-            if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(timezone.utc):
+            if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(UTC):
                 connection.execute(
                     "DELETE FROM sessions WHERE token_hash = ?",
                     (_token_hash(token),),

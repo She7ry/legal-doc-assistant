@@ -59,7 +59,7 @@ def load_documents(path: Path) -> list[Document]:
     """按扩展名解析 PDF/DOCX/TXT，返回带 file_name、source metadata 的 Document 列表。"""
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: {suffix}")
+        raise ValueError(f"不支持的文件类型：{suffix}")
 
     if suffix == ".pdf":
         documents = _load_pdf_documents(path)
@@ -93,8 +93,7 @@ def _load_pdf_documents(path: Path) -> list[Document]:
         page_labels = ", ".join(str(page + 1) for page in empty_pages[:10])
         suffix = "..." if len(empty_pages) > 10 else ""
         warnings.append(
-            f"PDF pages with no extractable text: {page_labels}{suffix}. "
-            "They may be scanned images or contain unsupported layout."
+            f"PDF 第 {page_labels}{suffix} 页没有可提取文本，可能是扫描图片或包含不支持的版式。"
         )
 
     if empty_pages and settings.pdf_ocr_enabled:
@@ -108,8 +107,8 @@ def _load_pdf_documents(path: Path) -> list[Document]:
                 document.metadata["char_count"] = len(document.page_content)
     elif empty_pages:
         warnings.append(
-            "OCR fallback is disabled. Set DOC_ASSISTANT_PDF_OCR_ENABLED=true "
-            "and install OCR dependencies if scanned PDFs must be indexed."
+            "OCR 当前未启用；如需索引扫描版 PDF，请安装 OCR 依赖并设置 "
+            "DOC_ASSISTANT_PDF_OCR_ENABLED=true。"
         )
 
     if warnings and documents:
@@ -124,7 +123,7 @@ def _ocr_pdf_pages(path: Path, pages: list[int]) -> tuple[dict[int, str], list[s
         from pdf2image import convert_from_path
     except ImportError:
         return {}, [
-            "OCR fallback was requested, but pdf2image and pytesseract are not installed."
+            "已请求 OCR，但尚未安装 pdf2image 和 pytesseract。"
         ]
 
     extracted: dict[int, str] = {}
@@ -137,18 +136,18 @@ def _ocr_pdf_pages(path: Path, pages: list[int]) -> tuple[dict[int, str], list[s
                 last_page=page + 1,
             )
             if not images:
-                warnings.append(f"OCR produced no image for PDF page {page + 1}.")
+                warnings.append(f"OCR 未能生成 PDF 第 {page + 1} 页的图像。")
                 continue
             text = pytesseract.image_to_string(images[0], lang=settings.pdf_ocr_lang).strip()
         except Exception:
             logger.warning("PDF OCR failed", extra={"path": str(path), "page": page}, exc_info=True)
-            warnings.append(f"OCR failed for PDF page {page + 1}.")
+            warnings.append(f"PDF 第 {page + 1} 页 OCR 失败。")
             continue
 
         if text:
             extracted[page] = text
         else:
-            warnings.append(f"OCR produced no text for PDF page {page + 1}.")
+            warnings.append(f"PDF 第 {page + 1} 页 OCR 未识别出文本。")
 
     return extracted, warnings
 

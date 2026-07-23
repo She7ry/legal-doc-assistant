@@ -6,7 +6,7 @@ import hashlib
 import logging
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -112,7 +112,7 @@ class DocumentIngester:
             )
 
         page_count = count_pages(documents)
-        indexed_at = datetime.now(timezone.utc).isoformat()
+        indexed_at = datetime.now(UTC).isoformat()
         replaced_file_ids = sorted(
             {
                 str(record["metadata"].get("file_id"))

@@ -24,6 +24,7 @@ from ai.rag.retrieval import retriever as retriever_module
 from ai.rag.retrieval.backend import metadata_is_active
 from ai.rag.retrieval.repository import QdrantDocumentRepository
 from ai.rag.retrieval.retriever import QdrantRetriever, QueryCache
+from ai.rag.retrieval.search import _tokenize_for_search
 from ai.rag.retrieval.vector_store import DocumentVectorStore
 
 
@@ -281,7 +282,7 @@ def test_partial_upsert_with_failed_rollback_stays_inactive_and_retries(
 def test_split_legal_sections_preserves_headings_in_metadata() -> None:
     document = Document(
         page_content=(
-            "Intro text\n\nSection 1 Term\nThe term is one year.\n\n2. Payment\nPay monthly."
+            "引言\n\n第一条 合同期限\n合同期限为一年。\n\n2. 付款\n按月付款。"
         ),
         metadata={"file_name": "contract.txt"},
     )
@@ -289,16 +290,41 @@ def test_split_legal_sections_preserves_headings_in_metadata() -> None:
     sections = split_legal_sections([document])
 
     headings = [section.metadata.get("section_heading") for section in sections]
-    assert "Section 1 Term" in headings
-    assert "2. Payment" in headings
+    assert "第一条 合同期限" in headings
+    assert "2. 付款" in headings
+
+
+def test_chinese_headings_and_search_terms_are_preserved() -> None:
+    document = Document(
+        page_content="一、合同期限\n本合同期限为一年。\n\n（一）付款期限\n甲方应在30日内付款。"
+    )
+
+    headings = [
+        section.metadata.get("section_heading") for section in split_legal_sections([document])
+    ]
+
+    assert headings == ["一、合同期限", "（一）付款期限"]
+    assert _tokenize_for_search("供应商延迟交付违约金") == [
+        "供应",
+        "应商",
+        "商延",
+        "延迟",
+        "迟交",
+        "交付",
+        "付违",
+        "违约",
+        "约金",
+    ]
+    assert _tokenize_for_search("payment terms") == []
+    assert split_legal_sections([Document(page_content="引言\nSection 1 Term\n正文")])[0].metadata.get("section_heading") is None
 
 
 def test_chunk_text_with_heading_preserves_section_context() -> None:
-    assert chunk_text_with_heading("Payment must be made monthly.", "2. Payment") == (
-        "2. Payment\nPayment must be made monthly."
+    assert chunk_text_with_heading("应按月付款。", "2. 付款") == (
+        "2. 付款\n应按月付款。"
     )
-    assert chunk_text_with_heading("2. Payment\nPayment must be made monthly.", "2. Payment") == (
-        "2. Payment\nPayment must be made monthly."
+    assert chunk_text_with_heading("2. 付款\n应按月付款。", "2. 付款") == (
+        "2. 付款\n应按月付款。"
     )
 
 
@@ -308,11 +334,11 @@ def test_qdrant_sparse_bm25_matches_exact_legal_terms() -> None:
     repository.embed_and_add(
         [
             Document(
-                page_content="Invoices are payable within 30 calendar days.",
+                page_content="发票应在30个自然日内支付。",
                 metadata={"active": True, "file_name": "contract.pdf"},
             ),
             Document(
-                page_content="Liquidated damages are capped at 10% of shipment value.",
+                page_content="逾期交付违约金上限为货值的10%。",
                 metadata={"active": True, "file_name": "contract.pdf"},
             ),
         ],
@@ -321,9 +347,9 @@ def test_qdrant_sparse_bm25_matches_exact_legal_terms() -> None:
         max_workers=1,
     )
 
-    results = repository.search("liquidated damages 10% cap", limit=1, mode="bm25")
+    results = repository.search("逾期交付违约金10%上限", limit=1, mode="bm25")
 
-    assert results[0].page_content.startswith("Liquidated damages")
+    assert results[0].page_content.startswith("逾期交付违约金")
     assert results[0].metadata["retrieval_mode"] == "bm25"
     client.close()
 
@@ -434,8 +460,8 @@ def test_sparse_search_initializes_payload_indexes_once_and_survives_failure(cap
     )
 
     with caplog.at_level("WARNING"):
-        repository.search("payment", limit=1, mode="sparse")
-        repository.search("payment", limit=1, mode="sparse")
+        repository.search("付款", limit=1, mode="sparse")
+        repository.search("付款", limit=1, mode="sparse")
 
     assert client.payload_indexes == [
         ("active", models.PayloadSchemaType.BOOL),
@@ -447,6 +473,24 @@ def test_sparse_search_initializes_payload_indexes_once_and_survives_failure(cap
     assert client.collection_checks == 1
     assert client.queries == 2
     assert "Failed to create Qdrant payload index 'file_id'" in caplog.text
+
+
+def test_search_skips_embedding_when_collection_is_missing() -> None:
+    class MissingCollectionClient:
+        def collection_exists(self, _collection_name: str) -> bool:
+            return False
+
+    class UnexpectedEmbeddingModel:
+        def embed_query(self, _text: str) -> list[float]:
+            raise AssertionError("empty indexes must not call the embedding provider")
+
+    repository = QdrantDocumentRepository(
+        MissingCollectionClient(),  # type: ignore[arg-type]
+        "documents",
+        UnexpectedEmbeddingModel(),
+    )
+
+    assert repository.search("payment", limit=1, mode="dense") == []
 
 
 def test_dense_search_validates_collection_once_during_concurrent_calls() -> None:
@@ -504,15 +548,15 @@ def test_qdrant_hybrid_search_filters_inactive_and_fuses_dense_sparse() -> None:
     repository.embed_and_add(
         [
             Document(
-                page_content="Liquidated damages are capped at 10%.",
+                page_content="逾期交付违约金上限为10%。",
                 metadata={"active": True, "file_name": "contract.pdf"},
             ),
             Document(
-                page_content="Liquidated damages were removed from the old draft.",
+                page_content="旧版中的逾期交付违约金已经删除。",
                 metadata={"active": False, "file_name": "contract-v1.pdf"},
             ),
             Document(
-                page_content="Invoices are payable monthly.",
+                page_content="发票按月支付。",
                 metadata={"active": True, "file_name": "contract.pdf"},
             ),
         ],
@@ -521,10 +565,10 @@ def test_qdrant_hybrid_search_filters_inactive_and_fuses_dense_sparse() -> None:
         max_workers=1,
     )
 
-    results = repository.search("liquidated damages cap", limit=3, mode="hybrid")
+    results = repository.search("逾期交付违约金上限", limit=3, mode="hybrid")
 
-    assert results[0].page_content.startswith("Liquidated damages are capped")
-    assert all("old draft" not in result.page_content for result in results)
+    assert results[0].page_content.startswith("逾期交付违约金上限")
+    assert all("旧版" not in result.page_content for result in results)
     assert results[0].metadata["qdrant_score"] > 0
     client.close()
 

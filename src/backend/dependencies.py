@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Callable
 from functools import lru_cache, partial
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ai.agent.react_task import run_react_agent_task
-from ai.agent.schemas import AgentTaskResult
+from ai.agent.schemas import AgentTaskPause, AgentTaskResult
 from ai.agent.tool_calling import ToolCallingChatService
 from ai.config.settings import settings
 from ai.memory.service import MemoryService
@@ -30,6 +33,22 @@ _auth_store = AuthStore(
 )
 _job_store = IngestJobStore(settings.ingest_jobs_db_path)
 _agent_task_store = AgentTaskStore(settings.agent_tasks_db_path)
+_agent_checkpoint_connection = sqlite3.connect(
+    settings.agent_tasks_db_path,
+    timeout=30,
+    check_same_thread=False,
+)
+_agent_checkpointer = SqliteSaver(
+    _agent_checkpoint_connection,
+    serde=JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            ("ai.agent.schemas", "AgentStepResult"),
+            ("ai.agent.schemas", "AgentTaskResult"),
+            ("ai.rag.grounding.guard", "AnswerGuardResult"),
+            ("ai.rag.schemas", "Citation"),
+        ]
+    ),
+)
 _memory_store = MemoryStore()
 
 
@@ -115,12 +134,16 @@ def _tool_calling_service(user_id: str) -> ToolCallingChatService:
     return ToolCallingChatService(_qa_service(user_id))
 
 
-AgentRunner = Callable[..., AgentTaskResult]
+AgentRunner = Callable[..., AgentTaskResult | AgentTaskPause]
 
 
 @lru_cache(maxsize=128)
 def _agent_service(user_id: str) -> AgentRunner:
-    return partial(run_react_agent_task, _qa_service(user_id))
+    return partial(
+        run_react_agent_task,
+        _qa_service(user_id),
+        checkpointer=_agent_checkpointer,
+    )
 
 
 UserIdDep = Annotated[str, Depends(get_user_id)]

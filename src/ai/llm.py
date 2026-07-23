@@ -86,6 +86,7 @@ def _chat_model_cache_key() -> tuple[object, ...]:
         json.dumps(settings.chat_extra_body or {}, sort_keys=True),
         settings.temperature,
         settings.llm_max_retries,
+        getattr(settings, "chat_max_output_tokens", 4096),
     )
 
 
@@ -106,6 +107,7 @@ def _build_chat_model_cached(_cache_key: tuple[object, ...]) -> BaseChatModel:
         "base_url": _resolve_chat_base_url(provider, defaults),
         "temperature": settings.temperature,
         "max_retries": max(0, settings.llm_max_retries),
+        "max_tokens": getattr(settings, "chat_max_output_tokens", 4096),
         "timeout": 120,
     }
     if settings.chat_extra_body:
@@ -115,6 +117,26 @@ def _build_chat_model_cached(_cache_key: tuple[object, ...]) -> BaseChatModel:
 
 def build_chat_model() -> BaseChatModel:
     return _build_chat_model_cached(_chat_model_cache_key())
+
+
+def bind_chat_tools(
+    chat_model: BaseChatModel,
+    tools: list[Any],
+    *,
+    tool_choice: str | None = None,
+):
+    """Bind tools without unsupported tool_choice on DeepSeek thinking models."""
+    if isinstance(chat_model, ChatDeepSeek):
+        # ponytail: DeepSeek thinking rejects tool_choice; rely on model routing until supported.
+        return chat_model.bind_tools(tools)
+    return chat_model.bind_tools(tools, tool_choice=tool_choice)
+
+
+def structured_chat_output(chat_model: BaseChatModel, schema):
+    """Use JSON mode for DeepSeek thinking models; keep provider defaults elsewhere."""
+    if isinstance(chat_model, ChatDeepSeek):
+        return chat_model.with_structured_output(schema, method="json_mode")
+    return chat_model.with_structured_output(schema)
 
 
 def _embedding_model_cache_key() -> tuple[object, ...]:

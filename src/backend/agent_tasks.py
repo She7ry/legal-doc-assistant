@@ -4,7 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -19,7 +19,7 @@ from backend.store_helpers import (
 )
 
 
-class AgentTaskStatus(str, Enum):
+class AgentTaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     NEEDS_INPUT = "needs_input"
@@ -92,24 +92,33 @@ class AgentTaskStore:
             submitted_at=utc_now(),
             events=[],
         )
-        with self._lock:
-            self._insert_record(record)
-            event = self._append_event(
+        with self._lock, self._connect() as connection:
+            self._insert_record_with_connection(connection, record)
+            event = self._insert_event_with_connection(
+                connection,
                 record.task_id,
                 event_type="queued",
                 stage="queued",
                 progress=0,
-                message="Agent task queued.",
+                message="Agent 任务已排队。",
+                step_id=None,
+                payload=None,
             )
             record.events = [event]
         return self._copy_record(record)
 
-    def get(self, task_id: str, user_id: str) -> AgentTaskRecord | None:
+    def get(
+        self,
+        task_id: str,
+        user_id: str,
+        *,
+        include_events: bool = True,
+    ) -> AgentTaskRecord | None:
         with self._lock:
             record = self._get_record(task_id)
             if record is None or record.user_id != user_id:
                 return None
-            events = self._get_events(task_id, after_event_id=0)
+            events = self._get_events(task_id, after_event_id=0) if include_events else []
             return self._copy_record(replace(record, events=events))
 
     def events_after(
@@ -138,6 +147,40 @@ class AgentTaskStore:
                 ).fetchall()
             return [self._copy_record(_row_to_record(row)) for row in rows]
 
+    def requeue_interrupted(self) -> int:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT task_id FROM agent_tasks WHERE status = ?",
+                (AgentTaskStatus.RUNNING.value,),
+            ).fetchall()
+            if not rows:
+                return 0
+            connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?, stage = ?, progress = 0, started_at = NULL
+                WHERE status = ?
+                """,
+                (
+                    AgentTaskStatus.QUEUED.value,
+                    "queued",
+                    AgentTaskStatus.RUNNING.value,
+                ),
+            )
+            for row in rows:
+                self._insert_event_with_connection(
+                    connection,
+                    str(row["task_id"]),
+                    event_type="queued",
+                    stage="queued",
+                    progress=0,
+                    message="检测到进程中断，Agent 任务已重新排队。",
+                    step_id=None,
+                    payload={"recovered": True},
+                )
+            return len(rows)
+
     def claim(self, task_id: str) -> bool:
         started_at = utc_now()
         with self._lock:
@@ -165,7 +208,7 @@ class AgentTaskStore:
                     event_type="running",
                     stage="answering",
                     progress=5,
-                    message="Agent task started.",
+                    message="Agent 任务已开始。",
                     step_id=None,
                     payload=None,
                 )
@@ -186,16 +229,18 @@ class AgentTaskStore:
             record = self._require_record(task_id)
             record.stage = stage
             record.progress = clamp_progress(progress)
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type=event_type,
-                stage=stage,
-                progress=record.progress,
-                message=message,
-                step_id=step_id,
-                payload=payload,
-            )
+            with self._connect() as connection:
+                self._update_record_with_connection(connection, record)
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type=event_type,
+                    stage=stage,
+                    progress=record.progress,
+                    message=message,
+                    step_id=step_id,
+                    payload=payload,
+                )
 
     def mark_succeeded(
         self,
@@ -210,15 +255,18 @@ class AgentTaskStore:
             record.completed_at = utc_now()
             record.result = result
             record.error = None
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type="succeeded",
-                stage="completed",
-                progress=100,
-                message="Agent task completed.",
-                payload={"status": result.get("status")},
-            )
+            with self._connect() as connection:
+                self._update_record_with_connection(connection, record)
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type="succeeded",
+                    stage="completed",
+                    progress=100,
+                    message="Agent 任务已完成。",
+                    step_id=None,
+                    payload={"status": result.get("status")},
+                )
 
     def mark_needs_input(self, task_id: str, questions: list[str]) -> None:
         with self._lock:
@@ -228,15 +276,18 @@ class AgentTaskStore:
             record.progress = 0
             record.result = None
             record.error = None
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type="needs_input",
-                stage="needs_input",
-                progress=0,
-                message="需要补充信息后再运行 Agent 任务。",
-                payload={"questions": questions[:3]},
-            )
+            with self._connect() as connection:
+                self._update_record_with_connection(connection, record)
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type="needs_input",
+                    stage="needs_input",
+                    progress=0,
+                    message="需要补充信息后再运行 Agent 任务。",
+                    step_id=None,
+                    payload={"questions": questions[:3]},
+                )
 
     def resume_with_input(
         self,
@@ -263,22 +314,28 @@ class AgentTaskStore:
             record.completed_at = None
             record.result = None
             record.error = None
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type="input_received",
-                stage="queued",
-                progress=0,
-                message="Received supplemental input for Agent task.",
-                payload={"answers": clarification_answers[:6]},
-            )
-            self._append_event(
-                task_id,
-                event_type="queued",
-                stage="queued",
-                progress=0,
-                message="Agent task re-queued after supplemental input.",
-            )
+            with self._connect() as connection:
+                self._update_record_with_connection(connection, record)
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type="input_received",
+                    stage="queued",
+                    progress=0,
+                    message="已收到 Agent 任务的补充信息。",
+                    step_id=None,
+                    payload={"answers": clarification_answers[:6]},
+                )
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type="queued",
+                    stage="queued",
+                    progress=0,
+                    message="补充信息已接收，Agent 任务已重新排队。",
+                    step_id=None,
+                    payload=None,
+                )
             events = self._get_events(task_id, after_event_id=0)
             return self._copy_record(replace(record, events=events))
 
@@ -290,14 +347,18 @@ class AgentTaskStore:
             record.progress = 100
             record.completed_at = utc_now()
             record.error = error
-            self._save_record(record)
-            self._append_event(
-                task_id,
-                event_type="failed",
-                stage="failed",
-                progress=100,
-                message=error,
-            )
+            with self._connect() as connection:
+                self._update_record_with_connection(connection, record)
+                self._insert_event_with_connection(
+                    connection,
+                    task_id,
+                    event_type="failed",
+                    stage="failed",
+                    progress=100,
+                    message=error,
+                    step_id=None,
+                    payload=None,
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -308,30 +369,6 @@ class AgentTaskStore:
         if record is None:
             raise KeyError(task_id)
         return record
-
-    def _save_record(self, record: AgentTaskRecord) -> None:
-        self._update_record(record)
-
-    def _append_event(
-        self,
-        task_id: str,
-        *,
-        event_type: str,
-        stage: str,
-        progress: int,
-        message: str,
-        step_id: str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> AgentTaskEventRecord:
-        return self._insert_event(
-            task_id,
-            event_type=event_type,
-            stage=stage,
-            progress=progress,
-            message=message,
-            step_id=step_id,
-            payload=payload,
-        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -384,49 +421,55 @@ class AgentTaskStore:
                 """
             )
 
-    def _insert_record(self, record: AgentTaskRecord) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_tasks (
-                    task_id, user_id, objective, focus_areas_json, user_role,
-                    max_steps, conversation_id, status, stage, progress, submitted_at,
-                    started_at, completed_at, result_json, error
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _record_to_row(record),
+    @staticmethod
+    def _insert_record_with_connection(
+        connection: sqlite3.Connection,
+        record: AgentTaskRecord,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO agent_tasks (
+                task_id, user_id, objective, focus_areas_json, user_role,
+                max_steps, conversation_id, status, stage, progress, submitted_at,
+                started_at, completed_at, result_json, error
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            _record_to_row(record),
+        )
 
-    def _update_record(self, record: AgentTaskRecord) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE agent_tasks
-                SET user_id = ?, objective = ?, focus_areas_json = ?,
-                    user_role = ?, max_steps = ?, conversation_id = ?,
-                    status = ?, stage = ?, progress = ?, submitted_at = ?, started_at = ?,
-                    completed_at = ?, result_json = ?, error = ?
-                WHERE task_id = ?
-                """,
-                (
-                    record.user_id,
-                    record.objective,
-                    json.dumps(record.focus_areas, ensure_ascii=False),
-                    record.user_role,
-                    record.max_steps,
-                    record.conversation_id,
-                    record.status.value,
-                    record.stage,
-                    record.progress,
-                    datetime_to_db(record.submitted_at),
-                    datetime_to_db(record.started_at),
-                    datetime_to_db(record.completed_at),
-                    json_or_none(record.result),
-                    record.error,
-                    record.task_id,
-                ),
-            )
+    @staticmethod
+    def _update_record_with_connection(
+        connection: sqlite3.Connection,
+        record: AgentTaskRecord,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE agent_tasks
+            SET user_id = ?, objective = ?, focus_areas_json = ?,
+                user_role = ?, max_steps = ?, conversation_id = ?,
+                status = ?, stage = ?, progress = ?, submitted_at = ?, started_at = ?,
+                completed_at = ?, result_json = ?, error = ?
+            WHERE task_id = ?
+            """,
+            (
+                record.user_id,
+                record.objective,
+                json.dumps(record.focus_areas, ensure_ascii=False),
+                record.user_role,
+                record.max_steps,
+                record.conversation_id,
+                record.status.value,
+                record.stage,
+                record.progress,
+                datetime_to_db(record.submitted_at),
+                datetime_to_db(record.started_at),
+                datetime_to_db(record.completed_at),
+                json_or_none(record.result),
+                record.error,
+                record.task_id,
+            ),
+        )
 
     def _get_record(self, task_id: str) -> AgentTaskRecord | None:
         with self._connect() as connection:
@@ -435,29 +478,6 @@ class AgentTaskStore:
                 (task_id,),
             ).fetchone()
         return _row_to_record(row) if row else None
-
-    def _insert_event(
-        self,
-        task_id: str,
-        *,
-        event_type: str,
-        stage: str,
-        progress: int,
-        message: str,
-        step_id: str | None,
-        payload: dict[str, Any] | None,
-    ) -> AgentTaskEventRecord:
-        with self._connect() as connection:
-            return self._insert_event_with_connection(
-                connection,
-                task_id,
-                event_type=event_type,
-                stage=stage,
-                progress=progress,
-                message=message,
-                step_id=step_id,
-                payload=payload,
-            )
 
     def _insert_event_with_connection(
         self,

@@ -16,7 +16,7 @@
           maxlength="500"
           show-word-limit
           resize="none"
-          placeholder="例如：payment terms and obligations"
+          placeholder="例如：付款期限与双方义务"
         />
       </el-form-item>
 
@@ -28,7 +28,7 @@
           maxlength="500"
           show-word-limit
           resize="none"
-          placeholder="例如：payment policy and compliance requirements"
+          placeholder="例如：付款制度与合规要求"
         />
       </el-form-item>
 
@@ -51,7 +51,7 @@
       <div class="structured-summary">
         <div>
           <span>结论</span>
-          <strong>{{ result.overall_status }}</strong>
+          <strong>{{ conflictStatusLabel(result.overall_status) }}</strong>
         </div>
         <div>
           <span>冲突数量</span>
@@ -78,7 +78,7 @@
         <el-table-column label="严重程度" width="120">
           <template #default="{ row }">
             <el-tag :type="riskTagType(row.severity)" effect="dark">
-              {{ row.severity }}
+              {{ levelLabel(row.severity) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -123,7 +123,7 @@
       >
         <ul class="structured-list structured-list--compact">
           <li v-for="warning in result.guard_warnings" :key="warning">
-            {{ warning }}
+            {{ guardWarningLabel(warning) }}
           </li>
         </ul>
       </el-alert>
@@ -147,6 +147,12 @@ import { Search } from "@element-plus/icons-vue";
 import { checkConflict } from "../api/review";
 import { formatApiError } from "../api/http";
 import type { ConflictCheckResponse } from "../api/types";
+import {
+  conflictStatusLabel,
+  conflictTypeLabel,
+  guardWarningLabel,
+  levelLabel,
+} from "../utils/legalDisplay";
 import CitationList from "./CitationList.vue";
 
 const contractQuery = ref("");
@@ -169,11 +175,7 @@ function riskTagType(level: string) {
 }
 
 function formatConflictType(value: string) {
-  return value
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+  return conflictTypeLabel(value);
 }
 
 function formatRefs(refs: string[]) {

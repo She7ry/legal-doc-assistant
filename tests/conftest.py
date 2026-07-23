@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,7 +18,7 @@ def authenticated_api_user(request):
     user = UserRecord(
         user_id="api-test-user",
         username="api-test-user",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     def override() -> UserRecord:
         return user
