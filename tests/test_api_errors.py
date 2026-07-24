@@ -55,12 +55,14 @@ def test_internal_value_error_returns_safe_500_and_validation_stays_4xx() -> Non
             raise ValueError("internal-secret-value")
 
     app.dependency_overrides[dependencies.get_tool_calling_service] = lambda: ExplodingToolService()
+    app.dependency_overrides[dependencies.get_agent_service] = lambda: lambda **_kwargs: None
     try:
         client = TestClient(app, raise_server_exceptions=False)
-        failed = client.post("/api/v1/chat/ask", json={"question": "Review this clause."})
+        failed = client.post("/api/v1/chat/ask", json={"question": "审查这个条款。"})
         invalid = client.post("/api/v1/chat/ask", json={"question": ""})
     finally:
         app.dependency_overrides.pop(dependencies.get_tool_calling_service, None)
+        app.dependency_overrides.pop(dependencies.get_agent_service, None)
 
     assert failed.status_code == 500
     assert failed.json()["code"] == "internal_error"
