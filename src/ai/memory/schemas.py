@@ -139,9 +139,9 @@ class MemoryUpdate:
 
     key: str | None = None
     content: str | None = None
-    value_json: dict[str, Any] | None | _UnsetType = UNSET
+    value_json: dict[str, Any] | _UnsetType | None = UNSET
     source: MemorySource | None = None
     confidence: float | None = None
-    expires_at: datetime | None | _UnsetType = UNSET
+    expires_at: datetime | _UnsetType | None = UNSET
     visibility: MemoryVisibility | None = None
     status: MemoryStatus | None = None
