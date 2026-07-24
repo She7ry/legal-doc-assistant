@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ai.rag.evaluation.metrics import (
     SourceCandidate,
     aggregate_scores,
@@ -171,8 +173,12 @@ def test_parse_min_score_requires_metric_and_numeric_value() -> None:
 
 def test_eval_datasets_are_chinese_only() -> None:
     root = Path(__file__).resolve().parents[1]
-    rag = json.loads((root / "data/eval/eval_dataset.json").read_text(encoding="utf-8"))
-    agent = json.loads((root / "data/eval/agent_eval_dataset.json").read_text(encoding="utf-8"))
+    rag_path = root / "data/eval/eval_dataset.json"
+    agent_path = root / "data/eval/agent_eval_dataset.json"
+    if not rag_path.exists() or not agent_path.exists():
+        pytest.skip("Local eval datasets are not versioned.")
+    rag = json.loads(rag_path.read_text(encoding="utf-8"))
+    agent = json.loads(agent_path.read_text(encoding="utf-8"))
 
     sections = []
     for document in DOCUMENTS:

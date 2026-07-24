@@ -23,7 +23,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -c constraints-py311.txt -e .
+python -m pip install -e .
 Copy-Item .env.example .env
 
 npm.cmd --prefix frontend install
@@ -43,12 +43,12 @@ npm.cmd --prefix frontend run dev
 - API 文档：http://127.0.0.1:8000/docs
 - 健康检查：http://127.0.0.1:8000/health
 
-具体可选项见 `.env.example`。
+其余配置使用代码默认值。
 
 中文扫描版 PDF 需要额外安装 Tesseract（含 `chi_sim` 中文语言包）和 Poppler，然后安装 OCR 可选依赖并启用配置：
 
 ```powershell
-python -m pip install -c constraints-py311.txt -e ".[ocr]"
+python -m pip install -e ".[ocr]"
 # .env
 DOC_ASSISTANT_PDF_OCR_ENABLED=true
 DOC_ASSISTANT_PDF_OCR_LANG=chi_sim+eng
@@ -76,14 +76,8 @@ data/eval/              中文合成评测集与文档样本
 ## 开发检查
 
 ```powershell
-python -m pip install -c constraints-py311.txt -e ".[dev]"
+python -m pip install -e ".[dev]"
 python -m pytest
 ruff check .
 npm.cmd --prefix frontend run build
 ```
-
-## Agent 可观测性与评估
-
-Agent 运行使用 LangSmith 记录根任务及其模型、工具和 LangGraph 子运行；离线评估使用版本化 Dataset、Experiment 与 LLM-as-Judge，衡量任务完成率、准确性和效率，不评价用户满意度。
-
-配置、数据边界和手动评估流程见 [OBSERVABILITY.md](OBSERVABILITY.md)。
